@@ -1,0 +1,18 @@
+# Visual Studio / C#
+[Bb]in/
+[Oo]bj/
+
+# Rider / IDEs
+.idea/
+.vs/
+*.user
+
+# Unity / KSP specific
+*.suo
+*.csproj.user
+*.dll
+*.mdb
+*.pdb
+
+# Keep the build script
+!build.sh

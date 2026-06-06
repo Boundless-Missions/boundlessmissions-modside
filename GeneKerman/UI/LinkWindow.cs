@@ -1,0 +1,193 @@
+/*
+ * UI/LinkWindow.cs – First-time account linking window.
+ *
+ * Shows a text field for the 6-digit code and a "Link Account" button.
+ * Appears when the user clicks the toolbar button while not linked.
+ */
+
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace GeneKerman.UI
+{
+    public class LinkWindow
+    {
+        private Rect windowRect = new Rect(Screen.width / 2 - 200, Screen.height / 2 - 150, 400, 300);
+        private string linkCode = "";
+        private string statusMessage = "";
+        private bool isLinking;
+        private string serverUrlInput = "";
+        private bool showSettings;
+
+        private readonly int windowId = "GKLink".GetHashCode();
+
+        // Styles (lazy init)
+        private GUIStyle titleStyle;
+        private GUIStyle boxStyle;
+        private GUIStyle codeFieldStyle;
+        private GUIStyle buttonStyle;
+        private GUIStyle statusStyle;
+        private GUIStyle labelStyle;
+        private bool stylesReady;
+
+        public void Draw()
+        {
+            if (GKSkin.NeedsRebuild())
+                stylesReady = false;
+
+            windowRect = GUILayout.Window(windowId, windowRect, DrawWindowContent, "",
+                GUIStyle.none, GUILayout.Width(400), GUILayout.Height(300));
+        }
+
+        private void InitStyles()
+        {
+            if (stylesReady) return;
+
+            titleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 20,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                normal = { textColor = new Color(0.2f, 0.9f, 0.4f) }
+            };
+
+            boxStyle = new GUIStyle(GUI.skin.box)
+            {
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.12f, 0.12f, 0.16f, 0.95f)) },
+                padding = new RectOffset(20, 20, 15, 15)
+            };
+
+            codeFieldStyle = new GUIStyle(GUI.skin.textField)
+            {
+                fontSize = 28,
+                fontStyle = FontStyle.Bold,
+                alignment = TextAnchor.MiddleCenter,
+                fixedHeight = 50,
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.12f, 0.9f)), textColor = Color.white },
+                focused = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.3f, 0.15f, 0.9f)), textColor = Color.white }
+            };
+
+            buttonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = 16,
+                fontStyle = FontStyle.Bold,
+                fixedHeight = 40,
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.15f, 0.6f, 0.3f, 0.9f)), textColor = Color.white },
+                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.7f, 0.4f, 0.9f)), textColor = Color.white },
+                active = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.5f, 0.25f, 0.9f)), textColor = Color.white }
+            };
+
+            statusStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 12,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true
+            };
+
+            labelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 13,
+                alignment = TextAnchor.MiddleCenter,
+                wordWrap = true,
+                normal = { textColor = new Color(0.7f, 0.7f, 0.7f) }
+            };
+
+            stylesReady = true;
+        }
+
+        private void DrawWindowContent(int id)
+        {
+            InitStyles();
+
+            GUILayout.BeginVertical(boxStyle);
+
+            // Title
+            GUILayout.Label("🎮 Gene Kerman — Link KSP", titleStyle);
+            GUILayout.Space(10);
+
+            // Instructions
+            GUILayout.Label(
+                "1. In Discord, type /g linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
+                labelStyle
+            );
+            GUILayout.Space(15);
+
+            // Code input
+            GUI.SetNextControlName("LinkCodeField");
+            linkCode = GUILayout.TextField(linkCode, 6, codeFieldStyle);
+
+            GUILayout.Space(10);
+
+            // Link button
+            GUI.enabled = !isLinking && linkCode.Length == 6;
+            if (GUILayout.Button(isLinking ? "Linking..." : "🔗 Link Account", buttonStyle))
+            {
+                DoLink();
+            }
+            GUI.enabled = true;
+
+            // Status message
+            if (!string.IsNullOrEmpty(statusMessage))
+            {
+                GUILayout.Space(5);
+                statusStyle.normal.textColor = statusMessage.StartsWith("✅") ? new Color(0.2f, 0.9f, 0.4f) : new Color(0.9f, 0.3f, 0.3f);
+                GUILayout.Label(statusMessage, statusStyle);
+            }
+
+            GUILayout.Space(10);
+
+            // Server URL settings toggle
+            if (GUILayout.Button(showSettings ? "▼ Settings" : "▶ Settings", GUI.skin.label))
+                showSettings = !showSettings;
+
+            if (showSettings)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Server:", GUILayout.Width(55));
+                if (string.IsNullOrEmpty(serverUrlInput))
+                    serverUrlInput = GeneKermanMod.Instance.Api.ServerUrl;
+                serverUrlInput = GUILayout.TextField(serverUrlInput);
+                if (GUILayout.Button("Set", GUILayout.Width(40)))
+                {
+                    GeneKermanMod.Instance.Api.SetServerUrl(serverUrlInput);
+                    statusMessage = "Server URL updated.";
+                }
+                GUILayout.EndHorizontal();
+            }
+
+            GUILayout.Space(5);
+
+            // Close button
+            if (GUILayout.Button("Close", GUILayout.Height(25)))
+            {
+                GeneKermanMod.Instance.ShowLinkWindow = false;
+            }
+
+            GUILayout.EndVertical();
+
+            GUI.DragWindow();
+        }
+
+        private void DoLink()
+        {
+            isLinking = true;
+            statusMessage = "Linking...";
+
+            GeneKermanMod.Instance.RunCoroutine(
+                GeneKermanMod.Instance.Api.LinkAccount(linkCode, (ok, data, err) =>
+                {
+                    isLinking = false;
+                    if (ok)
+                    {
+                        statusMessage = "✅ Linked as " + MiniJSON.GetString(data, "username") + "!";
+                        GeneKermanMod.Instance.OnAccountLinked(data);
+                    }
+                    else
+                    {
+                        statusMessage = "❌ " + (err ?? "Link failed. Check the code and try again.");
+                    }
+                })
+            );
+        }
+    }
+}

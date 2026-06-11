@@ -49,6 +49,10 @@
       <HintPath>$(ManagedPath)/UnityEngine.UIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedPath)/UnityEngine.UI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="UnityEngine.UnityWebRequestModule">
       <HintPath>$(ManagedPath)/UnityEngine.UnityWebRequestModule.dll</HintPath>
       <Private>false</Private>

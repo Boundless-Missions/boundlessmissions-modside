@@ -14,6 +14,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEngine;
 
 namespace GeneKerman.UI
@@ -51,20 +52,24 @@ namespace GeneKerman.UI
         // Submission
         private bool isSubmitting;
         private string screenshotPath;
+        private bool includeModlist = true;
         private bool screenshotTaken;
 
         // Validation
         private bool sceneValid;       // Are we in the correct scene for this mission type?
         private bool vesselValid;      // Does the vessel match required situation/body?
-        private string validationMsg;  // Why validation failed
+        private string validationMsg = "";  // Why validation failed
+        private string requiredModlist;
+        private HashSet<string> allowedMods;
+        private List<string> excludePaths;
 
         // Styles
-        private GUIStyle windowStyle, headerStyle, boxStyle, labelStyle, valueStyle;
+        private GUIStyle windowStyle, headerStyle, boxStyle, labelStyle, valueStyle, checkboxStyle;
         private GUIStyle submitBtnStyle, cancelBtnStyle, errorStyle, successStyle;
         private bool stylesReady;
 
         public void Open(string contractId, string mission,
-            string type = "active_vessel", string situation = "", string body = "")
+            string type = "active_vessel", string situation = "", string body = "", string modlist = "")
         {
             ContractId = contractId;
             ContractMission = mission;
@@ -75,6 +80,21 @@ namespace GeneKerman.UI
             isSubmitting = false;
             statusMsg = "";
             screenshotTaken = false;
+            
+            requiredModlist = modlist;
+            allowedMods = null;
+            excludePaths = null;
+            if (!string.IsNullOrEmpty(requiredModlist))
+            {
+                allowedMods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                excludePaths = new List<string>();
+                foreach (var token in requiredModlist.Split(','))
+                {
+                    string t = token.Trim();
+                    if (t.StartsWith("-")) excludePaths.Add(t.Substring(1));
+                    else allowedMods.Add(t);
+                }
+            }
 
             Validate();
         }
@@ -147,6 +167,14 @@ namespace GeneKerman.UI
                 }
             }
 
+            // Check part legality — list every offending part, not just the first.
+            string illegalParts = FindIllegalParts(FlightGlobals.ActiveVessel?.parts);
+            if (illegalParts != null)
+            {
+                vesselValid = false;
+                issues.Add(illegalParts);
+            }
+
             if (issues.Count > 0)
                 validationMsg = string.Join("\n", issues);
         }
@@ -185,6 +213,7 @@ namespace GeneKerman.UI
             };
 
             labelStyle = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.6f, 0.6f, 0.6f) } };
+            checkboxStyle = new GUIStyle(GUI.skin.toggle) { fontSize = 11, normal = { textColor = new Color(0.65f, 0.7f, 0.75f) } };
             valueStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
 
             errorStyle = new GUIStyle(GUI.skin.label)
@@ -262,6 +291,12 @@ namespace GeneKerman.UI
 
             GUILayout.EndScrollView();
 
+            // Modlist Toggle
+            GUILayout.Space(5);
+            GUILayout.BeginHorizontal();
+            includeModlist = GUILayout.Toggle(includeModlist, " Attach my active Modlist", checkboxStyle);
+            GUILayout.EndHorizontal();
+
             // Status
             if (!string.IsNullOrEmpty(statusMsg))
             {
@@ -333,6 +368,15 @@ namespace GeneKerman.UI
             editorCraftMass = 0;
             editorCraftCost = 0;
 
+            // Re-scan part legality from scratch each capture. This method is also called
+            // standalone via the "Refresh Craft Data" button (not just through Validate),
+            // so reset validity here or a fixed craft would stay flagged.
+            if (allowedMods != null)
+            {
+                vesselValid = true;
+                if (validationMsg.StartsWith("❌ Illegal part")) validationMsg = "";
+            }
+
             try
             {
                 var ship = EditorLogic.fetch?.ship;
@@ -347,6 +391,14 @@ namespace GeneKerman.UI
                         {
                             editorCraftMass += part.mass + part.GetResourceMass();
                             editorCraftCost += part.partInfo?.cost ?? 0f;
+                        }
+
+                        // List every part that violates the contract's restriction.
+                        string illegalParts = FindIllegalParts(ship.parts);
+                        if (illegalParts != null)
+                        {
+                            vesselValid = false;
+                            validationMsg = illegalParts;
                         }
                     }
 
@@ -393,6 +445,15 @@ namespace GeneKerman.UI
             else
                 GUILayout.Label($"⚠ Save your craft first!", errorStyle);
             GUILayout.EndVertical();
+
+            // Explain a greyed-out Submit: list the parts that break the restriction.
+            if (!vesselValid && !string.IsNullOrEmpty(validationMsg))
+            {
+                GUILayout.Space(5);
+                GUILayout.BeginVertical(boxStyle);
+                GUILayout.Label(validationMsg, errorStyle);
+                GUILayout.EndVertical();
+            }
 
             GUILayout.Space(5);
             if (GUILayout.Button("🔄 Refresh Craft Data", GUILayout.Height(26)))
@@ -494,7 +555,10 @@ namespace GeneKerman.UI
             if (!screenshotTaken) return false;
 
             if (missionType == "craft_build")
-                return !string.IsNullOrEmpty(editorCraftPath);
+                // vesselValid carries the part-legality result from CaptureEditorCraft();
+                // without it an illegal part (e.g. a Squad expansion part on a restricted
+                // contract) would pass the gate and submit anyway.
+                return !string.IsNullOrEmpty(editorCraftPath) && vesselValid;
 
             // active_vessel: need vessel data AND matching state
             return activeVessel != null && vesselValid;
@@ -569,9 +633,26 @@ namespace GeneKerman.UI
                 }
             }
 
+            string modlist = null;
+            if (includeModlist)
+            {
+                var folders = new HashSet<string>();
+                foreach (var p in PartLoader.LoadedPartsList)
+                {
+                    if (!string.IsNullOrEmpty(p.partUrl))
+                        folders.Add(p.partUrl.Split('/')[0]);
+                }
+                modlist = string.Join(",", folders.ToArray());
+            }
+
+            // Mod folders actually used by this craft, so the server can re-check the
+            // submission against the contract's part restriction independently of the
+            // client-side gate.
+            string usedModlist = CollectUsedModFolders();
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
-                vesselNodeData, screenshots, ssNames,
+                vesselNodeData, screenshots, ssNames, modlist, usedModlist,
                 (ok, resp, status) =>
                 {
                     isSubmitting = false;
@@ -587,6 +668,7 @@ namespace GeneKerman.UI
                             int coins = MiniJSON.GetInt(result, "coins_awarded");
                             statusMsg = $"✅ {message} +{coins} KCoins, +{xp} XP";
                             GeneKermanMod.Instance.ShowNotification("✅ Mission Approved!", $"+{coins} KCoins, +{xp} XP");
+                            EditorPartEnforcer.Instance?.StopEnforcing();
                         }
                         else if (reviewStatus == "refused")
                         {
@@ -594,7 +676,9 @@ namespace GeneKerman.UI
                         }
                         else
                         {
+                            // Submitted and awaiting review — clear enforcer so VAB is unlocked
                             statusMsg = $"✅ {message}";
+                            EditorPartEnforcer.Instance?.StopEnforcing();
                         }
                     }
                     else
@@ -603,6 +687,73 @@ namespace GeneKerman.UI
                     }
                 }
             );
+        }
+
+
+        private string GetModFolder(string partUrl)
+        {
+            if (string.IsNullOrEmpty(partUrl)) return null;
+            string[] parts = partUrl.Split('/');
+            if (parts.Length > 0) return parts[0];
+            return null;
+        }
+
+        // Builds a user-facing list of every part that violates the contract's part
+        // restriction, so the player knows exactly why Submit is greyed out. Returns
+        // null when there's no restriction or all parts are allowed.
+        private string FindIllegalParts(System.Collections.Generic.IEnumerable<Part> parts)
+        {
+            if (allowedMods == null || parts == null) return null;
+
+            var bad = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var part in parts)
+            {
+                var info = part?.partInfo;
+                if (info == null || IsPartAllowed(info.partUrl)) continue;
+                string label = $"• {info.title} (from {GetModFolder(info.partUrl)})";
+                if (seen.Add(label)) bad.Add(label);
+            }
+
+            if (bad.Count == 0) return null;
+            return "❌ Illegal parts for this contract:\n" + string.Join("\n", bad.ToArray());
+        }
+
+        // Distinct top-level mod folders used by the craft being submitted (editor ship
+        // for craft builds, active vessel otherwise). Sent to the server for validation.
+        private string CollectUsedModFolders()
+        {
+            var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            System.Collections.Generic.IEnumerable<Part> parts = null;
+            if (missionType == "craft_build")
+                parts = EditorLogic.fetch?.ship?.parts;
+            else
+                parts = FlightGlobals.ActiveVessel?.parts;
+
+            if (parts == null) return null;
+
+            foreach (var part in parts)
+            {
+                string url = part?.partInfo?.partUrl;
+                if (!string.IsNullOrEmpty(url))
+                    folders.Add(url.Split('/')[0]);
+            }
+
+            return folders.Count > 0 ? string.Join(",", folders.ToArray()) : null;
+        }
+
+        private bool IsPartAllowed(string partUrl)
+        {
+            if (allowedMods == null) return true;
+            string folder = GetModFolder(partUrl);
+            if (string.IsNullOrEmpty(folder)) return true;
+            if (!allowedMods.Contains(folder)) return false;
+            if (excludePaths != null)
+                foreach (var excl in excludePaths)
+                    if ((partUrl ?? "").StartsWith(excl, StringComparison.OrdinalIgnoreCase))
+                        return false;
+            return true;
         }
     }
 }

@@ -43,32 +43,55 @@ namespace GeneKerman
 
         public override void OnLoad(ConfigNode node)
         {
+            // Never let an exception escape into KSP's ScenarioRunner.AddModule — a throw
+            // here logs "Exception loading ScenarioModule GKContractScenario" and drops
+            // our persisted state. Guard the node and collections defensively.
+            if (activeContracts == null) activeContracts = new Dictionary<string, string>();
+            if (importedVessels == null) importedVessels = new HashSet<string>();
             activeContracts.Clear();
-            var mappings = node.GetNode("CONTRACT_MAPPINGS");
-            if (mappings != null)
-            {
-                foreach (ConfigNode.Value val in mappings.values)
-                    activeContracts[val.name] = val.value;
-            }
-
             importedVessels.Clear();
-            var imports = node.GetNode("IMPORTED_VESSELS");
-            if (imports != null)
+
+            if (node == null) return;
+
+            try
             {
-                foreach (ConfigNode.Value val in imports.values)
-                    importedVessels.Add(val.value);
+                var mappings = node.GetNode("CONTRACT_MAPPINGS");
+                if (mappings != null)
+                {
+                    foreach (ConfigNode.Value val in mappings.values)
+                        activeContracts[val.name] = val.value;
+                }
+
+                var imports = node.GetNode("IMPORTED_VESSELS");
+                if (imports != null)
+                {
+                    foreach (ConfigNode.Value val in imports.values)
+                        importedVessels.Add(val.value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] GKContractScenario.OnLoad failed: {ex.Message}");
             }
         }
 
         public override void OnSave(ConfigNode node)
         {
-            var mappings = node.AddNode("CONTRACT_MAPPINGS");
-            foreach (var kvp in activeContracts)
-                mappings.AddValue(kvp.Key, kvp.Value);
+            if (node == null) return;
+            try
+            {
+                var mappings = node.AddNode("CONTRACT_MAPPINGS");
+                foreach (var kvp in (activeContracts ?? new Dictionary<string, string>()))
+                    mappings.AddValue(kvp.Key, kvp.Value);
 
-            var imports = node.AddNode("IMPORTED_VESSELS");
-            foreach (var cid in importedVessels)
-                imports.AddValue("contract_id", cid);
+                var imports = node.AddNode("IMPORTED_VESSELS");
+                foreach (var cid in (importedVessels ?? new HashSet<string>()))
+                    imports.AddValue("contract_id", cid);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] GKContractScenario.OnSave failed: {ex.Message}");
+            }
         }
 
         public bool HasImportedVessel(string contractId)

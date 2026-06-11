@@ -320,9 +320,9 @@ namespace GeneKerman
         }
 
         public void OpenSubmitWindow(string contractId, string mission,
-            string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "")
+            string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "", string requiredModlist = "")
         {
-            submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody);
+            submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist);
         }
 
         public void RunCoroutine(IEnumerator routine)
@@ -330,9 +330,9 @@ namespace GeneKerman
             StartCoroutine(routine);
         }
 
-        public void OpenCreateContractWindow(int balance)
+        public void OpenCreateContractWindow(int balance, string userId = "")
         {
-            createContractWindow.Open(balance);
+            createContractWindow.Open(balance, userId);
         }
     }
 }

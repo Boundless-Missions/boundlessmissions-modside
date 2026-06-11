@@ -8,6 +8,8 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using UnityEngine;
 
 namespace GeneKerman.UI
@@ -34,18 +36,32 @@ namespace GeneKerman.UI
 
         // User balance
         private int currentBalance;
+        private string currentUserId = "";
 
         // Status
         private string statusMsg = "";
         private bool isSuccess;
         private bool isSending;
 
+        // Modlist restriction mode
+        // 0 = None, 1 = Squad Only, 2 = Squad + DLC, 3 = Active Modlist, 4 = Janitor's Closet
+        private int modlistMode = 0;
+        private static readonly string[] ModlistLabels = { "None", "Stock Only", "Stock + DLC", "My Modlist", "Janitor's Closet" };
+        private static readonly string[] ModlistDescs = {
+            "No part restrictions.",
+            "Squad parts only — no Making History / Breaking Ground.",
+            "All Squad parts including official DLC expansions.",
+            "All mods currently installed on your game.",
+            "Only mods visible in your Janitor's Closet profile.",
+        };
+        private bool? _jcAvailable; // null = not yet checked
+
         // Scroll
         private Vector2 corpScrollPos;
         private Vector2 formScrollPos;
 
         // Styles
-        private GUIStyle windowStyle, headerStyle, labelStyle, valueStyle;
+        private GUIStyle windowStyle, headerStyle, labelStyle, valueStyle, checkboxStyle;
         private GUIStyle corpBtnStyle, corpSelectedStyle, textFieldStyle, textAreaStyle;
         private GUIStyle sendBtnStyle, cancelBtnStyle, errorStyle, successStyle;
         private bool stylesReady;
@@ -57,10 +73,15 @@ namespace GeneKerman.UI
             public string corpName;
         }
 
-        public void Open(int balance)
+        public void Open(int balance, string userId = "")
         {
             IsVisible = true;
             currentBalance = balance;
+            if (userId != currentUserId)
+            {
+                currentUserId = userId;
+                corpsLoaded = false; // re-filter with new identity
+            }
             statusMsg = "";
             isSending = false;
             missionText = "";
@@ -78,6 +99,100 @@ namespace GeneKerman.UI
         public void Close()
         {
             IsVisible = false;
+        }
+
+        // ── Modlist Helpers ─────────────────────────────────────────────────
+
+        private bool IsJanitorsClosetAvailable()
+        {
+            if (_jcAvailable.HasValue) return _jcAvailable.Value;
+            foreach (var asm in AssemblyLoader.loadedAssemblies)
+            {
+                if (asm.name.IndexOf("JanitorsCloset", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    _jcAvailable = true;
+                    return true;
+                }
+            }
+            _jcAvailable = false;
+            return false;
+        }
+
+        private string BuildModlist()
+        {
+            switch (modlistMode)
+            {
+                case 0: return null;
+                case 1: return "Squad,-Squad/Expansions"; // Squad folder minus MH/BG subdirs
+                case 2: return "Squad";                  // Full Squad folder including DLC
+                case 3:
+                {
+                    var folders = new HashSet<string>();
+                    foreach (var p in PartLoader.LoadedPartsList)
+                        if (!string.IsNullOrEmpty(p.partUrl))
+                            folders.Add(p.partUrl.Split('/')[0]);
+                    return string.Join(",", folders.ToArray());
+                }
+                case 4:
+                    return ReadJanitorsClosetModlist();
+                default:
+                    return null;
+            }
+        }
+
+        // Reads the set of mod folders currently visible under Janitor's Closet's mod
+        // filter. JC registers its mod-level filter into KSP's own
+        // EditorPartList.ExcludeFilters under the id "Mod Filter", so we read it through
+        // KSP's core API rather than reflecting into JC internals (whose layout varies
+        // by version). The filter's FilterCriteria(part) returns true when the part is
+        // kept/visible, so hiding a mod (e.g. Squad expansion) drops its folder here too.
+        //
+        // NOTE: ExcludeFilters only exists while in the VAB/SPH editor — returns null
+        // otherwise so the caller can surface that this must be set from the editor.
+        private string ReadJanitorsClosetModlist()
+        {
+            try
+            {
+                var editorList = KSP.UI.Screens.EditorPartList.Instance;
+                if (editorList == null || editorList.ExcludeFilters == null)
+                {
+                    Debug.LogWarning("[GeneKerman] EditorPartList not available — open the VAB/SPH to read the JC mod filter.");
+                    return null;
+                }
+
+                EditorPartListFilter<AvailablePart> modFilter = editorList.ExcludeFilters["Mod Filter"];
+                if (modFilter == null || modFilter.FilterCriteria == null)
+                {
+                    Debug.LogWarning("[GeneKerman] JC 'Mod Filter' not registered in EditorPartList.ExcludeFilters.");
+                    return null;
+                }
+
+                var criteria = modFilter.FilterCriteria; // true == part kept (mod allowed)
+                var visibleFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var part in PartLoader.LoadedPartsList)
+                {
+                    if (part == null || string.IsNullOrEmpty(part.partUrl)) continue;
+                    bool visible;
+                    try { visible = criteria(part); }
+                    catch { continue; }
+                    if (visible)
+                        visibleFolders.Add(part.partUrl.Split('/')[0]);
+                }
+
+                if (visibleFolders.Count > 0)
+                {
+                    Debug.Log($"[GeneKerman] JC modlist via 'Mod Filter' criteria: {visibleFolders.Count} visible folders");
+                    return string.Join(",", visibleFolders.ToArray());
+                }
+
+                Debug.LogWarning("[GeneKerman] JC 'Mod Filter' matched no visible parts.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] JC modlist read failed: {ex.Message}\n{ex.StackTrace}");
+            }
+
+            return null;
         }
 
         private void LoadCorps()
@@ -100,9 +215,12 @@ namespace GeneKerman.UI
                                 var d = item as Dictionary<string, object>;
                                 if (d != null)
                                 {
+                                    string oid = MiniJSON.GetString(d, "owner_id", "");
+                                    if (!string.IsNullOrEmpty(currentUserId) && oid == currentUserId)
+                                        continue;
                                     corps.Add(new CorpEntry
                                     {
-                                        ownerId = MiniJSON.GetString(d, "owner_id", ""),
+                                        ownerId = oid,
                                         ownerName = MiniJSON.GetString(d, "owner_name", "Unknown"),
                                         corpName = MiniJSON.GetString(d, "corp_name", "Unknown"),
                                     });
@@ -154,6 +272,12 @@ namespace GeneKerman.UI
                 normal = { textColor = new Color(0.7f, 0.8f, 0.9f) },
             };
 
+            checkboxStyle = new GUIStyle(GUI.skin.toggle)
+            {
+                fontSize = 12,
+                normal = { textColor = new Color(0.7f, 0.8f, 0.9f) },
+            };
+
             valueStyle = new GUIStyle(GUI.skin.label)
             {
                 fontSize = 12, fontStyle = FontStyle.Bold,
@@ -178,9 +302,11 @@ namespace GeneKerman.UI
 
             textFieldStyle = new GUIStyle(GUI.skin.textField)
             {
-                fontSize = 13, padding = new RectOffset(8, 8, 4, 4),
+                fontSize = 13, padding = new RectOffset(8, 8, 4, 4), border = new RectOffset(0, 0, 0, 0),
                 normal = { textColor = Color.white, background = GKSkin.MakeTex(2, 2, new Color(0.06f, 0.08f, 0.12f, 0.95f)) },
                 focused = { textColor = Color.white, background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.12f, 0.18f, 0.95f)) },
+                hover = { textColor = Color.white, background = GKSkin.MakeTex(2, 2, new Color(0.07f, 0.10f, 0.15f, 0.95f)) },
+                active = { textColor = Color.white, background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.12f, 0.18f, 0.95f)) },
             };
 
             textAreaStyle = new GUIStyle(textFieldStyle)
@@ -311,6 +437,31 @@ namespace GeneKerman.UI
                 GUILayout.Space(4);
             }
 
+            // ── Modlist Restriction ──
+            GUILayout.Space(6);
+            GUILayout.Label("Part Restriction:", labelStyle);
+            GUILayout.Space(2);
+
+            bool jcOk = IsJanitorsClosetAvailable();
+
+            for (int i = 0; i < ModlistLabels.Length; i++)
+            {
+                bool disabled = (i == 4 && !jcOk);
+                GUI.enabled = !disabled;
+
+                GUILayout.BeginHorizontal();
+                bool selected = GUILayout.Toggle(modlistMode == i, "", checkboxStyle, GUILayout.Width(18));
+                if (selected) modlistMode = i;
+
+                string label = ModlistLabels[i];
+                if (disabled) label += " (not installed)";
+                GUILayout.Label(label, valueStyle, GUILayout.Width(160));
+                GUILayout.Label(ModlistDescs[i], labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUI.enabled = true;
+            }
+
             GUILayout.EndScrollView();
 
             GUILayout.Space(8);
@@ -383,13 +534,24 @@ namespace GeneKerman.UI
                 return;
             }
 
+            string modlist = BuildModlist();
+
+            // Janitor's Closet mode needs the editor's part filter, which only exists in
+            // the VAB/SPH. Don't silently send an unrestricted contract if we couldn't read it.
+            if (modlistMode == 4 && string.IsNullOrEmpty(modlist))
+            {
+                statusMsg = "❌ Open the VAB or SPH to capture the Janitor's Closet filter.";
+                isSuccess = false;
+                return;
+            }
+
             var corp = corps[selectedCorpIndex];
             isSending = true;
             statusMsg = "Sending contract...";
 
             GeneKermanMod.Instance.StartCoroutine(
                 GeneKermanMod.Instance.Api.CreateContract(
-                    corp.ownerId, missionText, payment, fine, dueDateText,
+                    corp.ownerId, missionText, payment, fine, dueDateText, modlist,
                     (ok, data, error) =>
                     {
                         isSending = false;

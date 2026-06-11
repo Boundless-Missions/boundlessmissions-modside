@@ -120,7 +120,7 @@ namespace GeneKerman.UI
 
             // Link button
             GUI.enabled = !isLinking && linkCode.Length == 6;
-            if (GUILayout.Button(isLinking ? "Linking..." : "🔗 Link Account", buttonStyle))
+            if (GUILayout.Button(isLinking ? "Linking..." : "[Link] Link Account", buttonStyle))
             {
                 DoLink();
             }
@@ -130,7 +130,7 @@ namespace GeneKerman.UI
             if (!string.IsNullOrEmpty(statusMessage))
             {
                 GUILayout.Space(5);
-                statusStyle.normal.textColor = statusMessage.StartsWith("✅") ? new Color(0.2f, 0.9f, 0.4f) : new Color(0.9f, 0.3f, 0.3f);
+                statusStyle.normal.textColor = statusMessage.StartsWith("(Ok)") ? new Color(0.2f, 0.9f, 0.4f) : new Color(0.9f, 0.3f, 0.3f);
                 GUILayout.Label(statusMessage, statusStyle);
             }
 
@@ -146,8 +146,11 @@ namespace GeneKerman.UI
                 GUILayout.Label("Server:", GUILayout.Width(55));
                 if (string.IsNullOrEmpty(serverUrlInput))
                     serverUrlInput = GeneKermanMod.Instance.Api.ServerUrl;
-                serverUrlInput = GUILayout.TextField(serverUrlInput);
-                if (GUILayout.Button("Set", GUILayout.Width(40)))
+
+                
+
+                serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
+                if (GUILayout.Button("Set", GUILayout.Width(40), GUILayout.Height(24)))
                 {
                     GeneKermanMod.Instance.Api.SetServerUrl(serverUrlInput);
                     statusMessage = "Server URL updated.";
@@ -179,12 +182,12 @@ namespace GeneKerman.UI
                     isLinking = false;
                     if (ok)
                     {
-                        statusMessage = "✅ Linked as " + MiniJSON.GetString(data, "username") + "!";
+                        statusMessage = "(Ok) Linked as " + MiniJSON.GetString(data, "username") + "!";
                         GeneKermanMod.Instance.OnAccountLinked(data);
                     }
                     else
                     {
-                        statusMessage = "❌ " + (err ?? "Link failed. Check the code and try again.");
+                        statusMessage = "(No) " + (err ?? "Link failed. Check the code and try again.");
                     }
                 })
             );

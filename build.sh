@@ -39,12 +39,21 @@ mkdir -p "$GAMEDATA_SRC/Textures"
 cp "$PROJECT_DIR/bin/GeneKerman.dll" "$GAMEDATA_SRC/Plugins/"
 echo "  → Copied GeneKerman.dll"
 
+# Copy Icon
+if [ -f "$SCRIPT_DIR/logo_38.png" ]; then
+    cp "$SCRIPT_DIR/logo_38.png" "$GAMEDATA_SRC/Textures/icon_toolbar.png"
+    echo "  → Copied custom toolbar icon (logo_38.png)"
+elif [ -f "$SCRIPT_DIR/logo.png" ]; then
+    cp "$SCRIPT_DIR/logo.png" "$GAMEDATA_SRC/Textures/icon_toolbar.png"
+    echo "  → Copied custom toolbar icon (logo.png)"
+fi
+
 # Copy default settings if not exists
 if [ ! -f "$GAMEDATA_SRC/PluginData/settings.cfg" ]; then
     cat > "$GAMEDATA_SRC/PluginData/settings.cfg" << 'EOF'
 GeneKerman
 {
-    serverUrl = http://localhost:5850
+    serverUrl = http://localhost:5022
     checkInterval = 600
     enableNotifications = true
     enableKVV = true

@@ -56,7 +56,7 @@ namespace GeneKerman
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
                         string host = gk.GetValue("serverHost") ?? "localhost";
-                        string port = gk.GetValue("serverPort") ?? "5850";
+                        string port = gk.GetValue("serverPort") ?? "5022";
                         string protocol = gk.GetValue("serverProtocol") ?? "http";
                         serverUrl = $"{protocol}://{host}:{port}";
                         Debug.Log($"[GeneKerman] Settings loaded — server: {serverUrl}");
@@ -64,13 +64,18 @@ namespace GeneKerman
                     }
                 }
             }
-            serverUrl = "http://localhost:5850";
+            serverUrl = "http://localhost:5022";
             Debug.Log($"[GeneKerman] Using default server: {serverUrl}");
         }
 
         public void SetServerUrl(string url)
         {
-            serverUrl = url.TrimEnd('/');
+            url = url.TrimEnd('/');
+            if (!url.StartsWith("http://") && !url.StartsWith("https://"))
+            {
+                url = "http://" + url;
+            }
+            serverUrl = url;
             SaveSettings();
         }
 
@@ -79,7 +84,7 @@ namespace GeneKerman
             // Parse the URL into components for ConfigNode-safe storage
             string protocol = "http";
             string host = "localhost";
-            string port = "5850";
+            string port = "5022";
 
             try
             {
@@ -184,6 +189,8 @@ namespace GeneKerman
             string vesselDataJson,
             string vesselNodeData,
             List<byte[]> screenshots, List<string> screenshotNames,
+            string modlist,
+            string usedModlist,
             ApiCallback callback)
         {
             string url = serverUrl + "/api/v1/contracts/" + contractId + "/submit";
@@ -227,6 +234,15 @@ namespace GeneKerman
                         name, "image/png"));
                 }
             }
+
+            // Modlist (contractor's installed mods — informational)
+            if (!string.IsNullOrEmpty(modlist))
+                form.Add(new MultipartFormDataSection("modlist", modlist));
+
+            // Mod folders actually used by the submitted craft — server validates
+            // these against the contract's required modlist.
+            if (!string.IsNullOrEmpty(usedModlist))
+                form.Add(new MultipartFormDataSection("used_modlist", usedModlist));
 
             using (var req = UnityWebRequest.Post(url, form))
             {
@@ -356,7 +372,7 @@ namespace GeneKerman
         }
 
         public IEnumerator CreateContract(string contractorId, string mission,
-            int payment, int fine, string dueDate, ApiCallback<Dictionary<string, object>> callback)
+            int payment, int fine, string dueDate, string modlist, ApiCallback<Dictionary<string, object>> callback)
         {
             var body = new Dictionary<string, object>
             {
@@ -366,6 +382,9 @@ namespace GeneKerman
                 { "fine", fine },
                 { "due_date", dueDate },
             };
+            if (!string.IsNullOrEmpty(modlist))
+                body.Add("modlist", modlist);
+            
             yield return Post("/api/v1/contracts/create", MiniJSON.Serialize(body), (ok, resp, status) =>
             {
                 if (!string.IsNullOrEmpty(resp))

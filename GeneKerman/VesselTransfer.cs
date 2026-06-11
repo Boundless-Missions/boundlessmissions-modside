@@ -97,9 +97,9 @@ namespace GeneKerman
                 return null;
             }
 
-            if (!HighLogic.LoadedSceneIsFlight)
+            if (HighLogic.LoadedScene != GameScenes.FLIGHT && HighLogic.LoadedScene != GameScenes.SPACECENTER && HighLogic.LoadedScene != GameScenes.TRACKSTATION)
             {
-                Debug.LogWarning("[GeneKerman] VesselTransfer.Import: You must be in the Flight scene to import a vessel.");
+                Debug.LogWarning("[GeneKerman] VesselTransfer.Import: You must be in the Flight, Space Center, or Tracking Station scene to import a vessel.");
                 return null;
             }
 
@@ -174,10 +174,19 @@ namespace GeneKerman
                 Debug.Log("[GeneKerman] Creating ProtoVessel...");
                 ProtoVessel protoVessel = new ProtoVessel(innerNode, HighLogic.CurrentGame);
 
-                Debug.Log("[GeneKerman] Loading ProtoVessel into flight state...");
-                protoVessel.Load(HighLogic.CurrentGame.flightState);
+                if (HighLogic.LoadedSceneIsFlight)
+                {
+                    Debug.Log("[GeneKerman] Loading ProtoVessel into flight state...");
+                    protoVessel.Load(HighLogic.CurrentGame.flightState);
+                }
+                else
+                {
+                    Debug.Log("[GeneKerman] Not in Flight scene. Injecting ProtoVessel directly into save data...");
+                    if (!HighLogic.CurrentGame.flightState.protoVessels.Contains(protoVessel))
+                        HighLogic.CurrentGame.flightState.protoVessels.Add(protoVessel);
+                }
 
-                Debug.Log($"[GeneKerman] ✅ Imported vessel '{vesselName}' with pid {newPidDashed}");
+                Debug.Log($"[GeneKerman] (Ok) Imported vessel '{vesselName}' with pid {newPidDashed}");
 
                 return vesselName;
             }

@@ -42,10 +42,36 @@ namespace GeneKerman.UI
         private GUIStyle mailSubjectStyle, mailAmountStyle, mailDateStyle;
         private bool stylesReady;
 
-        private readonly string[] tabNames = { "📋 Missions", "📜 Contracts", "👤 Profile", "🔔 Notifications" };
+        private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Notifications", "Settings" };
+        private string serverUrlInput = "";
+
+        // Trash state
+        private HashSet<string> trashedContracts = new HashSet<string>();
+        private bool showTrash = false;
+        private HashSet<string> collapsedWeeks = new HashSet<string>();
+
+        private void LoadTrash()
+        {
+            string path = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "trashed_contracts.txt");
+            trashedContracts.Clear();
+            if (System.IO.File.Exists(path))
+            {
+                foreach (string line in System.IO.File.ReadAllLines(path))
+                {
+                    if (!string.IsNullOrEmpty(line)) trashedContracts.Add(line.Trim());
+                }
+            }
+        }
+
+        private void SaveTrash()
+        {
+            string path = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "trashed_contracts.txt");
+            System.IO.File.WriteAllLines(path, new List<string>(trashedContracts).ToArray());
+        }
 
         public void OnOpen()
         {
+            LoadTrash();
             RefreshAll();
         }
 
@@ -78,10 +104,11 @@ namespace GeneKerman.UI
         {
             if (stylesReady) return;
 
-            windowStyle = new GUIStyle(GUI.skin.box)
+                        windowStyle = new GUIStyle(GUI.skin.box)
             {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.1f, 0.14f, 0.97f)) },
-                padding = new RectOffset(10, 10, 10, 10)
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.12f, 0.12f, 0.15f, 1f)) },
+                padding = new RectOffset(10, 10, 10, 10),
+                border = new RectOffset(0, 0, 0, 0)
             };
 
             tabStyle = new GUIStyle(GUI.skin.button)
@@ -106,10 +133,11 @@ namespace GeneKerman.UI
                 normal = { textColor = new Color(0.3f, 0.9f, 0.5f) }
             };
 
-            boxDarkStyle = new GUIStyle(GUI.skin.box)
+                        boxDarkStyle = new GUIStyle(GUI.skin.box)
             {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 0.9f)) },
-                padding = new RectOffset(10, 10, 8, 8), margin = new RectOffset(0, 0, 3, 3)
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 1f)) },
+                padding = new RectOffset(10, 10, 8, 8), margin = new RectOffset(0, 0, 3, 3),
+                border = new RectOffset(0, 0, 0, 0)
             };
 
             labelStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, normal = { textColor = new Color(0.6f, 0.6f, 0.6f) } };
@@ -152,13 +180,14 @@ namespace GeneKerman.UI
                 normal = { textColor = new Color(0.65f, 0.7f, 0.75f) },
             };
 
-            var rowBg = GKSkin.MakeTex(2, 2, new Color(0.09f, 0.09f, 0.13f, 0.85f));
+                        var rowBg = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.1f, 0.14f, 1f));
             mailRowStyle = new GUIStyle(GUI.skin.box)
             {
                 normal = { background = rowBg },
                 padding = new RectOffset(4, 4, 3, 3),
                 margin = new RectOffset(0, 0, 1, 1),
                 fixedHeight = 26,
+                border = new RectOffset(0, 0, 0, 0)
             };
 
             mailSenderStyle = new GUIStyle(GUI.skin.label)
@@ -190,6 +219,31 @@ namespace GeneKerman.UI
                 normal = { textColor = new Color(0.5f, 0.5f, 0.55f) },
             };
 
+            
+            GUI.skin.verticalScrollbar = new GUIStyle(GUI.skin.verticalScrollbar) {
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.1f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
+            };
+            GUI.skin.verticalScrollbarThumb = new GUIStyle(GUI.skin.verticalScrollbarThumb) {
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.25f, 1f)) },
+                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
+                active = { background = GKSkin.MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
+            };
+            
+            GUI.skin.button = new GUIStyle(GUI.skin.button) {
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.15f, 0.15f, 0.2f, 1f)) },
+                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
+                active = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0)
+            };
+            GUI.skin.textField = new GUIStyle(GUI.skin.textField) {
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 1f)), textColor = Color.white },
+                focused = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
+                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.09f, 0.1f, 0.14f, 1f)), textColor = Color.white },
+                active = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
+                border = new RectOffset(0, 0, 0, 0), padding = new RectOffset(5, 5, 5, 5)
+            };
             stylesReady = true;
         }
 
@@ -214,7 +268,7 @@ namespace GeneKerman.UI
             int unread = GeneKermanMod.Instance.UnreadNotifications;
             if (unread > 0)
             {
-                GUILayout.Label($"🔔 {unread}", new GUIStyle(GUI.skin.label) {
+                GUILayout.Label($" {unread}", new GUIStyle(GUI.skin.label) {
                     fontSize = 14, fontStyle = FontStyle.Bold,
                     normal = { textColor = new Color(1f, 0.8f, 0.2f) }
                 }, GUILayout.Width(40));
@@ -249,13 +303,14 @@ namespace GeneKerman.UI
                 case 1: DrawContractsTab(); break;
                 case 2: DrawProfileTab(); break;
                 case 3: DrawNotificationsTab(); break;
+                case 4: DrawSettingsTab(); break;
             }
             GUILayout.EndScrollView();
 
             // Status bar
             if (!string.IsNullOrEmpty(statusMsg) && Time.realtimeSinceStartup - statusTime < 5f)
             {
-                statusStyle.normal.textColor = statusMsg.StartsWith("✅") ? new Color(0.3f, 0.9f, 0.4f) : new Color(0.9f, 0.4f, 0.3f);
+                statusStyle.normal.textColor = statusMsg.StartsWith("(Ok)") ? new Color(0.3f, 0.9f, 0.4f) : new Color(0.9f, 0.4f, 0.3f);
                 GUILayout.Label(statusMsg, statusStyle);
             }
 
@@ -277,7 +332,7 @@ namespace GeneKerman.UI
             if (missions == null || missions.Count == 0)
             {
                 GUILayout.Label("No missions available.", labelStyle);
-                if (GUILayout.Button("🔄 Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
                     RefreshMissions();
                 return;
             }
@@ -295,7 +350,7 @@ namespace GeneKerman.UI
 
                 int diff = MiniJSON.GetInt(m, "difficulty");
                 GUIStyle style = diff <= 3 ? missionEasyStyle : diff <= 6 ? missionMedStyle : diff <= 8 ? missionHardStyle : missionExtremeStyle;
-                string diffLabel = diff <= 3 ? "🟢" : diff <= 6 ? "🟡" : diff <= 8 ? "🔴" : "⚫";
+                string diffLabel = diff <= 3 ? "(E)" : diff <= 6 ? "(M)" : diff <= 8 ? "(H)" : "(X)";
 
                 GUILayout.BeginVertical(style);
                 GUILayout.BeginHorizontal();
@@ -306,10 +361,12 @@ namespace GeneKerman.UI
                 GUILayout.Label($"⭐ {diff}/10  ·  +{MiniJSON.GetInt(m, "xp")} XP  ·  +{MiniJSON.GetInt(m, "coins")} KCoins  ·  Fine: {MiniJSON.GetInt(m, "fine")}", labelStyle);
                 GUILayout.EndVertical();
 
+                GUILayout.FlexibleSpace();
+
                 // Accept button
                 if (!missionsLocked)
                 {
-                    if (GUILayout.Button("Accept", acceptBtnStyle))
+                    if (GUILayout.Button("Accept", acceptBtnStyle, GUILayout.Width(70), GUILayout.Height(30)))
                     {
                         int missionId = MiniJSON.GetInt(m, "id");
                         GeneKermanMod.Instance.RunCoroutine(DoSelectMission(missionId));
@@ -321,7 +378,7 @@ namespace GeneKerman.UI
             }
 
             GUILayout.Space(5);
-            if (GUILayout.Button("🔄 Refresh Missions", GUILayout.Height(28)))
+            if (GUILayout.Button("[~] Refresh Missions", GUILayout.Height(28)))
                 RefreshMissions();
         }
 
@@ -350,17 +407,25 @@ namespace GeneKerman.UI
 
         private void DrawMailToolbar()
         {
-            // Row 1: Compose + Delete + Refresh
+            // Row 1: Inbox/Trash + Compose + Refresh
             GUILayout.BeginHorizontal();
 
-            if (GUILayout.Button("✏ Compose", acceptBtnStyle, GUILayout.Height(26)))
+            if (GUILayout.Button("[+] Inbox", !showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
+                showTrash = false;
+            if (GUILayout.Button("[X] Trash", showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
+                showTrash = true;
+
+            GUILayout.Space(10);
+
+            if (!showTrash && GUILayout.Button("[New] Compose", acceptBtnStyle, GUILayout.Height(26)))
             {
                 int balance = profile != null ? MiniJSON.GetInt(profile, "balance") : 0;
-                GeneKermanMod.Instance.OpenCreateContractWindow(balance);
+                string userId = profile != null ? MiniJSON.GetString(profile, "user_id", "") : "";
+                GeneKermanMod.Instance.OpenCreateContractWindow(balance, userId);
             }
 
             GUI.enabled = selectedContracts.Count > 0;
-            if (GUILayout.Button("Cancel", deleteBtnStyle, GUILayout.Height(26), GUILayout.Width(70)))
+            if (!showTrash && GUILayout.Button("Cancel", deleteBtnStyle, GUILayout.Height(26), GUILayout.Width(70)))
             {
                 // Only cancel pending contracts from selection
                 foreach (string cid in selectedContracts)
@@ -376,7 +441,7 @@ namespace GeneKerman.UI
 
             GUILayout.FlexibleSpace();
 
-            if (GUILayout.Button("🔄", tabStyle, GUILayout.Height(26), GUILayout.Width(30)))
+            if (GUILayout.Button("[~]", tabStyle, GUILayout.Height(26), GUILayout.Width(30)))
                 RefreshContracts();
 
             GUILayout.EndHorizontal();
@@ -394,7 +459,12 @@ namespace GeneKerman.UI
                     foreach (var cObj in contracts)
                     {
                         var c = cObj as Dictionary<string, object>;
-                        if (c != null) selectedContracts.Add(MiniJSON.GetString(c, "contract_id"));
+                        if (c != null) 
+                        {
+                            string cid = MiniJSON.GetString(c, "contract_id");
+                            if (trashedContracts.Contains(cid) == showTrash)
+                                selectedContracts.Add(cid);
+                        }
                     }
                 }
             }
@@ -423,81 +493,201 @@ namespace GeneKerman.UI
             if (contracts == null || contracts.Count == 0)
             {
                 GUILayout.Space(20);
-                GUILayout.Label("📭 No contracts.", labelStyle);
+                GUILayout.Label(" No contracts.", labelStyle);
                 return;
             }
 
-            string myId = "";
-            if (profile != null)
-                myId = MiniJSON.GetString(profile, "user_id", "");
+            var grouped = new Dictionary<string, List<Dictionary<string, object>>>();
+            var weekKeys = new List<string>();
 
             foreach (var cObj in contracts)
             {
                 var c = cObj as Dictionary<string, object>;
                 if (c == null) continue;
 
-                string issuerId = MiniJSON.GetString(c, "issuer_id", "");
-                bool isIncoming = issuerId != myId;
+                string cid = MiniJSON.GetString(c, "contract_id");
+                bool isTrashed = trashedContracts.Contains(cid);
+                if (showTrash != isTrashed) continue;
 
-                // Apply filter
+                bool isIncoming = !MiniJSON.GetBool(c, "is_outgoing");
+
                 if (filterMode == 1 && !isIncoming) continue;
                 if (filterMode == 2 && isIncoming) continue;
 
-                string cid = MiniJSON.GetString(c, "contract_id");
-                string status = MiniJSON.GetString(c, "status");
-                string issuerName = MiniJSON.GetString(c, "issuer_name");
-                string contractorName = MiniJSON.GetString(c, "contractor_name");
-                string mission = MiniJSON.GetString(c, "mission");
-                string dueDate = MiniJSON.GetString(c, "due_date");
-                string createdAt = MiniJSON.GetString(c, "created_at", "");
-                int payment = MiniJSON.GetInt(c, "payment");
+                string createdAtStr = MiniJSON.GetString(c, "created_at", "");
+                string weekKey = GetWeekKey(createdAtStr);
 
-                // Status colors
-                Color dotColor = GetStatusColor(status);
-
-                // Row
-                GUILayout.BeginHorizontal(mailRowStyle);
-
-                // Checkbox
-                bool wasSelected = selectedContracts.Contains(cid);
-                bool isSelected = GUILayout.Toggle(wasSelected, "", GUILayout.Width(18));
-                if (isSelected != wasSelected)
+                if (!grouped.ContainsKey(weekKey))
                 {
-                    if (isSelected) selectedContracts.Add(cid);
-                    else selectedContracts.Remove(cid);
+                    grouped[weekKey] = new List<Dictionary<string, object>>();
+                    weekKeys.Add(weekKey);
                 }
+                grouped[weekKey].Add(c);
+            }
 
-                // Status dot
-                var dotStyle = new GUIStyle(GUI.skin.label)
+            if (grouped.Count == 0)
+            {
+                GUILayout.Space(20);
+                GUILayout.Label(showTrash ? "[X] Trash bin is empty." : " No contracts match the filter.", labelStyle);
+                return;
+            }
+
+            foreach (string week in weekKeys)
+            {
+                var items = grouped[week];
+                
+                GUILayout.BeginHorizontal(boxDarkStyle);
+                bool collapsed = collapsedWeeks.Contains(week);
+                if (GUILayout.Button((collapsed ? "▶ " : "▼ ") + week + $" ({items.Count})", mailSubjectStyle))
                 {
-                    fontSize = 10, fixedWidth = 14,
-                    normal = { textColor = dotColor },
-                    alignment = TextAnchor.MiddleCenter,
-                };
-                GUILayout.Label("●", dotStyle, GUILayout.Width(14));
-
-                // Direction arrow + name
-                string dirLabel = isIncoming
-                    ? $"← {issuerName}"
-                    : $"→ {contractorName}";
-                GUILayout.Label(dirLabel, mailSenderStyle, GUILayout.Width(120));
-
-                // Mission subject (clickable)
-                string subjectText = mission.Length > 40 ? mission.Substring(0, 37) + "..." : mission;
-                if (GUILayout.Button(subjectText, mailSubjectStyle))
-                {
-                    openContractId = cid;
+                    if (collapsed) collapsedWeeks.Remove(week);
+                    else collapsedWeeks.Add(week);
                 }
-
-                // Payment
-                GUILayout.Label($"💰{payment}", mailAmountStyle, GUILayout.Width(65));
-
-                // Date
-                string dateLabel = !string.IsNullOrEmpty(dueDate) && dueDate.Length >= 10
-                    ? dueDate.Substring(5) : dueDate; // Show MM-DD
-                GUILayout.Label(dateLabel, mailDateStyle, GUILayout.Width(50));
-
                 GUILayout.EndHorizontal();
+
+                if (collapsed) continue;
+
+                foreach (var c in items)
+                {
+                    string cid = MiniJSON.GetString(c, "contract_id");
+                    string status = MiniJSON.GetString(c, "status");
+                    string issuerName = MiniJSON.GetString(c, "issuer_name");
+                    string contractorName = MiniJSON.GetString(c, "contractor_name");
+                    string mission = MiniJSON.GetString(c, "mission");
+                    string dueDate = MiniJSON.GetString(c, "due_date");
+                    int payment = MiniJSON.GetInt(c, "payment");
+                    bool isIncoming = !MiniJSON.GetBool(c, "is_outgoing");
+
+                    Color dotColor = GetStatusColor(status);
+
+                    GUILayout.BeginHorizontal(mailRowStyle);
+
+                    bool wasSelected = selectedContracts.Contains(cid);
+                    bool isSelected = GUILayout.Toggle(wasSelected, "", GUILayout.Width(18));
+                    if (isSelected != wasSelected)
+                    {
+                        if (isSelected) selectedContracts.Add(cid);
+                        else selectedContracts.Remove(cid);
+                    }
+
+                    var dotStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        fontSize = 10, fixedWidth = 14,
+                        normal = { textColor = dotColor },
+                        alignment = TextAnchor.MiddleCenter,
+                    };
+                    GUILayout.Label("●", dotStyle, GUILayout.Width(14));
+
+                    string dirLabel = isIncoming ? $"← {issuerName}" : $"→ {contractorName}";
+                    GUILayout.Label(dirLabel, mailSenderStyle, GUILayout.Width(110));
+
+                    // [R] badge marks contracts that have a part restriction. The badge
+                    // and title turn red only while that contract's part filter is
+                    // actively being enforced in the editor — not merely present.
+                    string modlist = MiniJSON.GetString(c, "modlist", "");
+                    bool restricted = !string.IsNullOrEmpty(modlist);
+                    bool filterActive = restricted
+                        && EditorPartEnforcer.Instance != null
+                        && EditorPartEnforcer.Instance.IsEnforcing()
+                        && EditorPartEnforcer.Instance.ActiveContractId == cid;
+
+                    Color amber = new Color(0.9f, 0.7f, 0.2f);
+                    Color red = new Color(0.95f, 0.32f, 0.32f);
+
+                    if (restricted)
+                    {
+                        var lockStyle = new GUIStyle(GUI.skin.label)
+                        {
+                            fontSize = 10, fixedWidth = 18,
+                            normal = { textColor = filterActive ? red : amber },
+                            alignment = TextAnchor.MiddleCenter,
+                        };
+                        GUILayout.Label("[R]", lockStyle, GUILayout.Width(18));
+                    }
+                    else
+                    {
+                        GUILayout.Space(18);
+                    }
+
+                    string subjectText = mission.Length > 28 ? mission.Substring(0, 25) + "..." : mission;
+                    var subjectStyle = mailSubjectStyle;
+                    if (filterActive)
+                    {
+                        subjectStyle = new GUIStyle(mailSubjectStyle);
+                        subjectStyle.normal.textColor = red;
+                        subjectStyle.hover.textColor = new Color(1f, 0.5f, 0.5f);
+                    }
+                    if (GUILayout.Button(subjectText, subjectStyle))
+                    {
+                        openContractId = cid;
+                    }
+
+                    GUILayout.Label($"${payment}", mailAmountStyle, GUILayout.Width(60));
+
+                    string dateLabel = !string.IsNullOrEmpty(dueDate) && dueDate.Length >= 10 ? dueDate.Substring(5) : dueDate;
+                    GUILayout.Label(dateLabel, mailDateStyle, GUILayout.Width(45));
+
+                    if (status == "completed" || status == "failed" || status == "declined" || status == "cancelled")
+                    {
+                        if (!showTrash)
+                        {
+                            if (GUILayout.Button("[Del]", tabStyle, GUILayout.Width(25), GUILayout.Height(20)))
+                            {
+                                trashedContracts.Add(cid);
+                                SaveTrash();
+                            }
+                        }
+                        else
+                        {
+                            if (GUILayout.Button("[Res]", tabStyle, GUILayout.Width(25), GUILayout.Height(20)))
+                            {
+                                trashedContracts.Remove(cid);
+                                SaveTrash();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        GUILayout.Space(29);
+                    }
+
+                    GUILayout.EndHorizontal();
+                }
+            }
+        }
+
+        private string GetWeekKey(string isoDate)
+        {
+            if (string.IsNullOrEmpty(isoDate) || isoDate.Length < 10) return "Unknown Date";
+            System.DateTime dt;
+            if (System.DateTime.TryParse(isoDate, out dt))
+            {
+                int diff = (7 + (dt.DayOfWeek - System.DayOfWeek.Monday)) % 7;
+                var monday = dt.AddDays(-1 * diff).Date;
+                return "Week of " + monday.ToString("MMM d, yyyy");
+            }
+            return "Unknown Date";
+        }
+
+        private void AutoCollapseWeeks()
+        {
+            if (contracts == null) return;
+            var counts = new Dictionary<string, int>();
+            var order = new List<string>();
+            foreach(var cObj in contracts) {
+                var c = cObj as Dictionary<string, object>;
+                if (c == null) continue;
+                if (trashedContracts.Contains(MiniJSON.GetString(c, "contract_id"))) continue;
+                string w = GetWeekKey(MiniJSON.GetString(c, "created_at"));
+                if (!counts.ContainsKey(w)) { counts[w] = 0; order.Add(w); }
+                counts[w]++;
+            }
+            
+            int total = 0;
+            collapsedWeeks.Clear();
+            foreach(string w in order) {
+                if (total >= 10) collapsedWeeks.Add(w);
+                total += counts[w];
             }
         }
 
@@ -552,35 +742,87 @@ namespace GeneKerman.UI
 
             GUILayout.Space(8);
 
+            // Modlist VAB Enforcer Toggle (if in Editor). Always shown for active
+            // contracts in the editor so the absence of a restriction is explicit
+            // rather than the box silently vanishing.
+            if (HighLogic.LoadedSceneIsEditor && status == "active")
+            {
+                string reqModlist = MiniJSON.GetString(c, "modlist", "");
+                GUILayout.BeginVertical(boxDarkStyle);
+                GUILayout.Label("🛠 Required Mods", headerStyle);
+
+                if (string.IsNullOrEmpty(reqModlist))
+                {
+                    GUILayout.Label("No part restriction — all parts allowed.", labelStyle);
+                }
+                else
+                {
+                    GUILayout.Label(reqModlist, labelStyle);
+                    GUILayout.Space(5);
+
+                    bool currentlyEnforcing = EditorPartEnforcer.Instance != null &&
+                                              EditorPartEnforcer.Instance.IsEnforcing() &&
+                                              EditorPartEnforcer.Instance.ActiveContractId == openContractId;
+
+                    bool enforce = GUILayout.Toggle(currentlyEnforcing, " Enforce VAB part limits for this contract", checkboxStyle);
+
+                    if (enforce != currentlyEnforcing)
+                    {
+                        if (enforce)
+                            EditorPartEnforcer.Instance?.EnforceModlist(openContractId, reqModlist);
+                        else
+                            EditorPartEnforcer.Instance?.StopEnforcing();
+                    }
+                }
+                GUILayout.EndVertical();
+                GUILayout.Space(8);
+            }
+
             // Action buttons
             GUILayout.BeginHorizontal();
 
             if (status == "active")
             {
-                if (GUILayout.Button("📤 Submit", acceptBtnStyle, GUILayout.Height(30)))
+                if (GUILayout.Button("[Sub] Submit", acceptBtnStyle, GUILayout.Height(30)))
                 {
                     string cid = MiniJSON.GetString(c, "contract_id");
                     string mission = MiniJSON.GetString(c, "mission");
                     string mT = MiniJSON.GetString(c, "mission_type", "active_vessel");
                     string reqSit = MiniJSON.GetString(c, "required_situation", "");
                     string reqBody = MiniJSON.GetString(c, "required_body", "");
-                    GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody);
+                    string reqModlist = MiniJSON.GetString(c, "modlist", "");
+                    GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody, reqModlist);
                 }
             }
             else if (status == "pending")
             {
-                if (GUILayout.Button("✅ Accept", acceptBtnStyle, GUILayout.Height(30)))
+                // Only the contractor (incoming) may Accept/Decline. The issuer of an
+                // outgoing contract is not the recipient, so they can only withdraw it.
+                bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
+                if (isOutgoing)
                 {
-                    string cid = MiniJSON.GetString(c, "contract_id");
-                    GeneKermanMod.Instance.RunCoroutine(DoAcceptContract(cid));
-                    openContractId = null;
+                    if (GUILayout.Button("(No) Withdraw", deleteBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        GeneKermanMod.Instance.RunCoroutine(DoCancelContract(cid));
+                        openContractId = null;
+                    }
                 }
-                GUILayout.Space(8);
-                if (GUILayout.Button("❌ Decline", deleteBtnStyle, GUILayout.Height(30)))
+                else
                 {
-                    string cid = MiniJSON.GetString(c, "contract_id");
-                    GeneKermanMod.Instance.RunCoroutine(DoCancelContract(cid));
-                    openContractId = null;
+                    if (GUILayout.Button("(Ok) Accept", acceptBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        GeneKermanMod.Instance.RunCoroutine(DoAcceptContract(cid));
+                        openContractId = null;
+                    }
+                    GUILayout.Space(8);
+                    if (GUILayout.Button("(No) Decline", deleteBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        GeneKermanMod.Instance.RunCoroutine(DoCancelContract(cid));
+                        openContractId = null;
+                    }
                 }
             }
             else if (status == "completed")
@@ -591,12 +833,12 @@ namespace GeneKerman.UI
                 if (alreadyImported)
                 {
                     GUI.enabled = false;
-                    GUILayout.Button("✅ Vessel Imported", submitBtnStyle, GUILayout.Height(30));
+                    GUILayout.Button("(Ok) Vessel Imported", submitBtnStyle, GUILayout.Height(30));
                     GUI.enabled = true;
                 }
                 else
                 {
-                    if (GUILayout.Button("📥 Import / Download", submitBtnStyle, GUILayout.Height(30)))
+                    if (GUILayout.Button("[+] Import / Download", submitBtnStyle, GUILayout.Height(30)))
                     {
                         GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(cid));
                     }
@@ -647,16 +889,16 @@ namespace GeneKerman.UI
             if (loadingProfile || profile == null)
             {
                 GUILayout.Label("Loading profile...", labelStyle);
-                if (GUILayout.Button("🔄 Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
                     RefreshProfile();
                 return;
             }
 
             GUILayout.BeginVertical(boxDarkStyle);
-            GUILayout.Label($"👤 {MiniJSON.GetString(profile, "username")}", headerStyle);
+            GUILayout.Label($" {MiniJSON.GetString(profile, "username")}", headerStyle);
             GUILayout.Space(10);
 
-            DrawStatRow("💰 Balance", $"{MiniJSON.GetInt(profile, "balance"):N0} {MiniJSON.GetString(profile, "currency_name", "KCoins")}");
+            DrawStatRow("$ Balance", $"{MiniJSON.GetInt(profile, "balance"):N0} {MiniJSON.GetString(profile, "currency_name", "KCoins")}");
             DrawStatRow("✨ XP", $"{MiniJSON.GetInt(profile, "xp"):N0}");
             DrawStatRow("📊 Level", $"{MiniJSON.GetInt(profile, "level")}");
             DrawStatRow("💬 Messages", $"{MiniJSON.GetInt(profile, "messages"):N0}");
@@ -684,9 +926,9 @@ namespace GeneKerman.UI
 
             // Unlink button
             GUILayout.BeginVertical(boxDarkStyle);
-            GUILayout.Label("⚙️ Account", valueStyle);
+            GUILayout.Label(" Account", valueStyle);
             GUILayout.Label($"Server: {GeneKermanMod.Instance.Api.ServerUrl}", labelStyle);
-            if (GUILayout.Button("🔓 Unlink Account", GUILayout.Height(28)))
+            if (GUILayout.Button("[U] Unlink Account", GUILayout.Height(28)))
             {
                 GeneKermanMod.Instance.Api.ClearToken();
                 GeneKermanMod.Instance.ShowMainWindow = false;
@@ -699,7 +941,7 @@ namespace GeneKerman.UI
         private void DrawStatRow(string label, string value)
         {
             GUILayout.BeginHorizontal();
-            GUILayout.Label(label, labelStyle, GUILayout.Width(120));
+            GUILayout.Label(label, labelStyle, GUILayout.Width(110));
             GUILayout.Label(value, valueStyle);
             GUILayout.EndHorizontal();
         }
@@ -709,7 +951,7 @@ namespace GeneKerman.UI
             switch (level)
             {
                 case 1: return "🌍1";  case 2: return "🌙2";  case 3: return "🔗3";
-                case 4: return "🔴4";  case 5: return "🌎5";  case 6: return "💜6";
+                case 4: return "(H)4";  case 5: return "🌎5";  case 6: return "💜6";
                 case 7: return "☄️7";  case 8: return "🌕8";  case 9: return "🪐9";
                 case 10: return "⭐10"; case 11: return "♂️11"; case 12: return "♀️12";
                 case 13: return "🔵13"; case 14: return "🌟14"; case 15: return "💫15";
@@ -730,7 +972,7 @@ namespace GeneKerman.UI
             if (notifications == null || notifications.Count == 0)
             {
                 GUILayout.Label("No new notifications.", labelStyle);
-                if (GUILayout.Button("🔄 Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
                     RefreshNotifications();
                 return;
             }
@@ -749,7 +991,7 @@ namespace GeneKerman.UI
 
             GUILayout.Space(5);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("✅ Mark All Read", GUILayout.Height(28)))
+            if (GUILayout.Button("(Ok) Mark All Read", GUILayout.Height(28)))
             {
                 GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationsRead((ok, resp, status) =>
                 {
@@ -757,16 +999,50 @@ namespace GeneKerman.UI
                     {
                         notifications?.Clear();
                         GeneKermanMod.Instance.UnreadNotifications = 0;
-                        SetStatus("✅ Notifications cleared.");
+                        SetStatus("(Ok) Notifications cleared.");
                     }
                 }));
             }
-            if (GUILayout.Button("🔄 Refresh", GUILayout.Height(28)))
+            if (GUILayout.Button("[~] Refresh", GUILayout.Height(28)))
                 RefreshNotifications();
             GUILayout.EndHorizontal();
         }
 
-        // ── Data Refresh ────────────────────────────────────────────────────
+        // ── Settings Tab ────────────────────────────────────────────────────────
+
+        private void DrawSettingsTab()
+        {
+            GUILayout.BeginVertical(windowStyle);
+            GUILayout.Label("🔌 Connection Settings", new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter });
+            GUILayout.Space(10);
+            GUILayout.Label("If the mod gets stuck loading because it cannot reach the API server, you can change the server URL here.", labelStyle);
+            GUILayout.Space(15);
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Server URL:", GUILayout.Width(80));
+            
+            if (string.IsNullOrEmpty(serverUrlInput))
+                serverUrlInput = GeneKermanMod.Instance.Api.ServerUrl;
+                
+            serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
+            
+            if (GUILayout.Button("Set", tabStyle, GUILayout.Width(60), GUILayout.Height(24)))
+            {
+                GeneKermanMod.Instance.Api.SetServerUrl(serverUrlInput);
+                SetStatus("(Ok) Server URL updated.");
+                
+                // Reset loading states so RefreshAll does not immediately skip
+                loadingProfile = false;
+                loadingMissions = false;
+                loadingContracts = false;
+                loadingNotifs = false;
+                
+                RefreshAll(); // Try to reconnect
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+        }
+
+        // ── Data Fetching Coroutines ────────────────────────────────────────────────────
 
         private void RefreshProfile()
         {
@@ -836,7 +1112,7 @@ namespace GeneKerman.UI
             {
                 if (ok)
                 {
-                    SetStatus($"✅ {MiniJSON.GetString(data, "message", "Mission accepted!")}");
+                    SetStatus($"(Ok) {MiniJSON.GetString(data, "message", "Mission accepted!")}");
                     RefreshContracts();
 
                     // Inject into stock contract system
@@ -857,7 +1133,7 @@ namespace GeneKerman.UI
                 }
                 else
                 {
-                    SetStatus($"❌ {err ?? "Failed to select mission."}");
+                    SetStatus($"(No) {err ?? "Failed to select mission."}");
                 }
             });
         }
@@ -868,12 +1144,12 @@ namespace GeneKerman.UI
             {
                 if (ok)
                 {
-                    SetStatus("✅ Contract accepted!");
+                    SetStatus("(Ok) Contract accepted!");
                     RefreshContracts();
                 }
                 else
                 {
-                    SetStatus("❌ Failed to accept contract.");
+                    SetStatus("(No) Failed to accept contract.");
                 }
             });
         }
@@ -885,11 +1161,15 @@ namespace GeneKerman.UI
                 if (ok)
                 {
                     SetStatus("🗑 Contract cancelled.");
+                    // Clear enforcer if it was active for this contract
+                    if (EditorPartEnforcer.Instance != null &&
+                        EditorPartEnforcer.Instance.ActiveContractId == contractId)
+                        EditorPartEnforcer.Instance.StopEnforcing();
                     RefreshContracts();
                 }
                 else
                 {
-                    SetStatus("❌ Failed to cancel contract.");
+                    SetStatus("(No) Failed to cancel contract.");
                 }
             });
         }
@@ -902,7 +1182,7 @@ namespace GeneKerman.UI
 
         private System.Collections.IEnumerator DoDownloadCraft(string contractId)
         {
-            SetStatus("📥 Fetching craft info...");
+            SetStatus("[+] Fetching craft info...");
 
             // Get craft file URLs from the API
             yield return GeneKermanMod.Instance.Api.Get($"/api/v1/craft/download/{contractId}", (ok, resp, status) =>
@@ -917,7 +1197,7 @@ namespace GeneKerman.UI
                     // Priority: vessel node (full vessel state) > craft file (blueprint only)
                     if (!string.IsNullOrEmpty(vesselNodeUrl))
                     {
-                        SetStatus("📥 Downloading vessel data...");
+                        SetStatus("[+] Downloading vessel data...");
                         GeneKermanMod.Instance.RunCoroutine(DoImportVessel(contractId, vesselNodeUrl));
                     }
                     else if (craftFiles != null && craftFiles.Count > 0)
@@ -925,7 +1205,7 @@ namespace GeneKerman.UI
                         var first = craftFiles[0] as Dictionary<string, object>;
                         if (first == null)
                         {
-                            SetStatus("❌ Invalid craft file data.");
+                            SetStatus("(No) Invalid craft file data.");
                             return;
                         }
 
@@ -934,11 +1214,11 @@ namespace GeneKerman.UI
 
                         if (string.IsNullOrEmpty(url))
                         {
-                            SetStatus("❌ No download URL.");
+                            SetStatus("(No) No download URL.");
                             return;
                         }
 
-                        SetStatus("📥 Downloading craft file...");
+                        SetStatus("[+] Downloading craft file...");
                         GeneKermanMod.Instance.RunCoroutine(
                             GeneKermanMod.Instance.Api.DownloadFile(url, (dlOk, fileData) =>
                             {
@@ -947,28 +1227,28 @@ namespace GeneKerman.UI
                                     string path = CraftInstaller.Install(fileData, filename, loadmeta);
                                     if (path != null)
                                     {
-                                        string msg = $"✅ Craft installed: {System.IO.Path.GetFileName(path)}";
+                                        string msg = $"(Ok) Craft installed: {System.IO.Path.GetFileName(path)}";
                                         if (!string.IsNullOrEmpty(loadmeta))
                                             msg += " (+ loadmeta)";
                                         SetStatus(msg);
                                     }
                                     else
-                                        SetStatus("❌ Failed to install craft file.");
+                                        SetStatus("(No) Failed to install craft file.");
                                 }
                                 else
                                 {
-                                    SetStatus("❌ Download failed.");
+                                    SetStatus("(No) Download failed.");
                                 }
                             }));
                     }
                     else
                     {
-                        SetStatus("❌ No craft file or vessel data in this contract.");
+                        SetStatus("(No) No craft file or vessel data in this contract.");
                     }
                 }
                 else
                 {
-                    SetStatus("❌ Could not fetch craft data.");
+                    SetStatus("(No) Could not fetch craft data.");
                 }
             });
         }
@@ -981,7 +1261,7 @@ namespace GeneKerman.UI
                 if (!ok || fileData == null)
                 {
                     Debug.LogWarning($"[GeneKerman] DoImportVessel: Download failed (ok={ok}, data={fileData?.Length ?? -1})");
-                    SetStatus("❌ Failed to download vessel data.");
+                    SetStatus("(No) Failed to download vessel data.");
                     return;
                 }
 
@@ -1017,7 +1297,7 @@ namespace GeneKerman.UI
 
                 if (!string.IsNullOrEmpty(vesselName))
                 {
-                    SetStatus($"🚀 Vessel imported: {vesselName} (crew randomized)");
+                    SetStatus($"[!] Vessel imported: {vesselName} (crew randomized)");
                     if (GKContractScenario.Instance != null)
                     {
                         GKContractScenario.Instance.MarkVesselImported(contractId);
@@ -1025,7 +1305,7 @@ namespace GeneKerman.UI
                 }
                 else
                 {
-                    SetStatus("❌ Failed to import vessel.");
+                    SetStatus("(No) Failed to import vessel.");
                 }
             });
         }

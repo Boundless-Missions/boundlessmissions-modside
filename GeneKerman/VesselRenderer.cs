@@ -239,6 +239,16 @@ namespace GeneKerman
             RenderSettings.ambientMode  = origAmbientMode;
             RenderSettings.ambientLight = origAmbientLight;
 
+            // ── Safety net: if the off-screen camera captured nothing (e.g. an
+            // unsupported readback path on some GPU/driver), every view is pure
+            // background. Rather than submit a blank blueprint, fall back to a
+            // normal in-game screenshot so a submission is never empty.
+            if (!HasVesselContent(blackPass, whitePass))
+            {
+                Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot.");
+                return VesselDataCollector.CaptureScreenshot();
+            }
+
             // ── Composite blueprint image ──
             Color32[] blueprint = new Color32[IMG_W * IMG_H];
             DrawBlueprintBackground(blueprint);
@@ -495,6 +505,27 @@ namespace GeneKerman
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// True if any captured view contains vessel pixels (not pure background).
+        /// Uses the same dual-pass test as BlitView: a pixel is background when
+        /// (white - black) averages ~255 across channels.
+        /// </summary>
+        private static bool HasVesselContent(Color32[][] black, Color32[][] white)
+        {
+            for (int i = 0; i < black.Length; i++)
+            {
+                Color32[] bl = black[i];
+                Color32[] wh = white[i];
+                if (bl == null || wh == null) continue;
+                for (int p = 0; p < bl.Length; p++)
+                {
+                    float oma = ((wh[p].r - bl[p].r) + (wh[p].g - bl[p].g) + (wh[p].b - bl[p].b)) / (3f * 255f);
+                    if (oma <= 0.99f) return true;  // found a vessel pixel
+                }
+            }
+            return false;
         }
 
         private static void DrawCellBorder(Color32[] px, int sx, int sy)

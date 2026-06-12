@@ -16,6 +16,7 @@ namespace GeneKerman.UI
         {
             public string title;
             public string message;
+            public string contractId;
             public float showTime;
             public float alpha;
         }
@@ -31,7 +32,7 @@ namespace GeneKerman.UI
         private GUIStyle messageStyle;
         private bool stylesReady;
 
-        public void Show(string title, string message)
+        public void Show(string title, string message, string contractId = null)
         {
             if (activeToasts.Count >= 5)
                 activeToasts.RemoveAt(0);
@@ -40,6 +41,7 @@ namespace GeneKerman.UI
             {
                 title = title,
                 message = message,
+                contractId = contractId,
                 showTime = Time.realtimeSinceStartup,
                 alpha = 1f
             });
@@ -92,9 +94,13 @@ namespace GeneKerman.UI
 
                 if (GUI.Button(rect, "", GUIStyle.none))
                 {
-                    if (GeneKermanMod.Instance != null && GeneKermanMod.Instance.Api.IsLinked)
+                    var mod = GeneKermanMod.Instance;
+                    if (mod != null && mod.Api.IsLinked)
                     {
-                        GeneKermanMod.Instance.ShowMainWindow = true;
+                        mod.ShowMainWindow = true;
+                        // Deep-link straight to the referenced contract when available.
+                        if (!string.IsNullOrEmpty(toast.contractId))
+                            mod.OpenContractDetail(toast.contractId);
                     }
                     activeToasts.RemoveAt(i);
                 }

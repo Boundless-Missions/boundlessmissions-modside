@@ -32,6 +32,10 @@ namespace GeneKerman
             public double sma;
             public double eccentricity;
             public double inclination;
+            public double apoapsis;     // altitude above the body's surface (m)
+            public double periapsis;    // altitude above the body's surface (m)
+            public double period;       // orbital period (s)
+            public double bodyRadius;   // main body equatorial radius (m)
             // Craft metadata
             public int partCount;
             public float totalMass;
@@ -52,6 +56,10 @@ namespace GeneKerman
                     { "sma", sma },
                     { "eccentricity", eccentricity },
                     { "inclination", inclination },
+                    { "apoapsis", apoapsis },
+                    { "periapsis", periapsis },
+                    { "period", period },
+                    { "body_radius", bodyRadius },
                     { "part_count", partCount },
                     { "total_mass", (double)totalMass },
                     { "total_cost", (double)totalCost },
@@ -104,6 +112,13 @@ namespace GeneKerman
                 snap.sma = vessel.orbit.semiMajorAxis;
                 snap.eccentricity = vessel.orbit.eccentricity;
                 snap.inclination = vessel.orbit.inclination;
+                snap.apoapsis = vessel.orbit.ApA;   // altitude above surface
+                snap.periapsis = vessel.orbit.PeA;  // altitude above surface
+                snap.period = vessel.orbit.period;
+            }
+            if (vessel.mainBody != null)
+            {
+                snap.bodyRadius = vessel.mainBody.Radius;
             }
 
             return snap;

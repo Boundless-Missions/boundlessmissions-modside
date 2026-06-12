@@ -39,6 +39,10 @@ mkdir -p "$GAMEDATA_SRC/Textures"
 cp "$PROJECT_DIR/bin/GeneKerman.dll" "$GAMEDATA_SRC/Plugins/"
 echo "  → Copied GeneKerman.dll"
 
+# Copy websocket-sharp dependency (ships next to GeneKerman.dll)
+cp "$PROJECT_DIR/lib/websocket-sharp.dll" "$GAMEDATA_SRC/Plugins/"
+echo "  → Copied websocket-sharp.dll"
+
 # Copy Icon
 if [ -f "$SCRIPT_DIR/logo_38.png" ]; then
     cp "$SCRIPT_DIR/logo_38.png" "$GAMEDATA_SRC/Textures/icon_toolbar.png"

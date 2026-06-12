@@ -44,6 +44,7 @@ namespace GeneKerman.UI
 
         private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Notifications", "Settings" };
         private string serverUrlInput = "";
+        private string disputeDateInput = ""; // proposed new deadline for a "More Time" dispute
 
         // Trash state
         private HashSet<string> trashedContracts = new HashSet<string>();
@@ -86,6 +87,36 @@ namespace GeneKerman.UI
         public void UpdateProfile(Dictionary<string, object> data)
         {
             profile = data;
+        }
+
+        /// <summary>
+        /// Insert a live notification (from the WebSocket push) at the top of the panel
+        /// so it is already there when the user opens the tab. De-duped by id; the unread
+        /// badge is managed by the caller, so this does not recount.
+        /// </summary>
+        public void AddNotification(Dictionary<string, object> n)
+        {
+            if (n == null) return;
+            if (notifications == null) notifications = new List<object>();
+
+            string id = MiniJSON.GetString(n, "id");
+            foreach (var o in notifications)
+            {
+                var d = o as Dictionary<string, object>;
+                if (d != null && MiniJSON.GetString(d, "id") == id) return; // already present
+            }
+            notifications.Insert(0, n); // newest first
+        }
+
+        /// <summary>Switch to the Contracts tab and open a specific contract's detail view.</summary>
+        public void OpenContractDetail(string contractId)
+        {
+            if (string.IsNullOrEmpty(contractId)) return;
+            selectedTab = 1;          // Contracts
+            showTrash = false;
+            openContractId = contractId;
+            scrollPos = Vector2.zero;
+            RefreshContracts();       // ensure the contract is loaded for the detail view
         }
 
         // ── Draw ────────────────────────────────────────────────────────────
@@ -854,6 +885,51 @@ namespace GeneKerman.UI
                     GUI.enabled = true;
                 }
             }
+            else if (status == "disputed")
+            {
+                // Submission was refused. The contractor (incoming side) resolves it
+                // here, mirroring the Discord dispute buttons. The issuer just waits.
+                bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
+                if (isOutgoing)
+                {
+                    GUI.enabled = false;
+                    GUILayout.Button("Waiting for the contractor to resolve...", submitBtnStyle, GUILayout.Height(30));
+                    GUI.enabled = true;
+                }
+                else
+                {
+                    string cid = MiniJSON.GetString(c, "contract_id");
+                    bool botIssued = MiniJSON.GetBool(c, "is_bot_issued");
+
+                    // "More Time" on a human contract needs a proposed new date.
+                    if (!botIssued)
+                    {
+                        if (string.IsNullOrEmpty(disputeDateInput))
+                            disputeDateInput = System.DateTime.Now.AddDays(7).ToString("yyyy-MM-dd");
+                        GUILayout.Label("New date:", labelStyle, GUILayout.Width(62));
+                        disputeDateInput = GUILayout.TextField(disputeDateInput, GUILayout.Width(86), GUILayout.Height(30));
+                    }
+
+                    if (GUILayout.Button("More Time", submitBtnStyle, GUILayout.Height(30)))
+                        GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "more_time", botIssued ? null : disputeDateInput));
+                    GUILayout.Space(6);
+                    if (GUILayout.Button("Pay Fine", deleteBtnStyle, GUILayout.Height(30)))
+                        GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "pay_fine", null));
+                    GUILayout.Space(6);
+                    // Sue sends the blueprint + details to the mods for review — the
+                    // recourse when the AI reviewer (or the issuer) refused wrongly.
+                    if (GUILayout.Button("Sue", acceptBtnStyle, GUILayout.Height(30)))
+                        GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "sue", null));
+
+                    // Settle requires a human counterparty — not applicable to AI contracts.
+                    if (!botIssued)
+                    {
+                        GUILayout.Space(6);
+                        if (GUILayout.Button("Settle", submitBtnStyle, GUILayout.Height(30)))
+                            GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "settle", null));
+                    }
+                }
+            }
             else if (status == "completed")
             {
                 string cid = MiniJSON.GetString(c, "contract_id");
@@ -1000,23 +1076,60 @@ namespace GeneKerman.UI
 
             if (notifications == null || notifications.Count == 0)
             {
-                GUILayout.Label("No new notifications.", labelStyle);
+                GUILayout.Label("No notifications.", labelStyle);
                 if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
                     RefreshNotifications();
                 return;
             }
+
+            // Dismiss is deferred until after the loop — removing from `notifications`
+            // mid-iteration would throw.
+            string dismissId = null;
 
             foreach (var nObj in notifications)
             {
                 var n = nObj as Dictionary<string, object>;
                 if (n == null) continue;
 
+                string id = MiniJSON.GetString(n, "id");
+                bool read = MiniJSON.GetBool(n, "read");
+
+                string contractId = "";
+                var data = MiniJSON.GetDict(n, "data");
+                if (data != null) contractId = MiniJSON.GetString(data, "contract_id");
+
+                var prevColor = GUI.color;
+                if (read) GUI.color = new Color(1f, 1f, 1f, 0.55f); // dim read items
+
                 GUILayout.BeginVertical(boxDarkStyle);
-                GUILayout.Label(MiniJSON.GetString(n, "title"), valueStyle);
+
+                GUILayout.Label((read ? "   " : "● ") + MiniJSON.GetString(n, "title"), valueStyle);
                 GUILayout.Label(MiniJSON.GetString(n, "message"), labelStyle);
                 GUILayout.Label(MiniJSON.GetString(n, "timestamp"), new GUIStyle(labelStyle) { fontSize = 10 });
+
+                GUILayout.BeginHorizontal();
+                if (!string.IsNullOrEmpty(contractId)
+                    && GUILayout.Button("[>] Open", tabStyle, GUILayout.Height(22), GUILayout.Width(80)))
+                {
+                    OpenContractDetail(contractId);
+                }
+                GUILayout.FlexibleSpace();
+                if (!read && GUILayout.Button("(Ok) Mark read", tabStyle, GUILayout.Height(22), GUILayout.Width(110)))
+                {
+                    DoMarkNotificationRead(n, id);
+                }
+                if (GUILayout.Button("[X]", deleteBtnStyle, GUILayout.Height(22), GUILayout.Width(40)))
+                {
+                    dismissId = id;
+                }
+                GUILayout.EndHorizontal();
+
                 GUILayout.EndVertical();
+                GUI.color = prevColor;
             }
+
+            if (dismissId != null)
+                DoDismissNotification(dismissId);
 
             GUILayout.Space(5);
             GUILayout.BeginHorizontal();
@@ -1026,9 +1139,14 @@ namespace GeneKerman.UI
                 {
                     if (ok)
                     {
-                        notifications?.Clear();
-                        GeneKermanMod.Instance.UnreadNotifications = 0;
-                        SetStatus("(Ok) Notifications cleared.");
+                        if (notifications != null)
+                            foreach (var o in notifications)
+                            {
+                                var d = o as Dictionary<string, object>;
+                                if (d != null) d["read"] = true;
+                            }
+                        RecountUnread();
+                        SetStatus("(Ok) All notifications marked read.");
                     }
                 }));
             }
@@ -1037,38 +1155,140 @@ namespace GeneKerman.UI
             GUILayout.EndHorizontal();
         }
 
+        private void DoMarkNotificationRead(Dictionary<string, object> n, string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationRead(id, (ok, resp, status) =>
+            {
+                if (ok)
+                {
+                    n["read"] = true;
+                    RecountUnread();
+                }
+            }));
+        }
+
+        private void DoDismissNotification(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.DismissNotification(id, (ok, resp, status) =>
+            {
+                if (ok && notifications != null)
+                {
+                    notifications.RemoveAll(o =>
+                    {
+                        var d = o as Dictionary<string, object>;
+                        return d != null && MiniJSON.GetString(d, "id") == id;
+                    });
+                    RecountUnread();
+                    SetStatus("(Ok) Notification dismissed.");
+                }
+            }));
+        }
+
+        /// <summary>Recompute the unread badge from the currently loaded notifications.</summary>
+        private void RecountUnread()
+        {
+            int unread = 0;
+            if (notifications != null)
+                foreach (var o in notifications)
+                {
+                    var d = o as Dictionary<string, object>;
+                    if (d != null && !MiniJSON.GetBool(d, "read")) unread++;
+                }
+            GeneKermanMod.Instance.UnreadNotifications = unread;
+        }
+
         // ── Settings Tab ────────────────────────────────────────────────────────
 
         private void DrawSettingsTab()
         {
+            var api = GeneKermanMod.Instance.Api;
+
             GUILayout.BeginVertical(windowStyle);
             GUILayout.Label("🔌 Connection Settings", new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter });
             GUILayout.Space(10);
-            GUILayout.Label("If the mod gets stuck loading because it cannot reach the API server, you can change the server URL here.", labelStyle);
-            GUILayout.Space(15);
+            GUILayout.Label("Choose the official UPoK server, or connect to a custom IP if you are running your own.", labelStyle);
+            GUILayout.Space(12);
+
+            // Connection mode switch: Official Server vs Custom IP
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Server URL:", GUILayout.Width(80));
-            
-            if (string.IsNullOrEmpty(serverUrlInput))
-                serverUrlInput = GeneKermanMod.Instance.Api.ServerUrl;
-                
-            serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
-            
-            if (GUILayout.Button("Set", tabStyle, GUILayout.Width(60), GUILayout.Height(24)))
+            bool official = api.UseOfficialServer;
+            var selStyle = new GUIStyle(tabStyle) { fontStyle = FontStyle.Bold };
+            GUI.backgroundColor = official ? new Color(0.2f, 0.7f, 0.35f) : Color.white;
+            if (GUILayout.Button("Official Server", official ? selStyle : tabStyle, GUILayout.Height(28)))
             {
-                GeneKermanMod.Instance.Api.SetServerUrl(serverUrlInput);
-                SetStatus("(Ok) Server URL updated.");
-                
-                // Reset loading states so RefreshAll does not immediately skip
-                loadingProfile = false;
-                loadingMissions = false;
-                loadingContracts = false;
-                loadingNotifs = false;
-                
-                RefreshAll(); // Try to reconnect
+                api.SetOfficialServer();
+                SetStatus("(Ok) Using official server.");
+                ReconnectAfterServerChange();
             }
+            GUI.backgroundColor = !official ? new Color(0.2f, 0.7f, 0.35f) : Color.white;
+            if (GUILayout.Button("Custom IP", !official ? selStyle : tabStyle, GUILayout.Height(28)))
+            {
+                // Switch to custom using whatever is in the box (or the saved custom URL).
+                if (string.IsNullOrEmpty(serverUrlInput))
+                    serverUrlInput = api.CustomServerUrl;
+                api.SetCustomServer(serverUrlInput);
+                serverUrlInput = api.ServerUrl;
+                SetStatus("(Ok) Using custom IP.");
+                ReconnectAfterServerChange();
+            }
+            GUI.backgroundColor = Color.white;
             GUILayout.EndHorizontal();
+
+            GUILayout.Space(10);
+
+            if (official)
+            {
+                GUILayout.Label($"Connected to the official server:\n{ApiClient.OfficialServerUrl}", labelStyle);
+            }
+            else
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Server URL:", GUILayout.Width(80));
+
+                if (string.IsNullOrEmpty(serverUrlInput))
+                    serverUrlInput = api.ServerUrl;
+
+                serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
+
+                if (GUILayout.Button("Set", tabStyle, GUILayout.Width(60), GUILayout.Height(24)))
+                {
+                    api.SetCustomServer(serverUrlInput);
+                    serverUrlInput = api.ServerUrl;
+                    SetStatus("(Ok) Server URL updated.");
+                    ReconnectAfterServerChange();
+                }
+                GUILayout.EndHorizontal();
+            }
+
+            GUILayout.Space(18);
+
+            // Notifications toggle
+            GUILayout.Label("🔔 Notifications", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
+            GUILayout.Space(4);
+            bool notifsOn = api.NotificationsEnabled;
+            bool newNotifs = GUILayout.Toggle(notifsOn, " Show in-game notification popups");
+            if (newNotifs != notifsOn)
+            {
+                api.SetNotificationsEnabled(newNotifs);
+                SetStatus(newNotifs ? "(Ok) Notifications enabled." : "(Ok) Notifications disabled.");
+            }
+
             GUILayout.EndVertical();
+        }
+
+        /// <summary>
+        /// After the server target changes, reset loading flags (so RefreshAll does not
+        /// skip) and try to reconnect.
+        /// </summary>
+        private void ReconnectAfterServerChange()
+        {
+            loadingProfile = false;
+            loadingMissions = false;
+            loadingContracts = false;
+            loadingNotifs = false;
+            RefreshAll();
         }
 
         // ── Data Fetching Coroutines ────────────────────────────────────────────────────
@@ -1197,6 +1417,35 @@ namespace GeneKerman.UI
                 else
                 {
                     SetStatus("(No) Failed to review submission.");
+                }
+            });
+        }
+
+        private System.Collections.IEnumerator DoDispute(string contractId, string action, string newDate)
+        {
+            var body = new Dictionary<string, object> { { "action", action } };
+            if (!string.IsNullOrEmpty(newDate)) body["new_date"] = newDate;
+
+            yield return GeneKermanMod.Instance.Api.Post(
+                $"/api/v1/contracts/{contractId}/dispute", MiniJSON.Serialize(body),
+                (ok, resp, status) =>
+            {
+                // The endpoint returns HTTP 200 with success=false for soft failures
+                // (e.g. insufficient funds), so check the body, not just the status.
+                var d = MiniJSON.DeserializeDict(resp);
+                bool success = ok && (d == null || MiniJSON.GetBool(d, "success", true));
+                string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+
+                if (success)
+                {
+                    SetStatus("(Ok) " + (string.IsNullOrEmpty(msg) ? "Done." : msg));
+                    openContractId = null;
+                    disputeDateInput = "";
+                    RefreshContracts();
+                }
+                else
+                {
+                    SetStatus("(No) " + (string.IsNullOrEmpty(msg) ? "Action failed." : msg));
                 }
             });
         }

@@ -142,20 +142,49 @@ namespace GeneKerman.UI
 
             if (showSettings)
             {
+                var api = GeneKermanMod.Instance.Api;
+                bool official = api.UseOfficialServer;
+
+                // Official Server vs Custom IP switch
                 GUILayout.BeginHorizontal();
-                GUILayout.Label("Server:", GUILayout.Width(55));
-                if (string.IsNullOrEmpty(serverUrlInput))
-                    serverUrlInput = GeneKermanMod.Instance.Api.ServerUrl;
-
-                
-
-                serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
-                if (GUILayout.Button("Set", GUILayout.Width(40), GUILayout.Height(24)))
+                GUI.backgroundColor = official ? new Color(0.2f, 0.7f, 0.35f) : Color.white;
+                if (GUILayout.Button("Official", GUILayout.Height(24)))
                 {
-                    GeneKermanMod.Instance.Api.SetServerUrl(serverUrlInput);
-                    statusMessage = "Server URL updated.";
+                    api.SetOfficialServer();
+                    statusMessage = "Using official server.";
                 }
+                GUI.backgroundColor = !official ? new Color(0.2f, 0.7f, 0.35f) : Color.white;
+                if (GUILayout.Button("Custom", GUILayout.Height(24)))
+                {
+                    if (string.IsNullOrEmpty(serverUrlInput))
+                        serverUrlInput = api.CustomServerUrl;
+                    api.SetCustomServer(serverUrlInput);
+                    serverUrlInput = api.ServerUrl;
+                    statusMessage = "Using custom IP.";
+                }
+                GUI.backgroundColor = Color.white;
                 GUILayout.EndHorizontal();
+
+                if (official)
+                {
+                    GUILayout.Label(ApiClient.OfficialServerUrl, labelStyle);
+                }
+                else
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Server:", GUILayout.Width(55));
+                    if (string.IsNullOrEmpty(serverUrlInput))
+                        serverUrlInput = api.ServerUrl;
+
+                    serverUrlInput = GUILayout.TextField(serverUrlInput, GUILayout.Height(24));
+                    if (GUILayout.Button("Set", GUILayout.Width(40), GUILayout.Height(24)))
+                    {
+                        api.SetCustomServer(serverUrlInput);
+                        serverUrlInput = api.ServerUrl;
+                        statusMessage = "Server URL updated.";
+                    }
+                    GUILayout.EndHorizontal();
+                }
             }
 
             GUILayout.Space(5);

@@ -22,7 +22,13 @@ namespace GeneKerman
 {
     public class ApiClient
     {
+        /// <summary>Address of the official UPoK server, used when "Official Server" is selected.</summary>
+        public const string OfficialServerUrl = "http://128.140.111.93:5022";
+
         private string serverUrl;
+        private string customServerUrl = "http://localhost:5022"; // last custom URL, preserved when official is active
+        private bool useOfficialServer;
+        private bool notificationsEnabled = true;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -32,6 +38,31 @@ namespace GeneKerman
 
         public bool IsLinked => !string.IsNullOrEmpty(sessionToken);
         public string ServerUrl => serverUrl;
+        public string Token => sessionToken;
+
+        /// <summary>True when connecting to the official server; false for a custom IP.</summary>
+        public bool UseOfficialServer => useOfficialServer;
+        /// <summary>The last custom server URL entered by the user.</summary>
+        public string CustomServerUrl => customServerUrl;
+        /// <summary>Whether live notifications (toast popups + socket/poll) are enabled.</summary>
+        public bool NotificationsEnabled => notificationsEnabled;
+
+        /// <summary>
+        /// WebSocket URL for the live notification stream, with the session token
+        /// in the query string (UnityWebRequest cannot set headers on a WS handshake).
+        /// Derives ws/wss from the configured http/https server URL. Empty if unlinked.
+        /// </summary>
+        public string NotificationsWebSocketUrl
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(sessionToken)) return "";
+                string wsBase = serverUrl;
+                if (wsBase.StartsWith("https://")) wsBase = "wss://" + wsBase.Substring(8);
+                else if (wsBase.StartsWith("http://")) wsBase = "ws://" + wsBase.Substring(7);
+                return wsBase + "/ws/v1/notifications?token=" + Uri.EscapeDataString(sessionToken);
+            }
+        }
 
         public ApiClient()
         {
@@ -53,59 +84,93 @@ namespace GeneKerman
                     var gk = node.GetNode("GeneKerman");
                     if (gk != null)
                     {
+                        bool.TryParse(gk.GetValue("useOfficialServer") ?? "false", out useOfficialServer);
+                        bool.TryParse(gk.GetValue("enableNotifications") ?? "true", out notificationsEnabled);
+
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
                         string host = gk.GetValue("serverHost") ?? "localhost";
                         string port = gk.GetValue("serverPort") ?? "5022";
                         string protocol = gk.GetValue("serverProtocol") ?? "http";
-                        serverUrl = $"{protocol}://{host}:{port}";
-                        Debug.Log($"[GeneKerman] Settings loaded — server: {serverUrl}");
+                        customServerUrl = $"{protocol}://{host}:{port}";
+
+                        // When the official server is selected, ignore the stored custom
+                        // host/port (kept so toggling back to custom restores it).
+                        serverUrl = useOfficialServer ? OfficialServerUrl : customServerUrl;
+                        Debug.Log($"[GeneKerman] Settings loaded — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
                         return;
                     }
                 }
             }
-            serverUrl = "http://localhost:5022";
+            customServerUrl = "http://localhost:5022";
+            useOfficialServer = false;
+            notificationsEnabled = true;
+            serverUrl = customServerUrl;
             Debug.Log($"[GeneKerman] Using default server: {serverUrl}");
         }
 
-        public void SetServerUrl(string url)
+        /// <summary>Switch to the official server and persist the choice.</summary>
+        public void SetOfficialServer()
         {
-            url = url.TrimEnd('/');
+            useOfficialServer = true;
+            serverUrl = OfficialServerUrl;
+            SaveSettings();
+        }
+
+        /// <summary>Switch to a custom server URL and persist it.</summary>
+        public void SetCustomServer(string url)
+        {
+            url = (url ?? "").Trim().TrimEnd('/');
             if (!url.StartsWith("http://") && !url.StartsWith("https://"))
             {
                 url = "http://" + url;
             }
+            useOfficialServer = false;
+            customServerUrl = url;
             serverUrl = url;
+            SaveSettings();
+        }
+
+        // Backwards-compatible alias: treat a manual URL set as a custom server.
+        public void SetServerUrl(string url) => SetCustomServer(url);
+
+        /// <summary>Enable or disable live notifications and persist the choice.</summary>
+        public void SetNotificationsEnabled(bool enabled)
+        {
+            notificationsEnabled = enabled;
             SaveSettings();
         }
 
         private void SaveSettings()
         {
-            // Parse the URL into components for ConfigNode-safe storage
+            // Persist the custom URL components (ConfigNode-safe), even when the
+            // official server is currently active, so the custom value is preserved.
             string protocol = "http";
             string host = "localhost";
             string port = "5022";
 
             try
             {
-                var uri = new Uri(serverUrl);
+                var uri = new Uri(customServerUrl);
                 protocol = uri.Scheme;
                 host = uri.Host;
                 port = uri.Port.ToString();
             }
             catch
             {
-                Debug.LogWarning("[GeneKerman] Failed to parse server URL, using defaults.");
+                Debug.LogWarning("[GeneKerman] Failed to parse custom server URL, using defaults.");
             }
 
             string settingsPath = Path.Combine(GeneKermanMod.PluginDataPath, "settings.cfg");
             var node = new ConfigNode();
             var gk = node.AddNode("GeneKerman");
+            gk.AddValue("useOfficialServer", useOfficialServer);
+            gk.AddValue("enableNotifications", notificationsEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
             node.Save(settingsPath);
-            Debug.Log($"[GeneKerman] Settings saved — {protocol}://{host}:{port}");
+            Debug.Log($"[GeneKerman] Settings saved — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
         }
 
         // ── Token Management ────────────────────────────────────────────────
@@ -177,6 +242,26 @@ namespace GeneKerman
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] POST {endpoint} failed: {req.error} ({req.responseCode})");
+            }
+        }
+
+        public IEnumerator Delete(string endpoint, ApiCallback callback)
+        {
+            string url = serverUrl + endpoint;
+            using (var req = new UnityWebRequest(url, "DELETE"))
+            {
+                req.downloadHandler = new DownloadHandlerBuffer();
+                if (IsLinked)
+                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                req.timeout = 15;
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback(ok, req.downloadHandler?.text, req.responseCode);
+
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] DELETE {endpoint} failed: {req.error} ({req.responseCode})");
             }
         }
 
@@ -358,6 +443,16 @@ namespace GeneKerman
         public IEnumerator MarkNotificationsRead(ApiCallback callback)
         {
             yield return Post("/api/v1/user/notifications/mark_read", "{}", callback);
+        }
+
+        public IEnumerator MarkNotificationRead(string notifId, ApiCallback callback)
+        {
+            yield return Post($"/api/v1/user/notifications/{notifId}/mark_read", "{}", callback);
+        }
+
+        public IEnumerator DismissNotification(string notifId, ApiCallback callback)
+        {
+            yield return Delete($"/api/v1/user/notifications/{notifId}", callback);
         }
 
         public IEnumerator GetCorps(ApiCallback<Dictionary<string, object>> callback)

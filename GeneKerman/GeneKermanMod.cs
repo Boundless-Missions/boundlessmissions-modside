@@ -37,8 +37,13 @@ namespace GeneKerman
 
         // Internal
         private float lastNotificationCheck;
-        private float notificationInterval = 600f; // 10 minutes
+        private float notificationInterval = 600f; // 10 minutes (fallback poll only)
         private bool initialized;
+
+        // Live notification push + de-dup of already-toasted notifications
+        private NotificationSocket notifSocket;
+        private readonly HashSet<string> seenNotifIds = new HashSet<string>();
+        private bool notifBacklogSeeded; // first poll seeds the panel without toasting
 
         // Toolbar
         private ApplicationLauncherButton toolbarButton;
@@ -73,6 +78,7 @@ namespace GeneKerman
 
             // Initialize API client
             Api = new ApiClient();
+            notifSocket = new NotificationSocket(Api);
 
             // Initialize UI windows
             mainWindow = new UI.MainWindow();
@@ -91,10 +97,12 @@ namespace GeneKerman
             // Invalidate UI textures on scene changes
             GameEvents.onGameSceneLoadRequested.Add(OnSceneChange);
 
-            // If already linked, do an initial data fetch
+            // If already linked, do an initial data fetch and open the live socket
             if (Api.IsLinked)
             {
                 StartCoroutine(InitialFetch());
+                if (Api.NotificationsEnabled)
+                    notifSocket.Connect();
             }
 
             initialized = true;
@@ -110,12 +118,61 @@ namespace GeneKerman
         {
             if (!initialized || !Api.IsLinked) return;
 
-            // Periodic notification check
-            if (Time.realtimeSinceStartup - lastNotificationCheck > notificationInterval)
+            // Notifications can be toggled off in Settings — keep the socket closed
+            // and skip polling entirely when disabled.
+            if (!Api.NotificationsEnabled)
+            {
+                if (notifSocket.IsConnected)
+                    notifSocket.Disconnect();
+                return;
+            }
+
+            // Re-open the socket if notifications were just turned back on at runtime.
+            if (!notifSocket.IsEnabled)
+                notifSocket.Connect();
+
+            // Drive the live notification socket (connect/reconnect on the main thread).
+            notifSocket.Tick();
+
+            // Drain notifications pushed over the socket and surface new ones as toasts.
+            while (notifSocket.TryDequeue(out var notif))
+                HandleIncomingNotification(notif);
+
+            // Fallback polling — only when the live socket is down.
+            if (!notifSocket.IsConnected &&
+                Time.realtimeSinceStartup - lastNotificationCheck > notificationInterval)
             {
                 lastNotificationCheck = Time.realtimeSinceStartup;
                 StartCoroutine(CheckNotifications());
             }
+        }
+
+        /// <summary>
+        /// Toast a notification exactly once (de-duped by id) and update the unread
+        /// badge. Used by both the live socket and the fallback poll.
+        /// </summary>
+        private void HandleIncomingNotification(Dictionary<string, object> notif, bool bumpBadge = true)
+        {
+            if (notif == null) return;
+
+            string id = MiniJSON.GetString(notif, "id");
+            if (!string.IsNullOrEmpty(id) && !seenNotifIds.Add(id))
+                return; // already toasted
+
+            if (bumpBadge) UnreadNotifications++;
+
+            string contractId = "";
+            var data = MiniJSON.GetDict(notif, "data");
+            if (data != null) contractId = MiniJSON.GetString(data, "contract_id");
+
+            notificationPopup.Show(
+                MiniJSON.GetString(notif, "title"),
+                MiniJSON.GetString(notif, "message"),
+                contractId
+            );
+
+            // Keep the panel in sync so the item is already there when opened.
+            mainWindow.AddNotification(notif);
         }
 
         void OnDestroy()
@@ -123,6 +180,7 @@ namespace GeneKerman
             GameEvents.onGUIApplicationLauncherReady.Remove(OnToolbarReady);
             GameEvents.onGUIApplicationLauncherDestroyed.Remove(OnToolbarDestroyed);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneChange);
+            notifSocket?.Disconnect();
             RemoveToolbarButton();
         }
 
@@ -278,24 +336,32 @@ namespace GeneKerman
         {
             yield return Api.GetNotifications((ok, data, err) =>
             {
-                if (ok)
-                {
-                    int count = MiniJSON.GetInt(data, "unread_count");
-                    UnreadNotifications = count;
+                if (!ok) return;
 
-                    var notifList = MiniJSON.GetList(data, "notifications");
-                    foreach (var n in notifList)
+                // Server returns the authoritative unread count (read + unread history).
+                UnreadNotifications = MiniJSON.GetInt(data, "unread_count");
+
+                bool seeding = !notifBacklogSeeded;
+                var notifList = MiniJSON.GetList(data, "notifications");
+                foreach (var n in notifList)
+                {
+                    var notif = n as Dictionary<string, object>;
+                    if (notif == null) continue;
+
+                    if (seeding)
                     {
-                        var notif = n as Dictionary<string, object>;
-                        if (notif != null)
-                        {
-                            notificationPopup.Show(
-                                MiniJSON.GetString(notif, "title"),
-                                MiniJSON.GetString(notif, "message")
-                            );
-                        }
+                        // First poll after launch: items already live in the panel —
+                        // record them as seen so we never toast the backlog.
+                        string id = MiniJSON.GetString(notif, "id");
+                        if (!string.IsNullOrEmpty(id)) seenNotifIds.Add(id);
+                    }
+                    else
+                    {
+                        // Badge already set from unread_count; just toast new ones.
+                        HandleIncomingNotification(notif, bumpBadge: false);
                     }
                 }
+                notifBacklogSeeded = true;
             });
         }
 
@@ -307,6 +373,7 @@ namespace GeneKerman
             ShowMainWindow = true;
             mainWindow.OnOpen();
             StartCoroutine(InitialFetch());
+            notifSocket.Connect();
 
             notificationPopup.Show(
                 "✅ Account Linked!",
@@ -317,6 +384,13 @@ namespace GeneKerman
         public void ShowNotification(string title, string message)
         {
             notificationPopup.Show(title, message);
+        }
+
+        /// <summary>Open the main window's Contracts tab focused on a specific contract.</summary>
+        public void OpenContractDetail(string contractId)
+        {
+            ShowMainWindow = true;
+            mainWindow.OpenContractDetail(contractId);
         }
 
         public void OpenSubmitWindow(string contractId, string mission,

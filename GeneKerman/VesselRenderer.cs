@@ -166,6 +166,14 @@ namespace GeneKerman
             rt.antiAliasing = 4;
             rt.Create();
 
+            // ReadPixels cannot read directly from an MSAA RenderTexture on many
+            // GPUs/drivers — it returns only the clear color, so every view comes
+            // back blank while the CPU-drawn grid/labels still appear. Resolve the
+            // MSAA target into this plain (non-MSAA) texture before reading back.
+            var resolveRt = new RenderTexture(RENDER_SIZE, RENDER_SIZE, 0, RenderTextureFormat.ARGB32);
+            resolveRt.antiAliasing = 1;
+            resolveRt.Create();
+
             var camObj = new GameObject("GK_BlueprintCam");
             var cam = camObj.AddComponent<Camera>();
             cam.targetTexture = rt;
@@ -198,7 +206,8 @@ namespace GeneKerman
                 // Black pass
                 cam.backgroundColor = Color.black;
                 cam.Render();
-                RenderTexture.active = rt;
+                Graphics.Blit(rt, resolveRt);  // resolve MSAA → plain so ReadPixels works
+                RenderTexture.active = resolveRt;
                 readTex.ReadPixels(new Rect(0, 0, RENDER_SIZE, RENDER_SIZE), 0, 0);
                 readTex.Apply();
                 blackPass[i] = readTex.GetPixels32();
@@ -206,7 +215,8 @@ namespace GeneKerman
                 // White pass
                 cam.backgroundColor = Color.white;
                 cam.Render();
-                RenderTexture.active = rt;
+                Graphics.Blit(rt, resolveRt);
+                RenderTexture.active = resolveRt;
                 readTex.ReadPixels(new Rect(0, 0, RENDER_SIZE, RENDER_SIZE), 0, 0);
                 readTex.Apply();
                 whitePass[i] = readTex.GetPixels32();
@@ -219,6 +229,8 @@ namespace GeneKerman
             UnityEngine.Object.DestroyImmediate(camObj);
             rt.Release();
             UnityEngine.Object.DestroyImmediate(rt);
+            resolveRt.Release();
+            UnityEngine.Object.DestroyImmediate(resolveRt);
 
             // ── Restore layers and lighting ──
             RestorePartLayers(origLayers);

@@ -334,5 +334,10 @@ namespace GeneKerman
         {
             createContractWindow.Open(balance, userId);
         }
+
+        public void RefreshContracts()
+        {
+            mainWindow?.RefreshContracts();
+        }
     }
 }

@@ -152,8 +152,14 @@ namespace GeneKerman
             // Use part-level isolation to avoid duplicate-gameObject layer bugs
             List<Part> parts = GetCurrentParts();
             var origLayers = IsolatePartLayers(parts, ISOLATION_LAYER);
-            var lights = UnityEngine.Object.FindObjectsOfType<Light>();
-            var origLightMasks = AddLightLayer(lights, layerMask);
+
+            // Replace scene lighting with uniform fill lights so all 8 views
+            // receive equal illumination regardless of the in-game sun angle.
+            var origAmbientMode  = RenderSettings.ambientMode;
+            var origAmbientLight = RenderSettings.ambientLight;
+            RenderSettings.ambientMode  = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientLight = new Color(0.35f, 0.35f, 0.35f);
+            var fillLightObjects = CreateBlueprintLights(layerMask);
 
             // ── Set up shared render resources ──
             var rt = new RenderTexture(RENDER_SIZE, RENDER_SIZE, 24, RenderTextureFormat.ARGB32);
@@ -214,9 +220,12 @@ namespace GeneKerman
             rt.Release();
             UnityEngine.Object.DestroyImmediate(rt);
 
-            // ── Restore layers ──
+            // ── Restore layers and lighting ──
             RestorePartLayers(origLayers);
-            RestoreLightMasks(lights, origLightMasks);
+            foreach (var go in fillLightObjects)
+                UnityEngine.Object.DestroyImmediate(go);
+            RenderSettings.ambientMode  = origAmbientMode;
+            RenderSettings.ambientLight = origAmbientLight;
 
             // ── Composite blueprint image ──
             Color32[] blueprint = new Color32[IMG_W * IMG_H];
@@ -365,21 +374,26 @@ namespace GeneKerman
             }
         }
 
-        private static int[] AddLightLayer(Light[] lights, int mask)
+        // Six lights: three from above (+35°) and three from below (-35°) at 120° azimuth
+        // intervals so every surface normal receives direct illumination regardless of view.
+        private static GameObject[] CreateBlueprintLights(int layerMask)
         {
-            var orig = new int[lights.Length];
-            for (int i = 0; i < lights.Length; i++)
+            float[] elevations = {  35f,  35f,  35f, -35f, -35f, -35f };
+            float[] azimuths   = {   0f, 120f, 240f,   0f, 120f, 240f };
+            var objects = new GameObject[6];
+            for (int i = 0; i < 6; i++)
             {
-                orig[i] = lights[i].cullingMask;
-                lights[i].cullingMask |= mask;
+                var go = new GameObject("GK_FillLight");
+                var l  = go.AddComponent<Light>();
+                l.type        = LightType.Directional;
+                l.intensity   = 0.6f;
+                l.color       = Color.white;
+                l.cullingMask = layerMask;
+                l.shadows     = LightShadows.None;
+                go.transform.rotation = Quaternion.Euler(elevations[i], azimuths[i], 0f);
+                objects[i] = go;
             }
-            return orig;
-        }
-
-        private static void RestoreLightMasks(Light[] lights, int[] orig)
-        {
-            for (int i = 0; i < lights.Length; i++)
-                lights[i].cullingMask = orig[i];
+            return objects;
         }
 
         // ── Blueprint Compositing ───────────────────────────────────────────

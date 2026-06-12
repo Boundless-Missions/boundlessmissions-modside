@@ -825,6 +825,35 @@ namespace GeneKerman.UI
                     }
                 }
             }
+            else if (status == "submitted")
+            {
+                // The contractor has submitted work. The issuer (outgoing side) reviews
+                // it here — approve releases payment and completes the contract (which is
+                // what unlocks the Import button); refuse opens a dispute. The contractor
+                // just waits. Previously this had no branch, so the issuer had to switch
+                // to Discord to review, and the Import button never appeared in-game.
+                bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
+                if (isOutgoing)
+                {
+                    if (GUILayout.Button("(Ok) Approve", acceptBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        GeneKermanMod.Instance.RunCoroutine(DoReviewContract(cid, true));
+                    }
+                    GUILayout.Space(8);
+                    if (GUILayout.Button("(No) Refuse", deleteBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        GeneKermanMod.Instance.RunCoroutine(DoReviewContract(cid, false));
+                    }
+                }
+                else
+                {
+                    GUI.enabled = false;
+                    GUILayout.Button("Waiting for issuer review...", submitBtnStyle, GUILayout.Height(30));
+                    GUI.enabled = true;
+                }
+            }
             else if (status == "completed")
             {
                 string cid = MiniJSON.GetString(c, "contract_id");
@@ -1069,7 +1098,7 @@ namespace GeneKerman.UI
             }));
         }
 
-        private void RefreshContracts()
+        public void RefreshContracts()
         {
             loadingContracts = true;
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetActiveContracts((ok, data, err) =>
@@ -1150,6 +1179,24 @@ namespace GeneKerman.UI
                 else
                 {
                     SetStatus("(No) Failed to accept contract.");
+                }
+            });
+        }
+
+        private System.Collections.IEnumerator DoReviewContract(string contractId, bool approve)
+        {
+            string body = approve ? "{\"approve\":true}" : "{\"approve\":false}";
+            yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/review", body, (ok, resp, status) =>
+            {
+                if (ok)
+                {
+                    SetStatus(approve ? "(Ok) Submission approved!" : "🗑 Submission refused (dispute opened).");
+                    openContractId = null;
+                    RefreshContracts();
+                }
+                else
+                {
+                    SetStatus("(No) Failed to review submission.");
                 }
             });
         }

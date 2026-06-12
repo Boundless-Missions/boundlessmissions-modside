@@ -666,9 +666,10 @@ namespace GeneKerman.UI
                         {
                             int xp = MiniJSON.GetInt(result, "xp_awarded");
                             int coins = MiniJSON.GetInt(result, "coins_awarded");
-                            statusMsg = $"✅ {message} +{coins} KCoins, +{xp} XP";
                             GeneKermanMod.Instance.ShowNotification("✅ Mission Approved!", $"+{coins} KCoins, +{xp} XP");
                             EditorPartEnforcer.Instance?.StopEnforcing();
+                            IsVisible = false;
+                            GeneKermanMod.Instance.RefreshContracts();
                         }
                         else if (reviewStatus == "refused")
                         {
@@ -677,8 +678,9 @@ namespace GeneKerman.UI
                         else
                         {
                             // Submitted and awaiting review — clear enforcer so VAB is unlocked
-                            statusMsg = $"✅ {message}";
                             EditorPartEnforcer.Instance?.StopEnforcing();
+                            IsVisible = false;
+                            GeneKermanMod.Instance.RefreshContracts();
                         }
                     }
                     else

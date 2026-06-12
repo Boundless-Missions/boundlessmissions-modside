@@ -174,16 +174,32 @@ namespace GeneKerman
                 Debug.Log("[GeneKerman] Creating ProtoVessel...");
                 ProtoVessel protoVessel = new ProtoVessel(innerNode, HighLogic.CurrentGame);
 
-                if (HighLogic.LoadedSceneIsFlight)
+                // ProtoVessel.Load() is what actually registers the vessel with the
+                // running game: it instantiates the Vessel, adds it to
+                // FlightGlobals.Vessels, and adds the proto to flightState.protoVessels.
+                // Merely adding to the protoVessels list (as the old non-flight branch
+                // did) leaves the vessel detached — it never shows up in flight OR the
+                // tracking station until a save/reload rebuilds the universe. KSP itself
+                // uses this same path to spawn rescue-contract vessels and asteroids that
+                // appear in the tracking station, so it's safe in every scene.
+                Debug.Log($"[GeneKerman] Registering ProtoVessel into the universe (scene={HighLogic.LoadedScene})...");
+                protoVessel.Load(HighLogic.CurrentGame.flightState);
+
+                // Persist immediately so the import survives even if the player quits
+                // before the next autosave. The tracking station list is rebuilt from
+                // FlightGlobals on scene (re)entry, so a freshly imported vessel shows up
+                // after re-entering the tracking station (or right away in the space center).
+                if (!HighLogic.LoadedSceneIsFlight)
                 {
-                    Debug.Log("[GeneKerman] Loading ProtoVessel into flight state...");
-                    protoVessel.Load(HighLogic.CurrentGame.flightState);
-                }
-                else
-                {
-                    Debug.Log("[GeneKerman] Not in Flight scene. Injecting ProtoVessel directly into save data...");
-                    if (!HighLogic.CurrentGame.flightState.protoVessels.Contains(protoVessel))
-                        HighLogic.CurrentGame.flightState.protoVessels.Add(protoVessel);
+                    try
+                    {
+                        GamePersistence.SaveGame("persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE);
+                        Debug.Log("[GeneKerman] Saved game after vessel import.");
+                    }
+                    catch (Exception saveEx)
+                    {
+                        Debug.LogWarning($"[GeneKerman] Post-import save failed: {saveEx.Message}");
+                    }
                 }
 
                 Debug.Log($"[GeneKerman] (Ok) Imported vessel '{vesselName}' with pid {newPidDashed}");

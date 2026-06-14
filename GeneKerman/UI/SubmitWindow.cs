@@ -30,9 +30,14 @@ namespace GeneKerman.UI
         public string ContractMission { get; set; }
 
         // Classification from server
-        private string missionType = "active_vessel";  // "craft_build" or "active_vessel"
+        private string missionType = "active_vessel";  // "craft_build", "active_vessel", or "rescue"
         private string requiredSituation = "";           // "ORBITING", "LANDED", etc.
         private string requiredBody = "";                // "Mun", "Duna", etc.
+
+        // Rescue mission data
+        private RescueTargetSpec rescueTarget;
+        private List<string> rescueKerbals;
+        private bool IsRescue { get { return missionType == "rescue"; } }
 
         private Vector2 scrollPos;
         private string statusMsg = "";
@@ -52,7 +57,6 @@ namespace GeneKerman.UI
         // Submission
         private bool isSubmitting;
         private string screenshotPath;
-        private bool includeModlist = true;
         private bool screenshotTaken;
 
         // Validation
@@ -69,13 +73,19 @@ namespace GeneKerman.UI
         private bool stylesReady;
 
         public void Open(string contractId, string mission,
-            string type = "active_vessel", string situation = "", string body = "", string modlist = "")
+            string type = "active_vessel", string situation = "", string body = "", string modlist = "",
+            RescueTargetSpec rescueTargetSpec = null, List<string> rescueKerbalNames = null)
         {
             ContractId = contractId;
             ContractMission = mission;
             missionType = type ?? "active_vessel";
             requiredSituation = situation ?? "";
             requiredBody = body ?? "";
+            rescueTarget = rescueTargetSpec;
+            rescueKerbals = rescueKerbalNames;
+            // For rescue, derive the body the rescuer must reach from the target.
+            if (IsRescue && rescueTarget != null && string.IsNullOrEmpty(requiredBody))
+                requiredBody = rescueTarget.body;
             IsVisible = true;
             isSubmitting = false;
             statusMsg = "";
@@ -167,6 +177,10 @@ namespace GeneKerman.UI
                 }
             }
 
+            // Rescue: all stranded kerbals aboard + correct orbit/surface within margins.
+            if (IsRescue)
+                ValidateRescue(issues);
+
             // Check part legality — list every offending part, not just the first.
             string illegalParts = FindIllegalParts(FlightGlobals.ActiveVessel?.parts);
             if (illegalParts != null)
@@ -179,6 +193,80 @@ namespace GeneKerman.UI
                 validationMsg = string.Join("\n", issues);
         }
 
+        /// <summary>
+        /// Rescue checks: the active vessel must carry every stranded kerbal and be
+        /// at the target orbit (Ap/Pe within margin) or surface spot (Lat/Lon within
+        /// margin). Appends any failures to <paramref name="issues"/>.
+        /// </summary>
+        private void ValidateRescue(List<string> issues)
+        {
+            // All stranded kerbals aboard?
+            if (rescueKerbals != null && rescueKerbals.Count > 0)
+            {
+                var aboard = new HashSet<string>(StringComparer.Ordinal);
+                var vessel = FlightGlobals.ActiveVessel;
+                if (vessel != null)
+                    foreach (var pcm in vessel.GetVesselCrew())
+                        if (pcm != null) aboard.Add(pcm.name);
+
+                var missing = new List<string>();
+                foreach (var k in rescueKerbals)
+                    if (!aboard.Contains(k)) missing.Add(k);
+
+                if (missing.Count > 0)
+                {
+                    vesselValid = false;
+                    issues.Add($"❌ Missing kerbals ({missing.Count}): {string.Join(", ", missing.ToArray())}");
+                }
+            }
+
+            if (rescueTarget == null) return;
+
+            bool surface = (rescueTarget.mode ?? "orbit").ToLower() == "surface";
+            if (surface)
+            {
+                if (!(activeVessel.situation == "LANDED" || activeVessel.situation == "SPLASHED"))
+                {
+                    vesselValid = false;
+                    issues.Add($"❌ Must be landed at {rescueTarget.body} (currently {activeVessel.situation}).");
+                }
+                else
+                {
+                    double dLat = Math.Abs(activeVessel.latitude - rescueTarget.lat);
+                    double dLon = Math.Abs(activeVessel.longitude - rescueTarget.lon);
+                    if (dLon > 180) dLon = 360 - dLon; // wrap
+                    double margin = Math.Max(rescueTarget.marginPos, 0.01);
+                    if (dLat > margin || dLon > margin)
+                    {
+                        vesselValid = false;
+                        issues.Add($"❌ Off target: at {activeVessel.latitude:F2}°,{activeVessel.longitude:F2}° — " +
+                                   $"need {rescueTarget.lat:F2}°,{rescueTarget.lon:F2}° (±{margin:F2}°).");
+                    }
+                }
+            }
+            else
+            {
+                if (activeVessel.situation != "ORBITING")
+                {
+                    vesselValid = false;
+                    issues.Add($"❌ Must be orbiting {rescueTarget.body} (currently {activeVessel.situation}).");
+                }
+                else
+                {
+                    double margin = Math.Max(rescueTarget.marginAlt, 1.0); // metres
+                    double dAp = Math.Abs(activeVessel.apoapsis - rescueTarget.ap);
+                    double dPe = Math.Abs(activeVessel.periapsis - rescueTarget.pe);
+                    if (dAp > margin || dPe > margin)
+                    {
+                        vesselValid = false;
+                        issues.Add($"❌ Orbit off target: Ap {activeVessel.apoapsis / 1000:F0}km / " +
+                                   $"Pe {activeVessel.periapsis / 1000:F0}km — need " +
+                                   $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
+                    }
+                }
+            }
+        }
+
         public void Draw()
         {
             if (!IsVisible) return;
@@ -186,7 +274,7 @@ namespace GeneKerman.UI
             if (GKSkin.NeedsRebuild())
                 stylesReady = false;
 
-            windowRect = GUILayout.Window(windowId, windowRect, DrawContent, "",
+            windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
                 GUIStyle.none, GUILayout.Width(500));
         }
 
@@ -290,12 +378,6 @@ namespace GeneKerman.UI
             }
 
             GUILayout.EndScrollView();
-
-            // Modlist Toggle
-            GUILayout.Space(5);
-            GUILayout.BeginHorizontal();
-            includeModlist = GUILayout.Toggle(includeModlist, " Attach my active Modlist", checkboxStyle);
-            GUILayout.EndHorizontal();
 
             // Status
             if (!string.IsNullOrEmpty(statusMsg))
@@ -587,7 +669,7 @@ namespace GeneKerman.UI
                 craftName = Path.GetFileName(editorCraftPath);
                 // No loadmeta or vessel node for craft_build
             }
-            else if (missionType == "active_vessel" && activeVessel != null)
+            else if (activeVessel != null) // active_vessel or rescue — both submit from flight
             {
                 // Active vessel: send craft file + loadmeta + telemetry + full vessel state
                 var submission = new Dictionary<string, object>
@@ -615,8 +697,10 @@ namespace GeneKerman.UI
                     loadmeta = VesselDataCollector.ReadLoadmeta(craftPath);
                 }
 
-                // Export the full vessel state for transfer
-                vesselNodeData = VesselTransfer.ExportActiveVessel();
+                // Export the full vessel state for transfer, embedding the crew roster so
+                // the importing save recreates each kerbal with their real attributes
+                // (gender / profession / courage / stupidity) and owner tag.
+                vesselNodeData = VesselTransfer.ExportActiveVessel(true);
             }
 
             // Read screenshot
@@ -633,8 +717,9 @@ namespace GeneKerman.UI
                 }
             }
 
-            string modlist = null;
-            if (includeModlist)
+            // The contractor's full installed modlist is always attached — it's
+            // informational context for the issuer and no longer optional.
+            string modlist;
             {
                 var folders = new HashSet<string>();
                 foreach (var p in PartLoader.LoadedPartsList)
@@ -650,6 +735,11 @@ namespace GeneKerman.UI
             // client-side gate.
             string usedModlist = CollectUsedModFolders();
 
+            // For rescue, remember which craft we handed over so it can be removed
+            // from our save once the issuer approves and it's delivered to them.
+            string submittedPid = (IsRescue && FlightGlobals.ActiveVessel != null)
+                ? FlightGlobals.ActiveVessel.id.ToString() : null;
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist,
@@ -661,6 +751,9 @@ namespace GeneKerman.UI
                         var result = MiniJSON.DeserializeDict(resp);
                         string reviewStatus = MiniJSON.GetString(result, "review_status", "");
                         string message = MiniJSON.GetString(result, "message", "Submitted!");
+
+                        if (!string.IsNullOrEmpty(submittedPid))
+                            GeneKermanMod.Instance.RecordRescueSubmission(ContractId, submittedPid);
 
                         if (reviewStatus == "approved")
                         {

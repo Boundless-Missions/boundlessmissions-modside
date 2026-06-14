@@ -29,6 +29,7 @@ namespace GeneKerman
         private string customServerUrl = "http://localhost:5022"; // last custom URL, preserved when official is active
         private bool useOfficialServer;
         private bool notificationsEnabled = true;
+        private bool checkpointPhotosEnabled = true;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -46,6 +47,8 @@ namespace GeneKerman
         public string CustomServerUrl => customServerUrl;
         /// <summary>Whether live notifications (toast popups + socket/poll) are enabled.</summary>
         public bool NotificationsEnabled => notificationsEnabled;
+        /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) are enabled.</summary>
+        public bool CheckpointPhotosEnabled => checkpointPhotosEnabled;
 
         /// <summary>
         /// WebSocket URL for the live notification stream, with the session token
@@ -86,6 +89,7 @@ namespace GeneKerman
                     {
                         bool.TryParse(gk.GetValue("useOfficialServer") ?? "false", out useOfficialServer);
                         bool.TryParse(gk.GetValue("enableNotifications") ?? "true", out notificationsEnabled);
+                        bool.TryParse(gk.GetValue("enableCheckpointPhotos") ?? "true", out checkpointPhotosEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -102,11 +106,14 @@ namespace GeneKerman
                     }
                 }
             }
+            // First setup (no settings.cfg yet): default to the official server.
+            // The choice is persisted so a later switch to a custom server sticks.
             customServerUrl = "http://localhost:5022";
-            useOfficialServer = false;
+            useOfficialServer = true;
             notificationsEnabled = true;
-            serverUrl = customServerUrl;
-            Debug.Log($"[GeneKerman] Using default server: {serverUrl}");
+            serverUrl = OfficialServerUrl;
+            SaveSettings();
+            Debug.Log($"[GeneKerman] First setup — defaulting to official server: {serverUrl}");
         }
 
         /// <summary>Switch to the official server and persist the choice.</summary>
@@ -141,6 +148,13 @@ namespace GeneKerman
             SaveSettings();
         }
 
+        /// <summary>Enable or disable milestone hero-shot prompts and persist the choice.</summary>
+        public void SetCheckpointPhotosEnabled(bool enabled)
+        {
+            checkpointPhotosEnabled = enabled;
+            SaveSettings();
+        }
+
         private void SaveSettings()
         {
             // Persist the custom URL components (ConfigNode-safe), even when the
@@ -166,6 +180,7 @@ namespace GeneKerman
             var gk = node.AddNode("GeneKerman");
             gk.AddValue("useOfficialServer", useOfficialServer);
             gk.AddValue("enableNotifications", notificationsEnabled);
+            gk.AddValue("enableCheckpointPhotos", checkpointPhotosEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -345,6 +360,44 @@ namespace GeneKerman
             }
         }
 
+        // ── Checkpoint Hero Shot Upload ─────────────────────────────────────
+
+        /// <summary>
+        /// Upload a milestone hero shot (PNG) to the server, which posts it to the
+        /// community checkpoint-photos channel. Metadata fields are informational and
+        /// shown in the Discord embed.
+        /// </summary>
+        public IEnumerator UploadCheckpointPhoto(
+            byte[] pngData, string kind, string vesselName,
+            string body, string targetName, ApiCallback callback)
+        {
+            string url = serverUrl + "/api/v1/checkpoint-photo";
+
+            var form = new List<IMultipartFormSection>
+            {
+                new MultipartFormFileSection("photo", pngData, "checkpoint.png", "image/png"),
+                new MultipartFormDataSection("kind", kind ?? "checkpoint"),
+                new MultipartFormDataSection("vessel_name", vesselName ?? ""),
+                new MultipartFormDataSection("body", body ?? ""),
+                new MultipartFormDataSection("target_name", targetName ?? ""),
+            };
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                if (IsLinked)
+                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                req.timeout = 60;
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback?.Invoke(ok, req.downloadHandler?.text, req.responseCode);
+
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Checkpoint photo upload failed: {req.error} ({req.responseCode})");
+            }
+        }
+
         // ── Typed API Methods ───────────────────────────────────────────────
 
         public IEnumerator LinkAccount(string code, ApiCallback<Dictionary<string, object>> callback)
@@ -467,7 +520,8 @@ namespace GeneKerman
         }
 
         public IEnumerator CreateContract(string contractorId, string mission,
-            int payment, int fine, string dueDate, string modlist, ApiCallback<Dictionary<string, object>> callback)
+            int payment, int fine, string dueDate, string modlist,
+            ApiCallback<Dictionary<string, object>> callback, string contractType = "auto")
         {
             var body = new Dictionary<string, object>
             {
@@ -476,10 +530,11 @@ namespace GeneKerman
                 { "payment", payment },
                 { "fine", fine },
                 { "due_date", dueDate },
+                { "contract_type", string.IsNullOrEmpty(contractType) ? "auto" : contractType },
             };
             if (!string.IsNullOrEmpty(modlist))
                 body.Add("modlist", modlist);
-            
+
             yield return Post("/api/v1/contracts/create", MiniJSON.Serialize(body), (ok, resp, status) =>
             {
                 if (!string.IsNullOrEmpty(resp))
@@ -492,6 +547,140 @@ namespace GeneKerman
                 else
                     callback(false, null, "No response from server");
             });
+        }
+
+        /// <summary>
+        /// Create a rescue contract. Uploads the issuer's snapshotted vessel (the
+        /// wreck, crew already renamed) as a gzipped ConfigNode alongside the target
+        /// location and rename map. Multipart because of the file upload.
+        /// </summary>
+        public IEnumerator CreateRescueContract(
+            string contractorId, string mission, int payment, int fine, string dueDate,
+            string modlist, string body, string mode,
+            double ap, double pe, double lat, double lon,
+            double marginAlt, double marginPos, bool isModded,
+            string rescuePid, string kerbalsJson, string vesselNodeData,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            string url = serverUrl + "/api/v1/contracts/create_rescue";
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+
+            var form = new List<IMultipartFormSection>
+            {
+                new MultipartFormDataSection("contractor_id", contractorId ?? ""),
+                new MultipartFormDataSection("mission", mission ?? ""),
+                new MultipartFormDataSection("payment", payment.ToString(inv)),
+                new MultipartFormDataSection("fine", fine.ToString(inv)),
+                new MultipartFormDataSection("due_date", dueDate ?? ""),
+                new MultipartFormDataSection("body", body ?? ""),
+                new MultipartFormDataSection("mode", mode ?? "orbit"),
+                new MultipartFormDataSection("ap", ap.ToString("G17", inv)),
+                new MultipartFormDataSection("pe", pe.ToString("G17", inv)),
+                new MultipartFormDataSection("lat", lat.ToString("G17", inv)),
+                new MultipartFormDataSection("lon", lon.ToString("G17", inv)),
+                new MultipartFormDataSection("margin_alt", marginAlt.ToString("G17", inv)),
+                new MultipartFormDataSection("margin_pos", marginPos.ToString("G17", inv)),
+                new MultipartFormDataSection("is_modded", isModded ? "true" : "false"),
+                new MultipartFormDataSection("kerbals", string.IsNullOrEmpty(kerbalsJson) ? "[]" : kerbalsJson),
+            };
+            if (!string.IsNullOrEmpty(modlist))
+                form.Add(new MultipartFormDataSection("modlist", modlist));
+            if (!string.IsNullOrEmpty(rescuePid))
+                form.Add(new MultipartFormDataSection("rescue_pid", rescuePid));
+
+            byte[] nodeBytes = Encoding.UTF8.GetBytes(vesselNodeData ?? "");
+            byte[] compressed = GzipCompress(nodeBytes);
+            form.Add(new MultipartFormFileSection("vessel_node", compressed, "vessel.cfg", "application/gzip"));
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                if (IsLinked)
+                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                req.timeout = 60;
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                string resp = req.downloadHandler?.text;
+                if (!string.IsNullOrEmpty(resp))
+                {
+                    var data = MiniJSON.DeserializeDict(resp);
+                    bool success = MiniJSON.GetBool(data, "success", false);
+                    string msg = MiniJSON.GetString(data, "message", ok ? "Success" : "Failed");
+                    callback(success, data, success ? null : msg);
+                }
+                else
+                {
+                    callback(false, null, "No response from server");
+                }
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] CreateRescue failed: {req.error} ({req.responseCode})");
+            }
+        }
+
+        // ── Marketplace ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// List a craft for sale on the marketplace. The craft file is gzip
+        /// compressed before upload (the server decompresses and stores raw).
+        /// </summary>
+        public IEnumerator ListCraftForSale(
+            byte[] craftFileData, string craftFileName,
+            string craftName, string craftType, int partCount,
+            float mass, float cost, int price,
+            byte[] blueprintData,
+            ApiCallback callback)
+        {
+            string url = serverUrl + "/api/v1/marketplace/list";
+
+            var form = new List<IMultipartFormSection>();
+
+            byte[] compressed = GzipCompress(craftFileData);
+            form.Add(new MultipartFormFileSection("craft_file", compressed,
+                craftFileName ?? "craft.craft", "application/gzip"));
+
+            // Rendered blueprint image — shown publicly on the Discord listing.
+            if (blueprintData != null && blueprintData.Length > 0)
+                form.Add(new MultipartFormFileSection("blueprint", blueprintData,
+                    "blueprint.png", "image/png"));
+
+            form.Add(new MultipartFormDataSection("craft_name", craftName ?? "Untitled"));
+            form.Add(new MultipartFormDataSection("craft_type", craftType ?? "VAB"));
+            form.Add(new MultipartFormDataSection("part_count", partCount.ToString()));
+            form.Add(new MultipartFormDataSection("mass", mass.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            form.Add(new MultipartFormDataSection("cost", cost.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            form.Add(new MultipartFormDataSection("price", price.ToString()));
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                if (IsLinked)
+                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                req.timeout = 60;
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback(ok, req.downloadHandler?.text, req.responseCode);
+
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Marketplace list failed: {req.error} ({req.responseCode})");
+            }
+        }
+
+        public IEnumerator GetMarketplaceListings(ApiCallback<Dictionary<string, object>> callback)
+        {
+            yield return Get("/api/v1/marketplace/listings", (ok, resp, status) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                    callback(true, MiniJSON.DeserializeDict(resp), null);
+                else
+                    callback(false, null, "Failed to fetch marketplace listings");
+            });
+        }
+
+        public IEnumerator DelistCraft(string listingId, ApiCallback callback)
+        {
+            yield return Post($"/api/v1/marketplace/{listingId}/delist", "{}", callback);
         }
 
         /// <summary>

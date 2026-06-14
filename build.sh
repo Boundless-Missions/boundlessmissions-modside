@@ -52,6 +52,12 @@ elif [ -f "$SCRIPT_DIR/logo.png" ]; then
     echo "  → Copied custom toolbar icon (logo.png)"
 fi
 
+# Copy Iconpack-1 UI icons
+if [ -d "$SCRIPT_DIR/Iconpack-1" ]; then
+    cp "$SCRIPT_DIR/Iconpack-1/"*.png "$GAMEDATA_SRC/Textures/"
+    echo "  → Copied Iconpack-1 UI icons"
+fi
+
 # Copy default settings if not exists
 if [ ! -f "$GAMEDATA_SRC/PluginData/settings.cfg" ]; then
     cat > "$GAMEDATA_SRC/PluginData/settings.cfg" << 'EOF'

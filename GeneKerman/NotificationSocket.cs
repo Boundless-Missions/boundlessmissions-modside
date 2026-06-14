@@ -29,13 +29,30 @@ namespace GeneKerman
         private volatile bool connected;
         private volatile bool connecting;
         private volatile bool pendingRetry; // set by OnClose (bg thread), consumed by Tick (main)
+        private volatile bool sendDead;     // set by a failed keepalive (bg thread), consumed by Tick
+        private volatile bool justConnected; // set by OnOpen (bg thread), consumed by ConsumeJustConnected
         private bool enabled;               // set by Connect()/Disconnect(), read on main thread
         private float nextRetryTime;
+        private float lastKeepalive;        // main-thread keepalive timer
         private float retryDelay = 2f;      // backoff: 2s → 30s
         private const float MAX_RETRY = 30f;
+        private const float KEEPALIVE_INTERVAL = 25f; // ping cadence (keeps NAT open, surfaces dead sockets)
 
         public bool IsConnected => connected;
         public bool IsEnabled => enabled;
+
+        /// <summary>
+        /// Returns true exactly once after each successful (re)connect. The caller
+        /// uses this to run a catch-up notification poll: pushes the server sent
+        /// while the socket was dead are lost (they hit a discarded connection), so
+        /// only a fresh fetch recovers them — and re-syncs the contract list.
+        /// </summary>
+        public bool ConsumeJustConnected()
+        {
+            if (!justConnected) return false;
+            justConnected = false;
+            return true;
+        }
 
         public NotificationSocket(ApiClient api)
         {
@@ -76,11 +93,54 @@ namespace GeneKerman
                 return;
             }
 
-            if (connected || connecting) return;
+            if (connected)
+            {
+                // A keepalive send failed (broken pipe on a silently dropped
+                // connection). Without this the socket would stay "connected"
+                // forever — never reconnecting and, worse, suppressing the
+                // fallback poll in GeneKermanMod — so no notifications (and no
+                // contract refresh) would ever arrive again until a manual action.
+                if (sendDead)
+                {
+                    Debug.LogWarning("[GeneKerman] Notification socket dead (keepalive failed); reconnecting.");
+                    CloseSocket();
+                    ScheduleRetry();
+                    return;
+                }
+
+                // Periodic keepalive: keeps NAT mappings alive and turns a silently
+                // dropped TCP connection into a send failure within one cycle.
+                if (Time.realtimeSinceStartup - lastKeepalive >= KEEPALIVE_INTERVAL)
+                {
+                    lastKeepalive = Time.realtimeSinceStartup;
+                    SendKeepalive();
+                }
+                return;
+            }
+
+            if (connecting) return;
             if (!api.IsLinked) return;
             if (Time.realtimeSinceStartup < nextRetryTime) return;
 
             OpenSocket();
+        }
+
+        // Fire-and-forget keepalive. SendAsync avoids blocking the Unity main
+        // thread; the completed callback (bg thread) flags a dead socket so Tick
+        // can drop and reconnect it. The server discards these frames.
+        private void SendKeepalive()
+        {
+            var sock = ws;
+            if (sock == null) return;
+            try
+            {
+                sock.SendAsync("{\"type\":\"ping\"}", ok => { if (!ok) sendDead = true; });
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] Keepalive send threw: " + ex.Message);
+                sendDead = true;
+            }
         }
 
         private void OpenSocket()
@@ -89,6 +149,8 @@ namespace GeneKerman
             if (string.IsNullOrEmpty(url)) return;
 
             connecting = true;
+            sendDead = false;
+            lastKeepalive = Time.realtimeSinceStartup;
             try
             {
                 CloseSocket();
@@ -103,6 +165,7 @@ namespace GeneKerman
                 {
                     connected = true;
                     connecting = false;
+                    justConnected = true;
                     retryDelay = 2f;
                     Debug.Log("[GeneKerman] Notification socket connected.");
                 };
@@ -153,6 +216,7 @@ namespace GeneKerman
             try { ws.Close(); } catch { /* ignore */ }
             ws = null;
             connected = false;
+            sendDead = false;
         }
     }
 }

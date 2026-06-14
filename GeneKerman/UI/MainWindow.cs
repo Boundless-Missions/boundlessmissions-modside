@@ -40,11 +40,52 @@ namespace GeneKerman.UI
         private GUIStyle acceptBtnStyle, submitBtnStyle, deleteBtnStyle;
         private GUIStyle checkboxStyle, mailRowStyle, mailSenderStyle;
         private GUIStyle mailSubjectStyle, mailAmountStyle, mailDateStyle;
+        private GUIStyle iconBtnStyle;
         private bool stylesReady;
 
-        private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Notifications", "Settings" };
+        // Icon textures loaded from Iconpack-1 (via GameData/GeneKerman/Textures/)
+        private Texture2D iconRefresh, iconCompose, iconInbox, iconTrash, iconCross;
+        private Texture2D iconUnlink, iconSubmit;
+
+        // Pre-built GUIContent for icon+text buttons
+        private GUIContent gcRefresh, gcRefreshMissions, gcRefreshOnly;
+        private GUIContent gcInbox, gcTrash, gcCompose, gcUnlink;
+        private GUIContent gcDel, gcRestore, gcSell, gcOpen;
+
+        private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Market", "Notifications", "Settings" };
         private string serverUrlInput = "";
         private string disputeDateInput = ""; // proposed new deadline for a "More Time" dispute
+
+        // Marketplace state
+        private string sellPriceInput = "100";
+        private string editorCraftName = "";
+        private string editorCraftType = "VAB";
+        private int editorPartCount;
+        private float editorCraftMass, editorCraftCost;
+        private string editorCraftPath = "";
+        private List<object> marketListings;
+        private bool loadingMarket;
+        private bool selling;
+
+        // Craft import queue — crafts the player selected in Discord. The mod polls
+        // /api/v1/craft/imports/pending and auto-imports each into the active save.
+        private bool importPollInFlight;
+        private readonly HashSet<string> processingImports = new HashSet<string>();
+
+        // Rescue wrecks already spawned this session, keyed by contract id, so a
+        // retried/repeated accept coroutine can't spawn the stranded vessel twice.
+        private readonly HashSet<string> spawnedRescueWrecks = new HashSet<string>();
+
+        // Blueprint preview popup — shows the contractor's submitted render(s) so the
+        // issuer can review the work before approving/refusing a submission.
+        private bool showBlueprintPopup;
+        private bool loadingBlueprints;
+        private string blueprintVesselName = "";
+        private string blueprintStatus = "";
+        private readonly List<Texture2D> blueprintTextures = new List<Texture2D>();
+        private Vector2 blueprintScroll;
+        private Rect blueprintRect = new Rect(180, 90, 560, 560);
+        private readonly int blueprintWindowId = "GKBlueprint".GetHashCode();
 
         // Trash state
         private HashSet<string> trashedContracts = new HashSet<string>();
@@ -125,10 +166,19 @@ namespace GeneKerman.UI
         {
             // Detect scene change — Unity destroys textures on transition
             if (GKSkin.NeedsRebuild())
+            {
                 stylesReady = false;
+                // The downloaded blueprint textures were destroyed with the scene;
+                // drop the popup rather than draw dead handles.
+                if (showBlueprintPopup) CloseBlueprintPreview();
+            }
 
-            windowRect = GUILayout.Window(windowId, windowRect, DrawContent, "",
+            windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
                 GUIStyle.none, GUILayout.Width(550));
+
+            if (showBlueprintPopup)
+                blueprintRect = ClickThroughHelper.Window(blueprintWindowId, blueprintRect,
+                    DrawBlueprintPopup, "", GUIStyle.none, GUILayout.Width(560));
         }
 
         private void InitStyles()
@@ -275,7 +325,48 @@ namespace GeneKerman.UI
                 active = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
                 border = new RectOffset(0, 0, 0, 0), padding = new RectOffset(5, 5, 5, 5)
             };
+
+            // Small icon-only button style for per-row actions (del/restore)
+            iconBtnStyle = new GUIStyle(tabStyle)
+            {
+                fixedHeight = 0,
+                padding = new RectOffset(4, 4, 3, 3),
+                alignment = TextAnchor.MiddleCenter,
+                imagePosition = ImagePosition.ImageOnly
+            };
+
+            // Load icon textures from Iconpack-1 (deployed to Textures/)
+            iconRefresh = GKSkin.LoadIcon("Refresh");
+            iconCompose = GKSkin.LoadIcon("Compose");
+            iconInbox   = GKSkin.LoadIcon("Inbox");
+            iconTrash   = GKSkin.LoadIcon("TrashBin");
+            iconCross   = GKSkin.LoadIcon("Cross");
+            iconUnlink  = GKSkin.LoadIcon("Unlink");
+            iconSubmit  = GKSkin.LoadIcon("Submit");
+
+            // Build GUIContent objects — icon + label text. If an icon failed to
+            // load (file missing), fall back to the old text-only labels.
+            gcRefresh         = MakeGC(iconRefresh, " Refresh",          "[~] Refresh");
+            gcRefreshMissions = MakeGC(iconRefresh, " Refresh Missions", "[~] Refresh Missions");
+            gcRefreshOnly     = MakeGC(iconRefresh, "",                  "[~]");
+            gcInbox           = MakeGC(iconInbox,   " Inbox",            "[+] Inbox");
+            gcTrash           = MakeGC(iconTrash,   " Trash",            "[X] Trash");
+            gcCompose         = MakeGC(iconCompose, " Compose",          "[New] Compose");
+            gcUnlink          = MakeGC(iconUnlink,  " Unlink Account",   "[U] Unlink Account");
+            gcDel             = MakeGC(GKSkin.LoadIcon("TrashBin", 10),  "",  "[Del]");
+            gcRestore         = MakeGC(GKSkin.LoadIcon("Inbox", 10),  "",  "[Res]");
+            gcSell            = MakeGC(iconSubmit,  " Sell on Marketplace", "[$] Sell on Marketplace");
+            gcOpen            = MakeGC(iconInbox,   " Open",             "[>] Open");
+
             stylesReady = true;
+        }
+
+        /// <summary>Build a GUIContent with icon + label, or fallback text if the icon is null.</summary>
+        private static GUIContent MakeGC(Texture2D icon, string label, string fallback)
+        {
+            if (icon != null)
+                return new GUIContent(label, icon);
+            return new GUIContent(fallback);
         }
 
         private GUIStyle MakeMissionStyle(Color accent)
@@ -315,7 +406,7 @@ namespace GeneKerman.UI
             for (int i = 0; i < tabNames.Length; i++)
             {
                 string label = tabNames[i];
-                if (i == 3 && unread > 0) label += $" ({unread})";
+                if (i == 4 && unread > 0) label += $" ({unread})";
                 if (GUILayout.Button(label, i == selectedTab ? tabActiveStyle : tabStyle))
                 {
                     selectedTab = i;
@@ -333,8 +424,9 @@ namespace GeneKerman.UI
                 case 0: DrawMissionsTab(); break;
                 case 1: DrawContractsTab(); break;
                 case 2: DrawProfileTab(); break;
-                case 3: DrawNotificationsTab(); break;
-                case 4: DrawSettingsTab(); break;
+                case 3: DrawMarketplaceTab(); break;
+                case 4: DrawNotificationsTab(); break;
+                case 5: DrawSettingsTab(); break;
             }
             GUILayout.EndScrollView();
 
@@ -363,7 +455,7 @@ namespace GeneKerman.UI
             if (missions == null || missions.Count == 0)
             {
                 GUILayout.Label("No missions available.", labelStyle);
-                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button(gcRefresh, GUILayout.Height(30)))
                     RefreshMissions();
                 return;
             }
@@ -409,7 +501,7 @@ namespace GeneKerman.UI
             }
 
             GUILayout.Space(5);
-            if (GUILayout.Button("[~] Refresh Missions", GUILayout.Height(28)))
+            if (GUILayout.Button(gcRefreshMissions, GUILayout.Height(28)))
                 RefreshMissions();
         }
 
@@ -421,6 +513,17 @@ namespace GeneKerman.UI
         private int filterMode; // 0=All, 1=Incoming, 2=Outgoing
         private readonly string[] filterLabels = { "All", "Incoming", "Outgoing" };
         private string openContractId; // If set, shows detail view
+        private string rescueAcceptConfirmId; // Contract awaiting modded-target accept confirm
+
+        /// <summary>Coerce a MiniJSON list into a List&lt;string&gt; (used for rescue kerbal names).</summary>
+        private static List<string> ToStringList(List<object> list)
+        {
+            var result = new List<string>();
+            if (list != null)
+                foreach (var o in list)
+                    if (o != null) result.Add(o.ToString());
+            return result;
+        }
 
         private void DrawContractsTab()
         {
@@ -441,18 +544,19 @@ namespace GeneKerman.UI
             // Row 1: Inbox/Trash + Compose + Refresh
             GUILayout.BeginHorizontal();
 
-            if (GUILayout.Button("[+] Inbox", !showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
+            if (GUILayout.Button(gcInbox, !showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
                 showTrash = false;
-            if (GUILayout.Button("[X] Trash", showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
+            if (GUILayout.Button(gcTrash, showTrash ? tabActiveStyle : tabStyle, GUILayout.Height(26), GUILayout.Width(80)))
                 showTrash = true;
 
             GUILayout.Space(10);
 
-            if (!showTrash && GUILayout.Button("[New] Compose", acceptBtnStyle, GUILayout.Height(26)))
+            if (!showTrash && GUILayout.Button(gcCompose, acceptBtnStyle, GUILayout.Height(26)))
             {
                 int balance = profile != null ? MiniJSON.GetInt(profile, "balance") : 0;
                 string userId = profile != null ? MiniJSON.GetString(profile, "user_id", "") : "";
-                GeneKermanMod.Instance.OpenCreateContractWindow(balance, userId);
+                string userName = profile != null ? MiniJSON.GetString(profile, "username", "") : "";
+                GeneKermanMod.Instance.OpenCreateContractWindow(balance, userId, userName);
             }
 
             GUI.enabled = selectedContracts.Count > 0;
@@ -472,7 +576,7 @@ namespace GeneKerman.UI
 
             GUILayout.FlexibleSpace();
 
-            if (GUILayout.Button("[~]", tabStyle, GUILayout.Height(26), GUILayout.Width(30)))
+            if (GUILayout.Button(gcRefreshOnly, tabStyle, GUILayout.Height(26), GUILayout.Width(30)))
                 RefreshContracts();
 
             GUILayout.EndHorizontal();
@@ -662,7 +766,7 @@ namespace GeneKerman.UI
                     {
                         if (!showTrash)
                         {
-                            if (GUILayout.Button("[Del]", tabStyle, GUILayout.Width(25), GUILayout.Height(20)))
+                            if (GUILayout.Button(gcDel, iconBtnStyle, GUILayout.Width(22), GUILayout.Height(20)))
                             {
                                 trashedContracts.Add(cid);
                                 SaveTrash();
@@ -670,7 +774,7 @@ namespace GeneKerman.UI
                         }
                         else
                         {
-                            if (GUILayout.Button("[Res]", tabStyle, GUILayout.Width(25), GUILayout.Height(20)))
+                            if (GUILayout.Button(gcRestore, iconBtnStyle, GUILayout.Width(22), GUILayout.Height(20)))
                             {
                                 trashedContracts.Remove(cid);
                                 SaveTrash();
@@ -767,7 +871,29 @@ namespace GeneKerman.UI
                 DrawDetailRow("Created", createdAt.Substring(0, 10));
 
             string mType = MiniJSON.GetString(c, "mission_type", "active_vessel");
-            DrawDetailRow("Type", mType == "craft_build" ? "Craft Build" : "Active Vessel");
+            string typeLabel = mType == "craft_build" ? "Craft Build"
+                : mType == "rescue" ? "🛟 Rescue Mission" : "Active Vessel";
+            DrawDetailRow("Type", typeLabel);
+
+            // Rescue: show the target (body + orbit/surface spot) and the stranded crew.
+            if (mType == "rescue")
+            {
+                var rt = MiniJSON.GetDict(c, "rescue_target");
+                if (rt != null)
+                {
+                    string rbody = MiniJSON.GetString(rt, "body", "?");
+                    string rmode = MiniJSON.GetString(rt, "mode", "orbit");
+                    if (rmode == "surface")
+                        DrawDetailRow("Target", $"{rbody} surface @ {MiniJSON.GetDouble(rt, "lat"):F1}°,{MiniJSON.GetDouble(rt, "lon"):F1}°");
+                    else
+                        DrawDetailRow("Target", $"{rbody} orbit Ap {MiniJSON.GetDouble(rt, "ap") / 1000:F0}km / Pe {MiniJSON.GetDouble(rt, "pe") / 1000:F0}km");
+                    if (MiniJSON.GetBool(rt, "is_modded"))
+                        DrawDetailRow("⚠ Mod", $"Needs the {rbody} planet pack");
+                }
+                var krew = MiniJSON.GetList(c, "rescue_kerbals");
+                if (krew != null && krew.Count > 0)
+                    DrawDetailRow("Kerbals", $"{krew.Count} to recover");
+            }
 
             GUILayout.EndVertical();
 
@@ -822,7 +948,15 @@ namespace GeneKerman.UI
                     string reqSit = MiniJSON.GetString(c, "required_situation", "");
                     string reqBody = MiniJSON.GetString(c, "required_body", "");
                     string reqModlist = MiniJSON.GetString(c, "modlist", "");
-                    GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody, reqModlist);
+                    RescueTargetSpec rescueSpec = null;
+                    List<string> rescueKerbals = null;
+                    if (mT == "rescue")
+                    {
+                        rescueSpec = RescueTargetSpec.FromDict(MiniJSON.GetDict(c, "rescue_target"));
+                        rescueKerbals = ToStringList(MiniJSON.GetList(c, "rescue_kerbals"));
+                    }
+                    GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody, reqModlist,
+                        rescueSpec, rescueKerbals);
                 }
             }
             else if (status == "pending")
@@ -841,16 +975,32 @@ namespace GeneKerman.UI
                 }
                 else
                 {
-                    if (GUILayout.Button("(Ok) Accept", acceptBtnStyle, GUILayout.Height(30)))
+                    string cid = MiniJSON.GetString(c, "contract_id");
+                    string issuerName = MiniJSON.GetString(c, "issuer_name", "");
+                    bool isRescue = MiniJSON.GetString(c, "mission_type", "") == "rescue";
+                    bool moddedTarget = MiniJSON.GetBool(c, "is_modded_target");
+
+                    // Rescue to a modded planet: warn and require a second confirm click
+                    // so the rescuer doesn't accept a mission they can't reach.
+                    if (isRescue && moddedTarget && rescueAcceptConfirmId != cid)
                     {
-                        string cid = MiniJSON.GetString(c, "contract_id");
-                        GeneKermanMod.Instance.RunCoroutine(DoAcceptContract(cid));
+                        string rbody = "this planet";
+                        var rtw = MiniJSON.GetDict(c, "rescue_target");
+                        if (rtw != null) rbody = MiniJSON.GetString(rtw, "body", rbody);
+                        GUILayout.Label($"⚠ Targets {rbody} (modded). You need its planet pack installed.", valueStyle);
+                        if (GUILayout.Button("⚠ Accept anyway", acceptBtnStyle, GUILayout.Height(30)))
+                            rescueAcceptConfirmId = cid;
+                    }
+                    else if (GUILayout.Button("(Ok) Accept", acceptBtnStyle, GUILayout.Height(30)))
+                    {
+                        rescueAcceptConfirmId = null;
+                        GeneKermanMod.Instance.RunCoroutine(DoAcceptContract(cid, issuerName));
                         openContractId = null;
                     }
                     GUILayout.Space(8);
                     if (GUILayout.Button("(No) Decline", deleteBtnStyle, GUILayout.Height(30)))
                     {
-                        string cid = MiniJSON.GetString(c, "contract_id");
+                        rescueAcceptConfirmId = null;
                         GeneKermanMod.Instance.RunCoroutine(DoCancelContract(cid));
                         openContractId = null;
                     }
@@ -866,6 +1016,14 @@ namespace GeneKerman.UI
                 bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
                 if (isOutgoing)
                 {
+                    // Let the issuer eyeball the contractor's submitted render(s)
+                    // before deciding — the blueprint + vessel info opens in a popup.
+                    if (GUILayout.Button("🖼 View Blueprints", submitBtnStyle, GUILayout.Height(30)))
+                    {
+                        string cid = MiniJSON.GetString(c, "contract_id");
+                        OpenBlueprintPreview(cid);
+                    }
+                    GUILayout.Space(8);
                     if (GUILayout.Button("(Ok) Approve", acceptBtnStyle, GUILayout.Height(30)))
                     {
                         string cid = MiniJSON.GetString(c, "contract_id");
@@ -933,9 +1091,19 @@ namespace GeneKerman.UI
             else if (status == "completed")
             {
                 string cid = MiniJSON.GetString(c, "contract_id");
-                bool alreadyImported = GKContractScenario.Instance != null && GKContractScenario.Instance.HasImportedVessel(cid);
+                bool botIssued = MiniJSON.GetBool(c, "is_bot_issued");
 
-                if (alreadyImported)
+                // Bot-contract crafts are delivered to the builder's corporation
+                // channel as a blueprint — never imported as a live vessel (that
+                // would let them be re-imported/duplicated). Only player-to-player
+                // contracts deliver their craft into the save here.
+                if (botIssued)
+                {
+                    GUI.enabled = false;
+                    GUILayout.Button("(Ok) Delivered to your corp", submitBtnStyle, GUILayout.Height(30));
+                    GUI.enabled = true;
+                }
+                else if (GKContractScenario.Instance != null && GKContractScenario.Instance.HasImportedVessel(cid))
                 {
                     GUI.enabled = false;
                     GUILayout.Button("(Ok) Vessel Imported", submitBtnStyle, GUILayout.Height(30));
@@ -945,7 +1113,10 @@ namespace GeneKerman.UI
                 {
                     if (GUILayout.Button("[+] Import / Download", submitBtnStyle, GUILayout.Height(30)))
                     {
-                        GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(cid));
+                        // The deliverable craft belongs to whoever built/submitted it (the
+                        // contractor) — its crew get tagged with their name on import.
+                        string ownerName = MiniJSON.GetString(c, "contractor_name", "");
+                        GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(cid, ownerName));
                     }
                 }
             }
@@ -994,7 +1165,7 @@ namespace GeneKerman.UI
             if (loadingProfile || profile == null)
             {
                 GUILayout.Label("Loading profile...", labelStyle);
-                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button(gcRefresh, GUILayout.Height(30)))
                     RefreshProfile();
                 return;
             }
@@ -1033,7 +1204,7 @@ namespace GeneKerman.UI
             GUILayout.BeginVertical(boxDarkStyle);
             GUILayout.Label(" Account", valueStyle);
             GUILayout.Label($"Server: {GeneKermanMod.Instance.Api.ServerUrl}", labelStyle);
-            if (GUILayout.Button("[U] Unlink Account", GUILayout.Height(28)))
+            if (GUILayout.Button(gcUnlink, GUILayout.Height(28)))
             {
                 GeneKermanMod.Instance.Api.ClearToken();
                 GeneKermanMod.Instance.ShowMainWindow = false;
@@ -1077,7 +1248,7 @@ namespace GeneKerman.UI
             if (notifications == null || notifications.Count == 0)
             {
                 GUILayout.Label("No notifications.", labelStyle);
-                if (GUILayout.Button("[~] Refresh", GUILayout.Height(30)))
+                if (GUILayout.Button(gcRefresh, GUILayout.Height(30)))
                     RefreshNotifications();
                 return;
             }
@@ -1109,7 +1280,7 @@ namespace GeneKerman.UI
 
                 GUILayout.BeginHorizontal();
                 if (!string.IsNullOrEmpty(contractId)
-                    && GUILayout.Button("[>] Open", tabStyle, GUILayout.Height(22), GUILayout.Width(80)))
+                    && GUILayout.Button(gcOpen, tabStyle, GUILayout.Height(22), GUILayout.Width(80)))
                 {
                     OpenContractDetail(contractId);
                 }
@@ -1150,7 +1321,7 @@ namespace GeneKerman.UI
                     }
                 }));
             }
-            if (GUILayout.Button("[~] Refresh", GUILayout.Height(28)))
+            if (GUILayout.Button(gcRefresh, GUILayout.Height(28)))
                 RefreshNotifications();
             GUILayout.EndHorizontal();
         }
@@ -1387,19 +1558,61 @@ namespace GeneKerman.UI
             });
         }
 
-        private System.Collections.IEnumerator DoAcceptContract(string contractId)
+        private System.Collections.IEnumerator DoAcceptContract(string contractId, string issuerName = "")
         {
+            string wreckUrl = null;
+            RescueTargetSpec wreckTarget = null;
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/accept", "{}", (ok, resp, status) =>
             {
                 if (ok)
                 {
                     SetStatus("(Ok) Contract accepted!");
+                    if (!string.IsNullOrEmpty(resp))
+                    {
+                        var data = MiniJSON.DeserializeDict(resp);
+                        wreckUrl = MiniJSON.GetString(data, "rescue_vessel_node_url", null);
+                        wreckTarget = RescueTargetSpec.FromDict(MiniJSON.GetDict(data, "rescue_target"));
+                    }
                     RefreshContracts();
                 }
                 else
                 {
                     SetStatus("(No) Failed to accept contract.");
                 }
+            });
+
+            // Rescue: spawn the stranded vessel; its crew are tagged with the issuer's name.
+            if (!string.IsNullOrEmpty(wreckUrl) && wreckTarget != null)
+                yield return DoSpawnRescueWreck(contractId, wreckUrl, wreckTarget, issuerName);
+        }
+
+        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName)
+        {
+            // Guard against a double spawn if accept is retried for the same contract.
+            if (!string.IsNullOrEmpty(contractId) && !spawnedRescueWrecks.Add(contractId))
+                yield break;
+            string myName = GeneKermanMod.Instance.LinkedUsername;
+            yield return GeneKermanMod.Instance.Api.DownloadFile(wreckUrl, (ok, fileData) =>
+            {
+                if (!ok || fileData == null)
+                {
+                    spawnedRescueWrecks.Remove(contractId); // let a later retry try again
+                    SetStatus("⚠ Accepted, but could not download the stranded vessel.");
+                    return;
+                }
+                string node = DecompressToString(fileData);
+                // Spawn the stranded vessel where it actually is (its real orbit from the
+                // snapshot) — NOT at the delivery target. The target is where the rescuer
+                // must DELIVER the crew, so the wreck has to be elsewhere or there's no
+                // mission. Import freezes the snapshot's orbit epoch to "now" so the wreck
+                // appears exactly where the issuer left it, instead of KSP propagating the
+                // stale epoch forward and placing it wherever the source vessel would be at
+                // the current universe time. Crew are tagged with the issuer's name; the
+                // rescuer collects them and brings them to the target to complete.
+                string name = VesselTransfer.ImportVesselAtTarget(node, null, issuerName, myName);
+                SetStatus(!string.IsNullOrEmpty(name)
+                    ? $"🛟 Stranded vessel '{name}' is adrift — find it and bring the crew to {target.body}."
+                    : "⚠ Could not spawn the stranded vessel — try from the Space Center.");
             });
         }
 
@@ -1476,7 +1689,7 @@ namespace GeneKerman.UI
             statusTime = Time.realtimeSinceStartup;
         }
 
-        private System.Collections.IEnumerator DoDownloadCraft(string contractId)
+        private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "")
         {
             SetStatus("[+] Fetching craft info...");
 
@@ -1494,7 +1707,7 @@ namespace GeneKerman.UI
                     if (!string.IsNullOrEmpty(vesselNodeUrl))
                     {
                         SetStatus("[+] Downloading vessel data...");
-                        GeneKermanMod.Instance.RunCoroutine(DoImportVessel(contractId, vesselNodeUrl));
+                        GeneKermanMod.Instance.RunCoroutine(DoImportVessel(contractId, vesselNodeUrl, ownerName));
                     }
                     else if (craftFiles != null && craftFiles.Count > 0)
                     {
@@ -1549,9 +1762,36 @@ namespace GeneKerman.UI
             });
         }
 
-        private System.Collections.IEnumerator DoImportVessel(string contractId, string vesselNodeUrl)
+        /// <summary>Gunzip (if needed) a downloaded vessel-node blob into its UTF-8 text.</summary>
+        private static string DecompressToString(byte[] fileData)
+        {
+            byte[] rawData = fileData;
+            if (fileData != null && fileData.Length >= 2 && fileData[0] == 0x1F && fileData[1] == 0x8B)
+            {
+                try
+                {
+                    using (var ms = new System.IO.MemoryStream(fileData))
+                    using (var gz = new System.IO.Compression.GZipStream(ms,
+                        System.IO.Compression.CompressionMode.Decompress))
+                    using (var output = new System.IO.MemoryStream())
+                    {
+                        gz.CopyTo(output);
+                        rawData = output.ToArray();
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] Vessel node decompression failed: {ex.Message}");
+                    rawData = fileData;
+                }
+            }
+            return System.Text.Encoding.UTF8.GetString(rawData);
+        }
+
+        private System.Collections.IEnumerator DoImportVessel(string contractId, string vesselNodeUrl, string ownerName = "")
         {
             Debug.Log($"[GeneKerman] DoImportVessel: Downloading from {vesselNodeUrl}");
+            string myName = GeneKermanMod.Instance.LinkedUsername;
             yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
             {
                 if (!ok || fileData == null)
@@ -1563,37 +1803,14 @@ namespace GeneKerman.UI
 
                 Debug.Log($"[GeneKerman] DoImportVessel: Downloaded {fileData.Length} bytes");
 
-                // Decompress gzip
-                byte[] rawData = fileData;
-                if (fileData.Length >= 2 && fileData[0] == 0x1F && fileData[1] == 0x8B)
-                {
-                    try
-                    {
-                        using (var ms = new System.IO.MemoryStream(fileData))
-                        using (var gz = new System.IO.Compression.GZipStream(ms,
-                            System.IO.Compression.CompressionMode.Decompress))
-                        using (var output = new System.IO.MemoryStream())
-                        {
-                            gz.CopyTo(output);
-                            rawData = output.ToArray();
-                        }
-                        Debug.Log($"[GeneKerman] Decompressed: {fileData.Length} → {rawData.Length} bytes");
-                    }
-                    catch (System.Exception ex)
-                    {
-                        Debug.LogWarning($"[GeneKerman] Vessel node decompression failed: {ex.Message}");
-                        rawData = fileData;
-                    }
-                }
+                string vesselNodeStr = DecompressToString(fileData);
+                Debug.Log($"[GeneKerman] Vessel node string: {vesselNodeStr.Length} chars");
 
-                string vesselNodeStr = System.Text.Encoding.UTF8.GetString(rawData);
-                Debug.Log($"[GeneKerman] Vessel node string: {vesselNodeStr.Length} chars, starts with: '{vesselNodeStr.Substring(0, System.Math.Min(200, vesselNodeStr.Length))}'");
-
-                string vesselName = VesselTransfer.ImportVessel(vesselNodeStr);
+                string vesselName = VesselTransfer.ImportVessel(vesselNodeStr, ownerName, myName);
 
                 if (!string.IsNullOrEmpty(vesselName))
                 {
-                    SetStatus($"[!] Vessel imported: {vesselName} (crew randomized)");
+                    SetStatus($"[!] Vessel imported: {vesselName}");
                     if (GKContractScenario.Instance != null)
                     {
                         GKContractScenario.Instance.MarkVesselImported(contractId);
@@ -1604,6 +1821,481 @@ namespace GeneKerman.UI
                     SetStatus("(No) Failed to import vessel.");
                 }
             });
+        }
+
+        // ── Marketplace Tab ─────────────────────────────────────────────────
+
+        private void DrawMarketplaceTab()
+        {
+            GUILayout.Label("Marketplace", headerStyle);
+            GUILayout.Space(4);
+
+            // Sell panel — only meaningful in the editor where a craft is loaded.
+            if (HighLogic.LoadedSceneIsEditor)
+            {
+                CaptureEditorCraft();
+                GUILayout.BeginVertical(boxDarkStyle);
+                GUILayout.Label("Sell Loaded Craft", valueStyle);
+                if (string.IsNullOrEmpty(editorCraftName))
+                {
+                    GUILayout.Label("No craft loaded. Open one in the VAB/SPH.", labelStyle);
+                }
+                else
+                {
+                    GUILayout.Label($"[*] {editorCraftName} [{editorCraftType}]", labelStyle);
+                    GUILayout.Label($"Parts: {editorPartCount} . Mass: {editorCraftMass:F1}t . Cost: {editorCraftCost:N0}", labelStyle);
+
+                    if (string.IsNullOrEmpty(editorCraftPath))
+                    {
+                        GUILayout.Label("Save your craft first to sell it.", labelStyle);
+                        if (GUILayout.Button(gcRefresh, tabStyle, GUILayout.Height(24), GUILayout.Width(90)))
+                            CaptureEditorCraft();
+                    }
+                    else
+                    {
+                        GUILayout.BeginHorizontal();
+                        GUILayout.Label("Price:", labelStyle, GUILayout.Width(45));
+                        sellPriceInput = GUILayout.TextField(sellPriceInput, GUILayout.Width(90), GUILayout.Height(26));
+                        GUILayout.Label("KCoins", labelStyle);
+                        GUILayout.EndHorizontal();
+                        GUILayout.Space(4);
+                        GUI.enabled = !selling;
+                        if (GUILayout.Button(selling ? new GUIContent("Listing...") : gcSell, acceptBtnStyle, GUILayout.Height(30)))
+                            GeneKermanMod.Instance.RunCoroutine(DoSellCraft());
+                        GUI.enabled = true;
+                    }
+                }
+                GUILayout.EndVertical();
+                GUILayout.Space(6);
+            }
+            else
+            {
+                GUILayout.Label("Open a craft in the VAB or SPH to put it up for sale.", labelStyle);
+                GUILayout.Space(6);
+            }
+
+            // Active listings.
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Listings", valueStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button(gcRefresh, tabStyle, GUILayout.Height(24), GUILayout.Width(90)))
+                LoadMarketListings();
+            GUILayout.EndHorizontal();
+
+            if (loadingMarket)
+            {
+                GUILayout.Label("Loading...", labelStyle);
+                return;
+            }
+            if (marketListings == null || marketListings.Count == 0)
+            {
+                GUILayout.Label("No crafts for sale right now.", labelStyle);
+                return;
+            }
+
+            string myId = profile != null ? MiniJSON.GetString(profile, "user_id", "") : "";
+            foreach (var obj in marketListings)
+            {
+                var l = obj as Dictionary<string, object>;
+                if (l == null) continue;
+                GUILayout.BeginVertical(boxDarkStyle);
+                GUILayout.Label($"[*] {MiniJSON.GetString(l, "craft_name", "Craft")}", valueStyle);
+                GUILayout.Label($"{MiniJSON.GetInt(l, "price", 0):N0} KCoins . {MiniJSON.GetInt(l, "part_count", 0)} parts . by {MiniJSON.GetString(l, "seller_name", "?")}", labelStyle);
+                GUILayout.Label($"Sold: {MiniJSON.GetInt(l, "sales_count", 0)}  .  Buy from the Discord channel", labelStyle);
+                string sellerId = MiniJSON.GetString(l, "seller_id", "");
+                if (!string.IsNullOrEmpty(myId) && sellerId == myId)
+                {
+                    if (GUILayout.Button("[X] Delist", deleteBtnStyle, GUILayout.Height(24)))
+                        GeneKermanMod.Instance.RunCoroutine(DoDelistListing(MiniJSON.GetString(l, "listing_id", "")));
+                }
+                GUILayout.EndVertical();
+                GUILayout.Space(4);
+            }
+        }
+
+        /// <summary>Reads the currently-loaded editor craft's metadata and resolves
+        /// its saved .craft path (mirrors SubmitWindow's capture logic).</summary>
+        private void CaptureEditorCraft()
+        {
+            editorCraftName = "";
+            editorPartCount = 0;
+            editorCraftMass = 0f;
+            editorCraftCost = 0f;
+            editorCraftPath = "";
+
+            try
+            {
+                var ship = EditorLogic.fetch?.ship;
+                if (ship == null) return;
+
+                editorCraftName = ship.shipName ?? "Untitled";
+                editorPartCount = ship.parts?.Count ?? 0;
+                if (ship.parts != null)
+                {
+                    foreach (var part in ship.parts)
+                    {
+                        editorCraftMass += part.mass + part.GetResourceMass();
+                        editorCraftCost += part.partInfo?.cost ?? 0f;
+                    }
+                }
+
+                editorCraftType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
+
+                string saveFolder = HighLogic.SaveFolder ?? "default";
+                string shipDir = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "saves", saveFolder,
+                    "Ships", editorCraftType);
+                string craftFile = System.IO.Path.Combine(shipDir, editorCraftName + ".craft");
+                if (System.IO.File.Exists(craftFile))
+                {
+                    editorCraftPath = craftFile;
+                }
+                else
+                {
+                    string rootDir = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "Ships", editorCraftType);
+                    craftFile = System.IO.Path.Combine(rootDir, editorCraftName + ".craft");
+                    if (System.IO.File.Exists(craftFile))
+                        editorCraftPath = craftFile;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Error reading editor craft: {ex.Message}");
+            }
+        }
+
+        private System.Collections.IEnumerator DoSellCraft()
+        {
+            if (string.IsNullOrEmpty(editorCraftPath) || !System.IO.File.Exists(editorCraftPath))
+            {
+                SetStatus("(No) Save your craft first.");
+                yield break;
+            }
+            if (!int.TryParse(sellPriceInput, out int price) || price <= 0)
+            {
+                SetStatus("(No) Enter a valid price.");
+                yield break;
+            }
+
+            byte[] craftBytes;
+            try
+            {
+                craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Failed to read craft: {ex.Message}");
+                SetStatus("(No) Could not read craft file.");
+                yield break;
+            }
+
+            selling = true;
+            SetStatus("Rendering blueprint...");
+
+            // Render the craft's blueprint so it can be shown publicly on the listing.
+            byte[] blueprintBytes = null;
+            try
+            {
+                string bpPath = VesselRenderer.CaptureVessel();
+                if (!string.IsNullOrEmpty(bpPath) && System.IO.File.Exists(bpPath))
+                    blueprintBytes = System.IO.File.ReadAllBytes(bpPath);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Blueprint render failed: {ex.Message}");
+            }
+
+            SetStatus("Listing craft...");
+            string fileName = editorCraftName + ".craft";
+            yield return GeneKermanMod.Instance.Api.ListCraftForSale(
+                craftBytes, fileName, editorCraftName, editorCraftType,
+                editorPartCount, editorCraftMass, editorCraftCost, price,
+                blueprintBytes,
+                (ok, resp, status) =>
+                {
+                    selling = false;
+                    if (ok && !string.IsNullOrEmpty(resp))
+                    {
+                        var data = MiniJSON.DeserializeDict(resp);
+                        if (MiniJSON.GetBool(data, "success", false))
+                            SetStatus("(Ok) Craft listed for sale!");
+                        else
+                            SetStatus("(No) " + MiniJSON.GetString(data, "message", "Failed to list."));
+                    }
+                    else
+                    {
+                        SetStatus("(No) Failed to list craft.");
+                    }
+                });
+            LoadMarketListings();
+        }
+
+        private void LoadMarketListings()
+        {
+            loadingMarket = true;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetMarketplaceListings((ok, data, err) =>
+            {
+                loadingMarket = false;
+                if (ok && data != null)
+                    marketListings = MiniJSON.GetList(data, "listings");
+                else
+                    SetStatus("(No) " + (err ?? "Failed to load listings."));
+            }));
+        }
+
+        private System.Collections.IEnumerator DoDelistListing(string listingId)
+        {
+            if (string.IsNullOrEmpty(listingId)) yield break;
+            SetStatus("Delisting...");
+            yield return GeneKermanMod.Instance.Api.DelistCraft(listingId, (ok, resp, status) =>
+            {
+                SetStatus(ok ? "(Ok) Craft delisted." : "(No) Failed to delist.");
+            });
+            LoadMarketListings();
+        }
+
+        // ── Craft Import Queue (auto-import) ─────────────────────────────────
+        //
+        // Crafts are selected for import in Discord (the /library command for
+        // bot-contract crafts, or the "Load to KSP" button on a marketplace
+        // purchase DM). That queues an entry on the player's account; here we poll
+        // the queue and import each craft into the active save automatically.
+        //
+        // Called from GeneKermanMod.Update on a timer while at the Space Center —
+        // a safe scene for both live-vessel imports and blueprint installs.
+
+        public void PollCraftImports()
+        {
+            if (importPollInFlight) return;
+            importPollInFlight = true;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.Get(
+                "/api/v1/craft/imports/pending", (ok, resp, status) =>
+            {
+                importPollInFlight = false;
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+
+                var data = MiniJSON.DeserializeDict(resp);
+                foreach (var obj in MiniJSON.GetList(data, "imports"))
+                {
+                    var entry = obj as Dictionary<string, object>;
+                    if (entry == null) continue;
+                    string importId = MiniJSON.GetString(entry, "import_id", "");
+                    if (string.IsNullOrEmpty(importId) || processingImports.Contains(importId))
+                        continue;
+                    processingImports.Add(importId);
+                    GeneKermanMod.Instance.RunCoroutine(DoProcessImport(entry));
+                }
+            }));
+        }
+
+        private System.Collections.IEnumerator DoProcessImport(Dictionary<string, object> entry)
+        {
+            string importId = MiniJSON.GetString(entry, "import_id", "");
+            string craftName = MiniJSON.GetString(entry, "craft_name", "Craft");
+            string craftUrl = MiniJSON.GetString(entry, "craft_url", null);
+            string craftFilename = MiniJSON.GetString(entry, "craft_filename", "craft.craft");
+            string loadmeta = MiniJSON.GetString(entry, "loadmeta", null);
+            string source = MiniJSON.GetString(entry, "source", "");
+            string vesselNodeUrl = MiniJSON.GetString(entry, "vessel_node_url", null);
+            string ownerName = MiniJSON.GetString(entry, "owner_name", "");
+
+            // Rescue deliveries are LIVE vessels (the rescued kerbals coming home, or a
+            // cancelled rescue's vessel returning to its spot). Crew are tagged/stripped
+            // by owner on import — the issuer's own kerbals come back to their original
+            // names; anyone else's keep their owner tag.
+            if (source == "rescue_delivery" && !string.IsNullOrEmpty(vesselNodeUrl))
+            {
+                string myName = GeneKermanMod.Instance.LinkedUsername;
+                bool spawned = false;
+                yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
+                {
+                    if (!ok || fileData == null) return;
+                    string node = DecompressToString(fileData);
+                    string vesselName = VesselTransfer.ImportVesselAtTarget(node, null, ownerName, myName);
+                    if (!string.IsNullOrEmpty(vesselName))
+                    {
+                        spawned = true;
+                        GeneKermanMod.Instance.ShowNotification("🛟 Rescue Delivered",
+                            $"{vesselName} has arrived in your save.");
+                    }
+                });
+                if (!spawned)
+                {
+                    processingImports.Remove(importId);
+                    yield break;
+                }
+                yield return GeneKermanMod.Instance.Api.Post(
+                    $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
+                processingImports.Remove(importId);
+                yield break;
+            }
+
+            // Queue entries are blueprint installs (marketplace purchases). We drop
+            // the craft into the save's Ships folder — never spawn a live vessel.
+            if (!string.IsNullOrEmpty(craftUrl))
+            {
+                bool installed = false;
+                yield return GeneKermanMod.Instance.Api.DownloadFile(craftUrl, (ok, fileData) =>
+                {
+                    if (!ok || fileData == null) return;
+                    string path = CraftInstaller.Install(fileData, craftFilename, loadmeta);
+                    if (path != null)
+                    {
+                        installed = true;
+                        GeneKermanMod.Instance.ShowNotification("🚀 Craft Imported",
+                            $"{craftName} saved to your Ships folder.");
+                    }
+                });
+                if (!installed)
+                {
+                    // Leave it queued for the next poll (e.g. a download hiccup).
+                    processingImports.Remove(importId);
+                    yield break;
+                }
+            }
+
+            // Ack — remove from the player's queue so it isn't installed again.
+            yield return GeneKermanMod.Instance.Api.Post(
+                $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
+            processingImports.Remove(importId);
+        }
+
+        // ── Blueprint Preview Popup ──────────────────────────────────────────
+        //
+        // When reviewing a contractor's submission, the issuer can open this popup
+        // to see the submitted vessel render(s)/blueprint image before approving or
+        // refusing — no need to switch to Discord to look at the work.
+
+        public void OpenBlueprintPreview(string contractId)
+        {
+            CloseBlueprintPreview();
+            showBlueprintPopup = true;
+            loadingBlueprints = true;
+            blueprintStatus = "Loading submission...";
+            blueprintVesselName = "";
+            GeneKermanMod.Instance.RunCoroutine(FetchBlueprints(contractId));
+        }
+
+        private System.Collections.IEnumerator FetchBlueprints(string contractId)
+        {
+            string resp = null;
+            bool ok = false;
+            yield return GeneKermanMod.Instance.Api.Get(
+                $"/api/v1/contracts/{contractId}/submission", (s, body, status) =>
+                {
+                    ok = s;
+                    resp = body;
+                });
+
+            if (!ok || string.IsNullOrEmpty(resp))
+            {
+                loadingBlueprints = false;
+                blueprintStatus = "❌ Could not load the submission.";
+                yield break;
+            }
+
+            var data = MiniJSON.DeserializeDict(resp);
+            blueprintVesselName = MiniJSON.GetString(data, "vessel_name", "");
+            var images = MiniJSON.GetList(data, "images");
+
+            if (images == null || images.Count == 0)
+            {
+                loadingBlueprints = false;
+                blueprintStatus = "No blueprint images were submitted for this contract.";
+                yield break;
+            }
+
+            foreach (var obj in images)
+            {
+                var entry = obj as Dictionary<string, object>;
+                if (entry == null) continue;
+                string url = MiniJSON.GetString(entry, "url", null);
+                if (string.IsNullOrEmpty(url)) continue;
+
+                yield return GeneKermanMod.Instance.Api.DownloadFile(url, (dok, bytes) =>
+                {
+                    if (!dok || bytes == null) return;
+                    var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+                    if (tex.LoadImage(bytes))
+                        blueprintTextures.Add(tex);
+                });
+            }
+
+            loadingBlueprints = false;
+            blueprintStatus = blueprintTextures.Count > 0
+                ? ""
+                : "❌ Failed to load the submitted images.";
+        }
+
+        private void CloseBlueprintPreview()
+        {
+            showBlueprintPopup = false;
+            loadingBlueprints = false;
+            blueprintStatus = "";
+            blueprintVesselName = "";
+            blueprintScroll = Vector2.zero;
+            foreach (var tex in blueprintTextures)
+                if (tex != null) Object.Destroy(tex);
+            blueprintTextures.Clear();
+        }
+
+        private void DrawBlueprintPopup(int id)
+        {
+            InitStyles();
+            GUILayout.BeginVertical(windowStyle);
+
+            GUILayout.BeginHorizontal();
+            string title = string.IsNullOrEmpty(blueprintVesselName)
+                ? "🖼 Submitted Blueprint"
+                : $"🖼 {blueprintVesselName}";
+            GUILayout.Label(title, headerStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("✕", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+            {
+                CloseBlueprintPreview();
+                GUILayout.EndHorizontal();
+                GUILayout.EndVertical();
+                return;
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(6);
+
+            if (loadingBlueprints)
+            {
+                GUILayout.Label(blueprintStatus, labelStyle);
+            }
+            else if (!string.IsNullOrEmpty(blueprintStatus))
+            {
+                GUILayout.Label(blueprintStatus, labelStyle);
+            }
+            else
+            {
+                blueprintScroll = GUILayout.BeginScrollView(blueprintScroll, GUILayout.Height(470));
+                foreach (var tex in blueprintTextures)
+                {
+                    if (tex == null) continue;
+                    // Fit each image to the popup width, preserving aspect ratio.
+                    float maxW = 510f;
+                    float scale = tex.width > maxW ? maxW / tex.width : 1f;
+                    float w = tex.width * scale;
+                    float h = tex.height * scale;
+                    Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
+                    GUI.DrawTexture(r, tex, ScaleMode.ScaleToFit);
+                    GUILayout.Space(8);
+                }
+                GUILayout.EndScrollView();
+            }
+
+            GUILayout.Space(6);
+            if (GUILayout.Button("Close", deleteBtnStyle, GUILayout.Height(28)))
+            {
+                CloseBlueprintPreview();
+                GUILayout.EndVertical();
+                return;
+            }
+
+            GUILayout.EndVertical();
+            GUI.DragWindow();
         }
 
     }

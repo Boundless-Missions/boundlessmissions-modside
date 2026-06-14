@@ -35,7 +35,7 @@ namespace GeneKerman.UI
             if (GKSkin.NeedsRebuild())
                 stylesReady = false;
 
-            windowRect = GUILayout.Window(windowId, windowRect, DrawWindowContent, "",
+            windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawWindowContent, "",
                 GUIStyle.none, GUILayout.Width(400), GUILayout.Height(300));
         }
 

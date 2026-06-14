@@ -30,6 +30,7 @@ namespace GeneKerman
         public bool ShowMainWindow { get; set; }
         public bool ShowLinkWindow { get; set; }
         public int UnreadNotifications { get; set; }
+        public string LinkedUsername { get; private set; } = "";
 
         // Paths
         public static string ModPath => Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "GeneKerman");
@@ -38,6 +39,8 @@ namespace GeneKerman
         // Internal
         private float lastNotificationCheck;
         private float notificationInterval = 600f; // 10 minutes (fallback poll only)
+        private float lastImportCheck;
+        private const float ImportInterval = 30f; // craft-import queue poll cadence
         private bool initialized;
 
         // Live notification push + de-dup of already-toasted notifications
@@ -55,6 +58,11 @@ namespace GeneKerman
         private UI.SubmitWindow submitWindow;
         private UI.CreateContractWindow createContractWindow;
         private UI.NotificationPopup notificationPopup;
+        private UI.CheckpointPrompt checkpointPrompt;
+
+        // Milestone hero-shot capture (rendezvous / flyby / asteroid)
+        private CheckpointDetector checkpointDetector;
+        private bool checkpointCapturing;
 
         // ── Unity Lifecycle ─────────────────────────────────────────────────
 
@@ -86,6 +94,8 @@ namespace GeneKerman
             submitWindow = new UI.SubmitWindow();
             createContractWindow = new UI.CreateContractWindow();
             notificationPopup = new UI.NotificationPopup();
+            checkpointPrompt = new UI.CheckpointPrompt();
+            checkpointDetector = new CheckpointDetector(OnCheckpoint);
 
             // Load toolbar icon
             LoadToolbarIcon();
@@ -112,11 +122,35 @@ namespace GeneKerman
         private void OnSceneChange(GameScenes scene)
         {
             UI.GKSkin.Invalidate();
+            // Drop any in-flight prompt and clear SOI/proximity state so milestones
+            // don't carry over (or re-fire) across a scene load.
+            checkpointPrompt?.Dismiss(false);
+            checkpointDetector?.Reset();
         }
 
         void Update()
         {
             if (!initialized || !Api.IsLinked) return;
+
+            // Watch for flight milestones worth a hero shot. Independent of the
+            // notifications toggle; gated by its own setting and paused while a prompt
+            // or capture is already in progress.
+            if (Api.CheckpointPhotosEnabled)
+                checkpointDetector.Tick();
+
+            // Auto-import crafts the player queued from Discord. Only at the Space
+            // Center — a scene where both live-vessel imports and blueprint installs
+            // are safe. Independent of the notifications toggle.
+            if (HighLogic.LoadedScene == GameScenes.SPACECENTER &&
+                Time.realtimeSinceStartup - lastImportCheck > ImportInterval)
+            {
+                lastImportCheck = Time.realtimeSinceStartup;
+                mainWindow.PollCraftImports();
+            }
+
+            // Remove rescued-away vessels once we're in a scene where killing a
+            // vessel is safe (never the focused flight vessel).
+            ProcessPendingRescueRemovals();
 
             // Notifications can be toggled off in Settings — keep the socket closed
             // and skip polling entirely when disabled.
@@ -133,6 +167,13 @@ namespace GeneKerman
 
             // Drive the live notification socket (connect/reconnect on the main thread).
             notifSocket.Tick();
+
+            // After a (re)connect, catch up once: notifications the server pushed
+            // while the socket was down are lost (they hit a discarded connection),
+            // so only a fetch recovers them — and re-syncs the contract list, which
+            // otherwise wouldn't refresh until the player acts manually.
+            if (notifSocket.ConsumeJustConnected())
+                StartCoroutine(CheckNotifications());
 
             // Drain notifications pushed over the socket and surface new ones as toasts.
             while (notifSocket.TryDequeue(out var notif))
@@ -171,8 +212,51 @@ namespace GeneKerman
                 contractId
             );
 
+            // Rescue: when the issuer approves, the rescue craft is delivered to them
+            // and removed from the rescuer's save. Queue removal of the craft this
+            // client submitted for that contract.
+            if (MiniJSON.GetString(notif, "type") == "rescue_craft_removed" && !string.IsNullOrEmpty(contractId))
+            {
+                string pid;
+                if (rescueSubmittedPids.TryGetValue(contractId, out pid))
+                {
+                    QueueRescueVesselRemoval(pid);
+                    rescueSubmittedPids.Remove(contractId);
+                }
+            }
+
             // Keep the panel in sync so the item is already there when opened.
             mainWindow.AddNotification(notif);
+
+            // Anything that changes a contract's state (a new offer, an acceptance,
+            // a submission, an approval/refusal, a cancellation) refreshes the
+            // Contracts tab live off the same socket push that produced this toast —
+            // so the player never has to manually reopen the list. Skipped during the
+            // first poll's backlog seeding, which doesn't route through here.
+            if (IsContractEvent(MiniJSON.GetString(notif, "type")))
+                RefreshContracts();
+        }
+
+        // Notification types that imply a contract list change. Kept as an explicit
+        // allow-list so a future non-contract notification won't trigger needless
+        // contract fetches.
+        private static bool IsContractEvent(string type)
+        {
+            switch (type)
+            {
+                case "contract_incoming":
+                case "contract_accepted":
+                case "contract_cancelled":
+                case "submission_received":
+                case "review_result":
+                case "mission_accepted":
+                case "rescue_delivered":
+                case "rescue_failed":
+                case "rescue_craft_removed":
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         void OnDestroy()
@@ -306,6 +390,72 @@ namespace GeneKerman
             submitWindow.Draw();
             createContractWindow.Draw();
             notificationPopup.Draw();
+            checkpointPrompt.Draw();
+        }
+
+        // ── Milestone Hero Shots ────────────────────────────────────────────
+
+        /// <summary>
+        /// A flight milestone was detected. Offer the player a one-tap capture; the
+        /// detector is paused until they answer so prompts don't stack.
+        /// </summary>
+        private void OnCheckpoint(Checkpoint cp)
+        {
+            checkpointDetector.Suspended = true;
+            checkpointPrompt.Show(
+                cp.title,
+                cp.message,
+                onAccept: () => StartCoroutine(RunCheckpointCapture(cp)),
+                onClose: () => { checkpointDetector.Suspended = false; }
+            );
+        }
+
+        private IEnumerator RunCheckpointCapture(Checkpoint cp)
+        {
+            if (checkpointCapturing) yield break;
+            checkpointCapturing = true;
+
+            string savedPath = null;
+            yield return CinematicCapture.Capture(
+                cp.label, cp.targetVessel, cp.targetBody,
+                path => { savedPath = path; });
+
+            checkpointCapturing = false;
+
+            if (string.IsNullOrEmpty(savedPath))
+                yield break;
+
+            notificationPopup.Show("📷 Photo captured", "Sharing to Discord…");
+
+            // ScreenCapture writes asynchronously — wait for the file to flush before
+            // reading it back for upload.
+            yield return new WaitForSeconds(0.5f);
+
+            byte[] png = VesselDataCollector.ReadScreenshot(savedPath);
+            if (png == null || png.Length == 0)
+            {
+                Debug.LogWarning("[GeneKerman] Checkpoint photo not readable for upload: " + savedPath);
+                yield break;
+            }
+
+            string vesselName = FlightGlobals.ActiveVessel?.vesselName ?? "";
+            string body = cp.targetBody != null
+                ? cp.targetBody.bodyName
+                : FlightGlobals.ActiveVessel?.mainBody?.bodyName ?? "";
+            string targetName = cp.targetVessel != null
+                ? cp.targetVessel.vesselName
+                : (cp.targetBody != null ? cp.targetBody.bodyName : "");
+
+            yield return Api.UploadCheckpointPhoto(
+                png, cp.kind, vesselName, body, targetName,
+                (ok, resp, status) =>
+                {
+                    if (ok)
+                        notificationPopup.Show("📡 Photo shared", "Posted to the community channel.");
+                    else
+                        notificationPopup.Show("⚠ Share failed",
+                            "Saved locally in PluginData/renders.");
+                });
         }
 
         // ── Data Fetching ───────────────────────────────────────────────────
@@ -320,7 +470,8 @@ namespace GeneKerman
                 if (ok)
                 {
                     mainWindow.UpdateProfile(data);
-                    Debug.Log("[GeneKerman] Profile loaded: " + MiniJSON.GetString(data, "username"));
+                    LinkedUsername = MiniJSON.GetString(data, "username");
+                    Debug.Log("[GeneKerman] Profile loaded: " + LinkedUsername);
                 }
                 else
                 {
@@ -375,9 +526,10 @@ namespace GeneKerman
             StartCoroutine(InitialFetch());
             notifSocket.Connect();
 
+            LinkedUsername = MiniJSON.GetString(data, "username");
             notificationPopup.Show(
                 "✅ Account Linked!",
-                "Welcome, " + MiniJSON.GetString(data, "username") + "!"
+                "Welcome, " + LinkedUsername + "!"
             );
         }
 
@@ -394,9 +546,11 @@ namespace GeneKerman
         }
 
         public void OpenSubmitWindow(string contractId, string mission,
-            string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "", string requiredModlist = "")
+            string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "", string requiredModlist = "",
+            RescueTargetSpec rescueTarget = null, List<string> rescueKerbals = null)
         {
-            submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist);
+            submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist,
+                rescueTarget, rescueKerbals);
         }
 
         public void RunCoroutine(IEnumerator routine)
@@ -404,9 +558,48 @@ namespace GeneKerman
             StartCoroutine(routine);
         }
 
-        public void OpenCreateContractWindow(int balance, string userId = "")
+        public void OpenCreateContractWindow(int balance, string userId = "", string userName = "")
         {
-            createContractWindow.Open(balance, userId);
+            createContractWindow.Open(balance, userId, userName);
+        }
+
+        // ── Rescue vessel ops ───────────────────────────────────────────────
+        //
+        // A vessel can only be safely removed when it isn't the focused flight
+        // vessel, so removals are queued and run at the Space Center / Tracking
+        // Station. rescueSubmittedPids remembers which craft the rescuer handed
+        // over per contract, so we know what to remove when the issuer approves.
+
+        private readonly List<string> pendingRescueRemovals = new List<string>();
+        private readonly Dictionary<string, string> rescueSubmittedPids = new Dictionary<string, string>();
+
+        /// <summary>Queue a vessel (by pid) for removal at the next safe scene.</summary>
+        public void QueueRescueVesselRemoval(string pid)
+        {
+            if (string.IsNullOrEmpty(pid)) return;
+            if (!pendingRescueRemovals.Contains(pid)) pendingRescueRemovals.Add(pid);
+            ProcessPendingRescueRemovals(); // run now if we're already somewhere safe
+        }
+
+        /// <summary>Record the craft a rescuer submitted, so it can be removed once
+        /// the issuer approves and it's delivered to them.</summary>
+        public void RecordRescueSubmission(string contractId, string pid)
+        {
+            if (!string.IsNullOrEmpty(contractId) && !string.IsNullOrEmpty(pid))
+                rescueSubmittedPids[contractId] = pid;
+        }
+
+        private void ProcessPendingRescueRemovals()
+        {
+            if (pendingRescueRemovals.Count == 0) return;
+            if (HighLogic.LoadedScene != GameScenes.SPACECENTER &&
+                HighLogic.LoadedScene != GameScenes.TRACKSTATION)
+                return; // can't safely Die() the focused flight vessel — wait
+
+            var done = new List<string>();
+            foreach (var pid in pendingRescueRemovals)
+                if (VesselTransfer.RemoveVesselFromSave(pid)) done.Add(pid);
+            foreach (var pid in done) pendingRescueRemovals.Remove(pid);
         }
 
         public void RefreshContracts()

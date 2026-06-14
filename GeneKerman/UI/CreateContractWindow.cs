@@ -37,6 +37,37 @@ namespace GeneKerman.UI
         // User balance
         private int currentBalance;
         private string currentUserId = "";
+        private string currentUserName = "";
+
+        // Contract type: 0 Auto, 1 Craft Build, 2 Active Mission, 3 Rescue
+        private int contractType = 0;
+        private const int RESCUE_TYPE_INDEX = 3;
+        private static readonly string[] ContractTypeLabels = { "Auto", "Craft Build", "Active Mission", "Rescue" };
+        private static readonly string[] ContractTypeApi = { "auto", "craft_build", "active_vessel", "rescue" };
+        private static readonly string[] ContractTypeDescs = {
+            "Let the server classify the mission.",
+            "Recipient submits a blueprint from the VAB/SPH.",
+            "Recipient flies a craft to the target.",
+            "Recipient rescues your stranded kerbals.",
+        };
+
+        // Rescue setup state
+        private int rescueMode = 0; // 0 = orbit (Ap/Pe), 1 = surface (Lat/Lon)
+        private readonly List<string> bodyNames = new List<string>();
+        private readonly List<bool> bodyModded = new List<bool>();
+        private int bodyIndex = -1;
+        private Vector2 bodyScrollPos;
+        private string apText = "100", peText = "100", marginAltText = "10";
+        private string latText = "0", lonText = "0", marginPosText = "1";
+        private readonly List<string> rescueCrew = new List<string>();
+        private const double MIN_MARGIN_ORBIT_KM = 5.0;
+        private const double MIN_MARGIN_SURFACE_DEG = 0.5;
+
+        private static readonly HashSet<string> STOCK_BODIES = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Kerbol", "Sun", "Moho", "Eve", "Gilly", "Kerbin", "Mun", "Minmus", "Duna", "Ike",
+            "Dres", "Jool", "Laythe", "Vall", "Tylo", "Bop", "Pol", "Eeloo",
+        };
 
         // Status
         private string statusMsg = "";
@@ -73,10 +104,11 @@ namespace GeneKerman.UI
             public string corpName;
         }
 
-        public void Open(int balance, string userId = "")
+        public void Open(int balance, string userId = "", string userName = "")
         {
             IsVisible = true;
             currentBalance = balance;
+            currentUserName = userName;
             if (userId != currentUserId)
             {
                 currentUserId = userId;
@@ -87,6 +119,8 @@ namespace GeneKerman.UI
             missionText = "";
             paymentText = "";
             fineText = "0";
+            contractType = 0;
+            ScanRescueContext();
 
             // Set default due date to 7 days from now
             dueDateText = DateTime.Now.AddDays(7).ToString("yyyy-MM-dd");
@@ -118,13 +152,79 @@ namespace GeneKerman.UI
             return false;
         }
 
+        // ── Rescue Helpers ──────────────────────────────────────────────────
+
+        /// <summary>Scan the live celestial bodies (flagging modded ones) and the
+        /// active vessel's crew, so the rescue panel reflects the current game.</summary>
+        private void ScanRescueContext()
+        {
+            // Remember the player's current pick so a re-scan (e.g. the refresh right
+            // before sending) doesn't silently reset it back to the active body — the
+            // body list is the same set of celestial bodies every scan.
+            string previouslySelected = (bodyIndex >= 0 && bodyIndex < bodyNames.Count)
+                ? bodyNames[bodyIndex] : null;
+
+            bodyNames.Clear();
+            bodyModded.Clear();
+            bodyIndex = -1;
+            if (FlightGlobals.Bodies != null)
+            {
+                foreach (var b in FlightGlobals.Bodies)
+                {
+                    if (b == null) continue;
+                    bodyNames.Add(b.bodyName);
+                    bodyModded.Add(!STOCK_BODIES.Contains(b.bodyName));
+                }
+            }
+
+            rescueCrew.Clear();
+            if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null)
+            {
+                // Restore the player's previous pick if they made one; otherwise default
+                // the body to wherever the player currently is.
+                string desired = previouslySelected
+                    ?? (FlightGlobals.ActiveVessel.mainBody != null
+                        ? FlightGlobals.ActiveVessel.mainBody.bodyName : null);
+                for (int i = 0; i < bodyNames.Count; i++)
+                    if (bodyNames[i] == desired) { bodyIndex = i; break; }
+
+                foreach (var pcm in FlightGlobals.ActiveVessel.GetVesselCrew())
+                    if (pcm != null) rescueCrew.Add(pcm.name);
+            }
+        }
+
+        /// <summary>The player's active installed mod folders (auto part restriction
+        /// for rescue) — same derivation as the "My Modlist" option.</summary>
+        private string BuildActiveModlist()
+        {
+            var folders = new HashSet<string>();
+            foreach (var p in PartLoader.LoadedPartsList)
+                if (p != null && !string.IsNullOrEmpty(p.partUrl))
+                    folders.Add(p.partUrl.Split('/')[0]);
+            return string.Join(",", folders.ToArray());
+        }
+
+        private void DrawNumberRow(string label, ref string val)
+        {
+            GUILayout.BeginHorizontal();
+            GUILayout.Label(label, labelStyle, GUILayout.Width(180));
+            val = GUILayout.TextField(val, textFieldStyle, GUILayout.Width(110));
+            GUILayout.EndHorizontal();
+        }
+
+        private static bool TryParseInv(string s, out double v)
+        {
+            return double.TryParse(s, System.Globalization.NumberStyles.Any,
+                System.Globalization.CultureInfo.InvariantCulture, out v);
+        }
+
         private string BuildModlist()
         {
             switch (modlistMode)
             {
                 case 0: return null;
-                case 1: return "Squad,-Squad/Expansions"; // Squad folder minus MH/BG subdirs
-                case 2: return "Squad";                  // Full Squad folder including DLC
+                case 1: return "Squad";                  // Stock only — DLC lives under the separate "SquadExpansion" folder, so it's excluded automatically
+                case 2: return "Squad,SquadExpansion";   // Stock + DLC (MakingHistory/Serenity both sit under SquadExpansion)
                 case 3:
                 {
                     var folders = new HashSet<string>();
@@ -246,7 +346,7 @@ namespace GeneKerman.UI
             if (GKSkin.NeedsRebuild())
                 stylesReady = false;
 
-            windowRect = GUILayout.Window(windowId, windowRect, DrawContent, "",
+            windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
                 GUIStyle.none, GUILayout.Width(480));
         }
 
@@ -364,8 +464,26 @@ namespace GeneKerman.UI
 
             formScrollPos = GUILayout.BeginScrollView(formScrollPos, GUILayout.Height(380));
 
+            // ── Contract type ──
+            GUILayout.Label("Contract Type:", labelStyle);
+            GUILayout.Space(2);
+            for (int i = 0; i < ContractTypeLabels.Length; i++)
+            {
+                GUILayout.BeginHorizontal();
+                bool sel = GUILayout.Toggle(contractType == i, "", checkboxStyle, GUILayout.Width(18));
+                if (sel && contractType != i)
+                {
+                    contractType = i;
+                    if (i == RESCUE_TYPE_INDEX) ScanRescueContext();
+                }
+                GUILayout.Label(ContractTypeLabels[i], valueStyle, GUILayout.Width(120));
+                GUILayout.Label(ContractTypeDescs[i], labelStyle);
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.Space(8);
+
             // ── Corp selector ──
-            GUILayout.Label("Select Corporation:", labelStyle);
+            GUILayout.Label(contractType == RESCUE_TYPE_INDEX ? "Select Rescuer:" : "Select Corporation:", labelStyle);
 
             if (loadingCorps)
             {
@@ -430,6 +548,10 @@ namespace GeneKerman.UI
 
             GUILayout.Space(10);
 
+            // ── Rescue setup ──
+            if (contractType == RESCUE_TYPE_INDEX)
+                DrawRescuePanel();
+
             // ── Status ──
             if (!string.IsNullOrEmpty(statusMsg))
             {
@@ -437,29 +559,32 @@ namespace GeneKerman.UI
                 GUILayout.Space(4);
             }
 
-            // ── Modlist Restriction ──
-            GUILayout.Space(6);
-            GUILayout.Label("Part Restriction:", labelStyle);
-            GUILayout.Space(2);
-
-            bool jcOk = IsJanitorsClosetAvailable();
-
-            for (int i = 0; i < ModlistLabels.Length; i++)
+            // ── Modlist Restriction (rescue auto-captures the active modlist) ──
+            if (contractType != RESCUE_TYPE_INDEX)
             {
-                bool disabled = (i == 4 && !jcOk);
-                GUI.enabled = !disabled;
+                GUILayout.Space(6);
+                GUILayout.Label("Part Restriction:", labelStyle);
+                GUILayout.Space(2);
 
-                GUILayout.BeginHorizontal();
-                bool selected = GUILayout.Toggle(modlistMode == i, "", checkboxStyle, GUILayout.Width(18));
-                if (selected) modlistMode = i;
+                bool jcOk = IsJanitorsClosetAvailable();
 
-                string label = ModlistLabels[i];
-                if (disabled) label += " (not installed)";
-                GUILayout.Label(label, valueStyle, GUILayout.Width(160));
-                GUILayout.Label(ModlistDescs[i], labelStyle);
-                GUILayout.EndHorizontal();
+                for (int i = 0; i < ModlistLabels.Length; i++)
+                {
+                    bool disabled = (i == 4 && !jcOk);
+                    GUI.enabled = !disabled;
 
-                GUI.enabled = true;
+                    GUILayout.BeginHorizontal();
+                    bool selected = GUILayout.Toggle(modlistMode == i, "", checkboxStyle, GUILayout.Width(18));
+                    if (selected) modlistMode = i;
+
+                    string label = ModlistLabels[i];
+                    if (disabled) label += " (not installed)";
+                    GUILayout.Label(label, valueStyle, GUILayout.Width(160));
+                    GUILayout.Label(ModlistDescs[i], labelStyle);
+                    GUILayout.EndHorizontal();
+
+                    GUI.enabled = true;
+                }
             }
 
             GUILayout.EndScrollView();
@@ -487,6 +612,77 @@ namespace GeneKerman.UI
 
             GUILayout.EndVertical();
             GUI.DragWindow();
+        }
+
+        // ── Rescue Panel ────────────────────────────────────────────────────
+
+        private void DrawRescuePanel()
+        {
+            GUILayout.Space(6);
+            GUILayout.Label("🛟 Rescue Setup", headerStyle);
+
+            if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
+            {
+                GUILayout.Label("⚠ Fly the crewed vessel you want rescued, then issue from flight.", errorStyle);
+                return;
+            }
+            if (rescueCrew.Count == 0)
+            {
+                GUILayout.Label("⚠ Your active vessel has no crew to rescue.", errorStyle);
+                if (GUILayout.Button("Rescan", cancelBtnStyle, GUILayout.Width(80))) ScanRescueContext();
+                return;
+            }
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"Kerbals to send ({rescueCrew.Count}):", labelStyle);
+            if (GUILayout.Button("Rescan", cancelBtnStyle, GUILayout.Width(70))) ScanRescueContext();
+            GUILayout.EndHorizontal();
+            foreach (var k in rescueCrew)
+                GUILayout.Label($"  • {currentUserName}'s {k}", valueStyle);
+
+            GUILayout.Space(6);
+            GUILayout.Label("Deliver the rescued crew to:", labelStyle);
+
+            // Body selector
+            GUILayout.Label("Destination Body:", labelStyle);
+            bodyScrollPos = GUILayout.BeginScrollView(bodyScrollPos,
+                GUILayout.Height(Math.Min(Math.Max(bodyNames.Count, 1) * 28, 120)));
+            for (int i = 0; i < bodyNames.Count; i++)
+            {
+                var style = (i == bodyIndex) ? corpSelectedStyle : corpBtnStyle;
+                string lbl = bodyModded[i] ? $"🪐 {bodyNames[i]}  (modded)" : $"🌍 {bodyNames[i]}";
+                if (GUILayout.Button(lbl, style)) bodyIndex = i;
+            }
+            GUILayout.EndScrollView();
+            if (bodyIndex >= 0 && bodyModded[bodyIndex])
+                GUILayout.Label("⚠ Modded planet — the rescuer is warned they need its planet pack.", labelStyle);
+
+            GUILayout.Space(6);
+
+            // Orbit / Surface mode
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Toggle(rescueMode == 0, " Orbit", checkboxStyle)) rescueMode = 0;
+            GUILayout.Space(16);
+            if (GUILayout.Toggle(rescueMode == 1, " Surface", checkboxStyle)) rescueMode = 1;
+            GUILayout.EndHorizontal();
+            GUILayout.Space(2);
+
+            if (rescueMode == 0)
+            {
+                DrawNumberRow("Apoapsis (km):", ref apText);
+                DrawNumberRow("Periapsis (km):", ref peText);
+                DrawNumberRow($"Margin (km, min {MIN_MARGIN_ORBIT_KM}):", ref marginAltText);
+            }
+            else
+            {
+                DrawNumberRow("Latitude (°):", ref latText);
+                DrawNumberRow("Longitude (°):", ref lonText);
+                DrawNumberRow($"Margin (°, min {MIN_MARGIN_SURFACE_DEG}):", ref marginPosText);
+            }
+
+            GUILayout.Space(4);
+            GUILayout.Label("Part restriction: auto (your active modlist).", labelStyle);
+            GUILayout.Space(6);
         }
 
         private void TrySend()
@@ -534,6 +730,12 @@ namespace GeneKerman.UI
                 return;
             }
 
+            if (contractType == RESCUE_TYPE_INDEX)
+            {
+                TrySendRescue(payment, fine);
+                return;
+            }
+
             string modlist = BuildModlist();
 
             // Janitor's Closet mode needs the editor's part filter, which only exists in
@@ -565,6 +767,105 @@ namespace GeneKerman.UI
                         {
                             isSuccess = false;
                             statusMsg = $"❌ {error ?? "Failed to create contract."}";
+                        }
+                    },
+                    ContractTypeApi[contractType]));
+        }
+
+        private void TrySendRescue(int payment, int fine)
+        {
+            if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
+            {
+                statusMsg = "❌ You must be in flight on the crewed vessel.";
+                isSuccess = false;
+                return;
+            }
+            ScanRescueContext(); // refresh crew/bodies right before sending
+            if (rescueCrew.Count == 0)
+            {
+                statusMsg = "❌ No crew aboard to rescue.";
+                isSuccess = false;
+                return;
+            }
+            if (bodyIndex < 0 || bodyIndex >= bodyNames.Count)
+            {
+                statusMsg = "❌ Pick a target body.";
+                isSuccess = false;
+                return;
+            }
+
+            string body = bodyNames[bodyIndex];
+            bool isModded = bodyModded[bodyIndex];
+            string mode = rescueMode == 0 ? "orbit" : "surface";
+            double ap = 0, pe = 0, lat = 0, lon = 0, marginAlt = 0, marginPos = 0;
+
+            if (rescueMode == 0)
+            {
+                if (!TryParseInv(apText, out ap) || !TryParseInv(peText, out pe) || ap < 0 || pe < 0)
+                {
+                    statusMsg = "❌ Enter valid Apoapsis/Periapsis (km).";
+                    isSuccess = false;
+                    return;
+                }
+                double mk;
+                if (!TryParseInv(marginAltText, out mk) || mk < MIN_MARGIN_ORBIT_KM) mk = MIN_MARGIN_ORBIT_KM;
+                ap *= 1000.0; pe *= 1000.0; marginAlt = mk * 1000.0; // km → m
+            }
+            else
+            {
+                if (!TryParseInv(latText, out lat) || !TryParseInv(lonText, out lon) || lat < -90 || lat > 90)
+                {
+                    statusMsg = "❌ Enter a valid Latitude (-90..90) and Longitude.";
+                    isSuccess = false;
+                    return;
+                }
+                double md;
+                if (!TryParseInv(marginPosText, out md) || md < MIN_MARGIN_SURFACE_DEG) md = MIN_MARGIN_SURFACE_DEG;
+                marginPos = md;
+            }
+
+            // Snapshot the active vessel (crew roster embedded so attributes survive the
+            // transfer). Crew are NOT renamed here — they're tagged "{me}'s {kerbal}" when
+            // the rescuer imports the wreck, and stripped when they're returned to me.
+            string node = VesselTransfer.ExportActiveVessel(true);
+            if (string.IsNullOrEmpty(node))
+            {
+                statusMsg = "❌ Could not snapshot your vessel.";
+                isSuccess = false;
+                return;
+            }
+            string pid = FlightGlobals.ActiveVessel.id.ToString();
+
+            // The names the rescuer will see (and must recover) = "{me}'s {kerbal}".
+            var taggedKerbals = new List<object>();
+            foreach (var k in rescueCrew) taggedKerbals.Add(VesselTransfer.TagName(currentUserName, k));
+            string kerbalsJson = MiniJSON.Serialize(taggedKerbals);
+
+            string modlist = BuildActiveModlist();
+            var corp = corps[selectedCorpIndex];
+            isSending = true;
+            statusMsg = "Sending rescue contract...";
+
+            GeneKermanMod.Instance.StartCoroutine(
+                GeneKermanMod.Instance.Api.CreateRescueContract(
+                    corp.ownerId, missionText, payment, fine, dueDateText, modlist,
+                    body, mode, ap, pe, lat, lon, marginAlt, marginPos, isModded,
+                    pid, kerbalsJson, node,
+                    (ok, data, error) =>
+                    {
+                        isSending = false;
+                        if (ok)
+                        {
+                            isSuccess = true;
+                            statusMsg = $"✅ Rescue sent to {corp.ownerName}! Your vessel will be removed.";
+                            currentBalance -= payment;
+                            // Can't Die() the active vessel mid-flight — queue removal for a safe scene.
+                            GeneKermanMod.Instance.QueueRescueVesselRemoval(pid);
+                        }
+                        else
+                        {
+                            isSuccess = false;
+                            statusMsg = $"❌ {error ?? "Failed to create rescue contract."}";
                         }
                     }));
         }

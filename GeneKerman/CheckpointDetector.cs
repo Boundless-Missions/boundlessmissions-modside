@@ -46,9 +46,36 @@ namespace GeneKerman
         /// <summary>Set by the host while a prompt or capture is in flight to pause detection.</summary>
         public bool Suspended { get; set; }
 
+        /// <summary>
+        /// Host gate — returns true when checkpoint capture is enabled (mirrors the
+        /// setting the host checks before calling <see cref="Tick"/>). Consulted by
+        /// the event-driven detectors, which fire outside the Tick loop.
+        /// </summary>
+        public System.Func<bool> IsCaptureEnabled { get; set; }
+
         public CheckpointDetector(System.Action<Checkpoint> onCheckpoint)
         {
             this.onCheckpoint = onCheckpoint;
+        }
+
+        // ── Event-driven milestones ─────────────────────────────────────────
+        //
+        // Proximity/SOI milestones are polled in Tick(); these are discrete game
+        // events (EVA, staging, situation changes) that we hook directly. The host
+        // calls Register()/Unregister() alongside its own GameEvents wiring.
+
+        public void Register()
+        {
+            GameEvents.onCrewOnEva.Add(OnCrewEva);
+            GameEvents.onStageActivate.Add(OnStage);
+            GameEvents.onVesselSituationChange.Add(OnSituationChange);
+        }
+
+        public void Unregister()
+        {
+            GameEvents.onCrewOnEva.Remove(OnCrewEva);
+            GameEvents.onStageActivate.Remove(OnStage);
+            GameEvents.onVesselSituationChange.Remove(OnSituationChange);
         }
 
         /// <summary>Clear per-scene state. Call on scene changes so SOI/keys don't leak.</summary>
@@ -56,6 +83,99 @@ namespace GeneKerman
         {
             lastMainBody = null;
             firedKeys.Clear();
+        }
+
+        /// <summary>Shared pre-flight gate for the event-driven detectors.</summary>
+        private bool CanFire()
+        {
+            if (Suspended) return false;
+            if (!HighLogic.LoadedSceneIsFlight) return false;
+            if (IsCaptureEnabled != null && !IsCaptureEnabled()) return false;
+            return true;
+        }
+
+        private void OnCrewEva(GameEvents.FromToAction<Part, Part> data)
+        {
+            if (!CanFire()) return;
+
+            Vessel ship = data.from != null ? data.from.vessel : null;     // craft left behind
+            Vessel kerbal = data.to != null ? data.to.vessel : null;       // the new EVA vessel
+            string who = kerbal != null ? kerbal.vesselName : "A kerbal";
+
+            Fire(new Checkpoint
+            {
+                kind = "eva",
+                title = "🚶 EVA",
+                message = $"{who} stepped outside. Capture the spacewalk?",
+                label = "eva_" + who,
+                // Frame the spacewalker against the craft they left (when it isn't the
+                // active vessel already); otherwise a lone portrait of the kerbal.
+                targetVessel = (ship != null && ship != FlightGlobals.ActiveVessel) ? ship : null,
+            }, key: "eva:" + who);
+        }
+
+        private void OnStage(int stage)
+        {
+            if (!CanFire()) return;
+
+            var vessel = FlightGlobals.ActiveVessel;
+            if (vessel == null) return;
+            // Skip staging on the pad / sitting on a surface — only flight stagings
+            // (booster sep, fairing/jettison during ascent, etc.) are worth a shot.
+            if (!IsInSpace(vessel)) return;
+
+            Fire(new Checkpoint
+            {
+                kind = "staging",
+                title = "🔥 Staging",
+                message = $"Stage {stage} separation. Capture the burn?",
+                label = $"staging_s{stage}",
+                // Portrait of the vessel — no paired subject.
+            }, key: $"staging:{stage}");
+        }
+
+        private void OnSituationChange(GameEvents.HostedFromToAction<Vessel, Vessel.Situations> data)
+        {
+            if (!CanFire()) return;
+            if (data.host == null || data.host != FlightGlobals.ActiveVessel) return;
+
+            var vessel = data.host;
+            CelestialBody body = vessel.mainBody;
+            string bodyName = body != null ? body.bodyName : "space";
+
+            switch (data.to)
+            {
+                case Vessel.Situations.ORBITING:
+                    Fire(new Checkpoint
+                    {
+                        kind = "orbit",
+                        title = "🛰 Orbit achieved",
+                        message = $"You've reached orbit around {bodyName}. Capture it with the body in frame?",
+                        label = "orbit_" + bodyName,
+                        targetBody = body,   // backdrop the body you're now circling
+                    }, key: "orbit:" + bodyName);
+                    break;
+
+                case Vessel.Situations.LANDED:
+                    Fire(new Checkpoint
+                    {
+                        kind = "landing",
+                        title = "🛬 Touchdown",
+                        message = $"Touchdown on {bodyName}. Capture the landing?",
+                        label = "landing_" + bodyName,
+                    }, key: "landing:" + bodyName);
+                    break;
+
+                case Vessel.Situations.SPLASHED:
+                    Fire(new Checkpoint
+                    {
+                        kind = "splashdown",
+                        title = "🌊 Splashdown",
+                        message = $"Splashdown on {bodyName}. Capture the recovery?",
+                        label = "splashdown_" + bodyName,
+                    }, key: "splashdown:" + bodyName);
+                    break;
+            }
         }
 
         public void Tick()

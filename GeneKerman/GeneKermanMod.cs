@@ -64,6 +64,12 @@ namespace GeneKerman
         private CheckpointDetector checkpointDetector;
         private bool checkpointCapturing;
 
+        // True while the game UI is hidden (stock F2 toggle, or our own capture
+        // firing onHideUI). Our windows are drawn in OnGUI, which UIMasterController
+        // does NOT govern, so we must suppress them ourselves — otherwise the mod
+        // windows leak into screenshots and cinematic captures.
+        private bool uiHidden;
+
         // ── Unity Lifecycle ─────────────────────────────────────────────────
 
         void Awake()
@@ -95,7 +101,11 @@ namespace GeneKerman
             createContractWindow = new UI.CreateContractWindow();
             notificationPopup = new UI.NotificationPopup();
             checkpointPrompt = new UI.CheckpointPrompt();
-            checkpointDetector = new CheckpointDetector(OnCheckpoint);
+            checkpointDetector = new CheckpointDetector(OnCheckpoint)
+            {
+                IsCaptureEnabled = () => Api != null && Api.CheckpointPhotosEnabled,
+            };
+            checkpointDetector.Register();
 
             // Load toolbar icon
             LoadToolbarIcon();
@@ -106,6 +116,10 @@ namespace GeneKerman
 
             // Invalidate UI textures on scene changes
             GameEvents.onGameSceneLoadRequested.Add(OnSceneChange);
+
+            // Hide our IMGUI windows whenever the game UI is hidden (F2 or a capture).
+            GameEvents.onHideUI.Add(OnHideUI);
+            GameEvents.onShowUI.Add(OnShowUI);
 
             // If already linked, do an initial data fetch and open the live socket
             if (Api.IsLinked)
@@ -118,6 +132,9 @@ namespace GeneKerman
             initialized = true;
             lastNotificationCheck = Time.realtimeSinceStartup;
         }
+
+        private void OnHideUI() => uiHidden = true;
+        private void OnShowUI() => uiHidden = false;
 
         private void OnSceneChange(GameScenes scene)
         {
@@ -253,6 +270,7 @@ namespace GeneKerman
                 case "rescue_delivered":
                 case "rescue_failed":
                 case "rescue_craft_removed":
+                case "flag_delivered":
                     return true;
                 default:
                     return false;
@@ -264,6 +282,9 @@ namespace GeneKerman
             GameEvents.onGUIApplicationLauncherReady.Remove(OnToolbarReady);
             GameEvents.onGUIApplicationLauncherDestroyed.Remove(OnToolbarDestroyed);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneChange);
+            GameEvents.onHideUI.Remove(OnHideUI);
+            GameEvents.onShowUI.Remove(OnShowUI);
+            checkpointDetector?.Unregister();
             notifSocket?.Disconnect();
             RemoveToolbarButton();
         }
@@ -381,16 +402,33 @@ namespace GeneKerman
 
         void OnGUI()
         {
-            if (ShowMainWindow && Api.IsLinked)
-                mainWindow.Draw();
+            // While the UI is hidden (capture in progress or F2), draw nothing so
+            // the mod's windows never appear in screenshots or cinematic shots.
+            if (uiHidden) return;
 
-            if (ShowLinkWindow)
-                linkWindow.Draw();
+            // Swap in GeneKerman's themed skin for the duration of our own windows,
+            // then restore the ambient skin. This scopes our dark button/textField/
+            // scrollbar styling to GeneKerman only — without it, mutating the shared
+            // GUI.skin would restyle every other mod's IMGUI too.
+            GUISkin prevSkin = GUI.skin;
+            GUI.skin = UI.GKSkin.GetSkin(prevSkin);
+            try
+            {
+                if (ShowMainWindow && Api.IsLinked)
+                    mainWindow.Draw();
 
-            submitWindow.Draw();
-            createContractWindow.Draw();
-            notificationPopup.Draw();
-            checkpointPrompt.Draw();
+                if (ShowLinkWindow)
+                    linkWindow.Draw();
+
+                submitWindow.Draw();
+                createContractWindow.Draw();
+                notificationPopup.Draw();
+                checkpointPrompt.Draw();
+            }
+            finally
+            {
+                GUI.skin = prevSkin;
+            }
         }
 
         // ── Milestone Hero Shots ────────────────────────────────────────────

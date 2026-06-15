@@ -26,6 +26,53 @@ namespace GeneKerman.UI
         // Sentinel texture to detect scene-change destruction
         private static Texture2D sentinel;
 
+        // GeneKerman's themed skin (see GetSkin). Rebuilt on scene changes.
+        private static GUISkin themedSkin;
+
+        /// <summary>
+        /// GeneKerman's dark theme for the controls that would otherwise fall back
+        /// to the shared <see cref="GUI.skin"/> — bare buttons, text fields and
+        /// scroll bars. Built once by cloning the ambient skin and restyling those
+        /// few controls; everything else is inherited untouched.
+        ///
+        /// IMPORTANT: callers MUST scope this. Set <c>GUI.skin</c> to it only while
+        /// drawing GeneKerman windows and restore the previous skin afterwards, so
+        /// the theme never leaks into other mods' IMGUI (which all share GUI.skin).
+        /// </summary>
+        public static GUISkin GetSkin(GUISkin baseSkin)
+        {
+            if (themedSkin != null) return themedSkin;
+
+            themedSkin = Object.Instantiate(baseSkin);
+            themedSkin.hideFlags = HideFlags.HideAndDontSave; // survive scene loads
+
+            themedSkin.verticalScrollbar = new GUIStyle(themedSkin.verticalScrollbar) {
+                normal = { background = MakeTex(2, 2, new Color(0.08f, 0.08f, 0.1f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
+            };
+            themedSkin.verticalScrollbarThumb = new GUIStyle(themedSkin.verticalScrollbarThumb) {
+                normal = { background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.25f, 1f)) },
+                hover = { background = MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
+                active = { background = MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
+            };
+            themedSkin.button = new GUIStyle(themedSkin.button) {
+                normal = { background = MakeTex(2, 2, new Color(0.15f, 0.15f, 0.2f, 1f)) },
+                hover = { background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
+                active = { background = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
+                border = new RectOffset(0, 0, 0, 0)
+            };
+            themedSkin.textField = new GUIStyle(themedSkin.textField) {
+                normal = { background = MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 1f)), textColor = Color.white },
+                focused = { background = MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
+                hover = { background = MakeTex(2, 2, new Color(0.09f, 0.1f, 0.14f, 1f)), textColor = Color.white },
+                active = { background = MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
+                border = new RectOffset(0, 0, 0, 0), padding = new RectOffset(5, 5, 5, 5)
+            };
+
+            return themedSkin;
+        }
+
         /// <summary>
         /// Create or retrieve a solid-color texture that survives scene changes.
         /// </summary>
@@ -134,6 +181,9 @@ namespace GeneKerman.UI
             }
             foreach (var key in iconKeysToRemove)
                 iconCache.Remove(key);
+
+            // Drop the themed skin so it rebuilds with fresh (non-destroyed) textures.
+            themedSkin = null;
 
             sentinel = null; // Force rebuild check
         }

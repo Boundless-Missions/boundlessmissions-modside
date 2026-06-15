@@ -76,6 +76,29 @@ namespace GeneKerman
             cam.transform.LookAt(lookAt, up);
             cam.fieldOfView = fov;
 
+            // KSP draws distant planets with a SEPARATE ScaledSpace camera. If only the
+            // near camera moves, the scaled camera keeps rendering the body from the old
+            // pose — leaving a second, offset copy of the planet in the shot (the
+            // "duplicate Kerbin"). Disable the ScaledCamera controller so it stops
+            // re-syncing to the now-frozen FlightCamera, then drive the scaled camera to
+            // the scaled-space equivalent of our pose so both renders line up into one
+            // planet.
+            Camera scaledCam = ScaledCamera.Instance != null ? ScaledCamera.Instance.cam : null;
+            bool scaledWasEnabled = ScaledCamera.Instance != null && ScaledCamera.Instance.enabled;
+            Vector3 origScaledPos = default(Vector3);
+            Quaternion origScaledRot = default(Quaternion);
+            float origScaledFov = 0f;
+            if (scaledCam != null)
+            {
+                origScaledPos = scaledCam.transform.position;
+                origScaledRot = scaledCam.transform.rotation;
+                origScaledFov = scaledCam.fieldOfView;
+                if (ScaledCamera.Instance != null) ScaledCamera.Instance.enabled = false;
+                scaledCam.transform.position = ScaledSpace.LocalToScaledSpace(camPos);
+                scaledCam.transform.LookAt(ScaledSpace.LocalToScaledSpace(lookAt), up);
+                scaledCam.fieldOfView = fov;
+            }
+
             // Hide the HUD so the shot is just the vessel and its backdrop — the same
             // mechanism F2 uses. Restored after the grab.
             SetUIVisible(false);
@@ -93,6 +116,13 @@ namespace GeneKerman
             cam.transform.position = origPos;
             cam.transform.rotation = origRot;
             cam.fieldOfView = origFov;
+            if (scaledCam != null)
+            {
+                scaledCam.transform.position = origScaledPos;
+                scaledCam.transform.rotation = origScaledRot;
+                scaledCam.fieldOfView = origScaledFov;
+                if (ScaledCamera.Instance != null) ScaledCamera.Instance.enabled = scaledWasEnabled;
+            }
             if (fc != null) fc.enabled = fcWasEnabled;
 
             Debug.Log($"[GeneKerman] Cinematic checkpoint shot saved: {path}");
@@ -155,10 +185,14 @@ namespace GeneKerman
                     sideSun = Vector3.Cross(toBody, upRef);
                 sideSun.Normalize();
 
-                // Mostly to the side, partly away from the body so it reads as a backdrop.
-                Vector3 camDir = (sideSun * 0.85f - toBody * 0.5f).normalized;
+                // Sit mostly on the side of the vessel *opposite* the body, with a small
+                // lit-side lateral nudge. This points the view ~16° off the body axis, so
+                // the body sits behind the vessel and stays in frame yet clears its
+                // silhouette. (The old 0.85/0.5 mix aimed the view ~60° off the body,
+                // pushing it out of the shot once the scaled camera tracked the pose.)
+                Vector3 camDir = (sideSun * 0.27f - toBody * 0.96f).normalized;
 
-                fov = 38f;
+                fov = 42f;
                 float dist = radius / Mathf.Tan(fov * 0.5f * Mathf.Deg2Rad) * 2.4f;
                 camPos = vPos + camDir * dist;
                 lookAt = vPos;

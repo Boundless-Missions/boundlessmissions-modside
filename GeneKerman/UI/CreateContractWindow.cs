@@ -39,16 +39,18 @@ namespace GeneKerman.UI
         private string currentUserId = "";
         private string currentUserName = "";
 
-        // Contract type: 0 Auto, 1 Craft Build, 2 Active Mission, 3 Rescue
+        // Contract type: 0 Auto, 1 Craft Build, 2 Active Mission, 3 Rescue, 4 Flag Design
         private int contractType = 0;
         private const int RESCUE_TYPE_INDEX = 3;
-        private static readonly string[] ContractTypeLabels = { "Auto", "Craft Build", "Active Mission", "Rescue" };
-        private static readonly string[] ContractTypeApi = { "auto", "craft_build", "active_vessel", "rescue" };
+        private const int FLAG_TYPE_INDEX = 4;
+        private static readonly string[] ContractTypeLabels = { "Auto", "Craft Build", "Active Mission", "Rescue", "Flag Design" };
+        private static readonly string[] ContractTypeApi = { "auto", "craft_build", "active_vessel", "rescue", "flag_design" };
         private static readonly string[] ContractTypeDescs = {
             "Let the server classify the mission.",
             "Recipient submits a blueprint from the VAB/SPH.",
             "Recipient flies a craft to the target.",
             "Recipient rescues your stranded kerbals.",
+            "Recipient designs a flag (submitted & reviewed via Discord).",
         };
 
         // Rescue setup state
@@ -559,8 +561,9 @@ namespace GeneKerman.UI
                 GUILayout.Space(4);
             }
 
-            // ── Modlist Restriction (rescue auto-captures the active modlist) ──
-            if (contractType != RESCUE_TYPE_INDEX)
+            // ── Modlist Restriction (rescue auto-captures the active modlist;
+            //    flag-design has no in-game build step, so part limits don't apply) ──
+            if (contractType != RESCUE_TYPE_INDEX && contractType != FLAG_TYPE_INDEX)
             {
                 GUILayout.Space(6);
                 GUILayout.Label("Part Restriction:", labelStyle);
@@ -736,11 +739,12 @@ namespace GeneKerman.UI
                 return;
             }
 
-            string modlist = BuildModlist();
+            // Flag-design has no in-game build step, so it never carries a part restriction.
+            string modlist = contractType == FLAG_TYPE_INDEX ? null : BuildModlist();
 
             // Janitor's Closet mode needs the editor's part filter, which only exists in
             // the VAB/SPH. Don't silently send an unrestricted contract if we couldn't read it.
-            if (modlistMode == 4 && string.IsNullOrEmpty(modlist))
+            if (contractType != FLAG_TYPE_INDEX && modlistMode == 4 && string.IsNullOrEmpty(modlist))
             {
                 statusMsg = "❌ Open the VAB or SPH to capture the Janitor's Closet filter.";
                 isSuccess = false;

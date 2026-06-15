@@ -41,16 +41,17 @@ namespace GeneKerman.UI
         private GUIStyle checkboxStyle, mailRowStyle, mailSenderStyle;
         private GUIStyle mailSubjectStyle, mailAmountStyle, mailDateStyle;
         private GUIStyle iconBtnStyle;
+        private GUIStyle resizeGripStyle;
         private bool stylesReady;
 
         // Icon textures loaded from Iconpack-1 (via GameData/GeneKerman/Textures/)
         private Texture2D iconRefresh, iconCompose, iconInbox, iconTrash, iconCross;
-        private Texture2D iconUnlink, iconSubmit;
+        private Texture2D iconUnlink, iconSubmit, iconVesselInfo;
 
         // Pre-built GUIContent for icon+text buttons
         private GUIContent gcRefresh, gcRefreshMissions, gcRefreshOnly;
         private GUIContent gcInbox, gcTrash, gcCompose, gcUnlink;
-        private GUIContent gcDel, gcRestore, gcSell, gcOpen;
+        private GUIContent gcDel, gcRestore, gcSell, gcOpen, gcVesselInfo;
 
         private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Market", "Notifications", "Settings" };
         private string serverUrlInput = "";
@@ -86,6 +87,24 @@ namespace GeneKerman.UI
         private Vector2 blueprintScroll;
         private Rect blueprintRect = new Rect(180, 90, 560, 560);
         private readonly int blueprintWindowId = "GKBlueprint".GetHashCode();
+        // Resize + zoom state for the blueprint window (drag either corner grip to
+        // resize; the +/−/Fit controls scale the image inside the scroll view).
+        private float blueprintZoom = 1f;
+        private bool blueprintResizingBR;   // bottom-right grip active
+        private bool blueprintResizingTL;   // top-left grip active
+
+        // Orbital telemetry standalone window — the server renders a vessel-state
+        // diagram (orbit, Ap/Pe, situation, period) for active-vessel and rescue
+        // submissions. Shown in its own resizable/zoomable window, separate from
+        // the blueprints. Only populated when the submission includes telemetry.
+        private Texture2D telemetryTexture;
+        private bool showTelemetryWindow;
+        private Vector2 telemetryScroll;
+        private float telemetryZoom = 1f;
+        private bool telemetryResizingBR;
+        private bool telemetryResizingTL;
+        private Rect telemetryRect = new Rect(210, 110, 720, 480);
+        private readonly int telemetryWindowId = "GKTelemetry".GetHashCode();
 
         // Trash state
         private HashSet<string> trashedContracts = new HashSet<string>();
@@ -168,17 +187,43 @@ namespace GeneKerman.UI
             if (GKSkin.NeedsRebuild())
             {
                 stylesReady = false;
-                // The downloaded blueprint textures were destroyed with the scene;
-                // drop the popup rather than draw dead handles.
+                // The downloaded blueprint/telemetry textures were destroyed with
+                // the scene; drop the popups rather than draw dead handles.
                 if (showBlueprintPopup) CloseBlueprintPreview();
             }
 
             windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
                 GUIStyle.none, GUILayout.Width(550));
 
+            // Resizable windows: drive the layout from the rect's current size
+            // (set by the corner grips) instead of a fixed width. The window func
+            // mutates the rect field directly when a grip is dragged — for size, and
+            // for the origin when resizing from the top-left. We only adopt the
+            // window's returned (drag-moved) position when no grip is active, so a
+            // resize never fights the pre-resize position the window hands back.
             if (showBlueprintPopup)
-                blueprintRect = ClickThroughHelper.Window(blueprintWindowId, blueprintRect,
-                    DrawBlueprintPopup, "", GUIStyle.none, GUILayout.Width(560));
+            {
+                Rect ret = ClickThroughHelper.Window(blueprintWindowId, blueprintRect,
+                    DrawBlueprintPopup, "", GUIStyle.none,
+                    GUILayout.Width(blueprintRect.width), GUILayout.Height(blueprintRect.height));
+                if (!blueprintResizingBR && !blueprintResizingTL)
+                {
+                    blueprintRect.x = ret.x;
+                    blueprintRect.y = ret.y;
+                }
+            }
+
+            if (showTelemetryWindow)
+            {
+                Rect ret = ClickThroughHelper.Window(telemetryWindowId, telemetryRect,
+                    DrawTelemetryWindow, "", GUIStyle.none,
+                    GUILayout.Width(telemetryRect.width), GUILayout.Height(telemetryRect.height));
+                if (!telemetryResizingBR && !telemetryResizingTL)
+                {
+                    telemetryRect.x = ret.x;
+                    telemetryRect.y = ret.y;
+                }
+            }
         }
 
         private void InitStyles()
@@ -300,31 +345,10 @@ namespace GeneKerman.UI
                 normal = { textColor = new Color(0.5f, 0.5f, 0.55f) },
             };
 
-            
-            GUI.skin.verticalScrollbar = new GUIStyle(GUI.skin.verticalScrollbar) {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.1f, 1f)) },
-                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
-            };
-            GUI.skin.verticalScrollbarThumb = new GUIStyle(GUI.skin.verticalScrollbarThumb) {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.25f, 1f)) },
-                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
-                active = { background = GKSkin.MakeTex(2, 2, new Color(0.3f, 0.3f, 0.38f, 1f)) },
-                border = new RectOffset(0, 0, 0, 0), margin = new RectOffset(0, 0, 0, 0), fixedWidth = 12
-            };
-            
-            GUI.skin.button = new GUIStyle(GUI.skin.button) {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.15f, 0.15f, 0.2f, 1f)) },
-                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
-                active = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.2f, 0.28f, 1f)) },
-                border = new RectOffset(0, 0, 0, 0)
-            };
-            GUI.skin.textField = new GUIStyle(GUI.skin.textField) {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 1f)), textColor = Color.white },
-                focused = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
-                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.09f, 0.1f, 0.14f, 1f)), textColor = Color.white },
-                active = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.15f, 0.2f, 1f)), textColor = Color.white },
-                border = new RectOffset(0, 0, 0, 0), padding = new RectOffset(5, 5, 5, 5)
-            };
+            // NOTE: the dark scrollbar / button / textField theme for controls that
+            // fall back to GUI.skin lives in GKSkin.GetSkin() and is applied scoped
+            // to our windows only (see GeneKermanMod.OnGUI). It must NOT be set on the
+            // shared GUI.skin here — that leaks the theme into every other mod's IMGUI.
 
             // Small icon-only button style for per-row actions (del/restore)
             iconBtnStyle = new GUIStyle(tabStyle)
@@ -343,6 +367,7 @@ namespace GeneKerman.UI
             iconCross   = GKSkin.LoadIcon("Cross");
             iconUnlink  = GKSkin.LoadIcon("Unlink");
             iconSubmit  = GKSkin.LoadIcon("Submit");
+            iconVesselInfo = GKSkin.LoadIcon("aVesselInfo", 18);
 
             // Build GUIContent objects — icon + label text. If an icon failed to
             // load (file missing), fall back to the old text-only labels.
@@ -357,6 +382,16 @@ namespace GeneKerman.UI
             gcRestore         = MakeGC(GKSkin.LoadIcon("Inbox", 10),  "",  "[Res]");
             gcSell            = MakeGC(iconSubmit,  " Sell on Marketplace", "[$] Sell on Marketplace");
             gcOpen            = MakeGC(iconInbox,   " Open",             "[>] Open");
+            // Active vessel info / orbital telemetry button (falls back to 🛰).
+            gcVesselInfo      = MakeGC(iconVesselInfo, "",              "🛰");
+
+            // Corner grips for resizable popups (blueprint / telemetry windows).
+            resizeGripStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 16, alignment = TextAnchor.MiddleCenter,
+                padding = new RectOffset(0, 0, 0, 0),
+                normal = { textColor = new Color(0.55f, 0.6f, 0.7f, 0.9f) }
+            };
 
             stylesReady = true;
         }
@@ -1016,14 +1051,8 @@ namespace GeneKerman.UI
                 bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
                 if (isOutgoing)
                 {
-                    // Let the issuer eyeball the contractor's submitted render(s)
-                    // before deciding — the blueprint + vessel info opens in a popup.
-                    if (GUILayout.Button("🖼 View Blueprints", submitBtnStyle, GUILayout.Height(30)))
-                    {
-                        string cid = MiniJSON.GetString(c, "contract_id");
-                        OpenBlueprintPreview(cid);
-                    }
-                    GUILayout.Space(8);
+                    // The submission preview (blueprint render + orbital telemetry) is
+                    // available to both parties via the dedicated row below.
                     if (GUILayout.Button("(Ok) Approve", acceptBtnStyle, GUILayout.Height(30)))
                     {
                         string cid = MiniJSON.GetString(c, "contract_id");
@@ -1092,12 +1121,26 @@ namespace GeneKerman.UI
             {
                 string cid = MiniJSON.GetString(c, "contract_id");
                 bool botIssued = MiniJSON.GetBool(c, "is_bot_issued");
+                string completedType = MiniJSON.GetString(c, "mission_type", "active_vessel");
 
+                // Flag-design contracts have no craft to download — the flag is
+                // installed automatically into the issuer's flag picker by the
+                // craft-import queue at the Space Center. So show status, not a button.
+                if (completedType == "flag_design")
+                {
+                    bool isIssuer = MiniJSON.GetBool(c, "is_outgoing");
+                    GUI.enabled = false;
+                    GUILayout.Button(isIssuer
+                        ? "🚩 Flag added to your flag picker (visit Space Center)"
+                        : "🚩 Flag delivered to the issuer",
+                        submitBtnStyle, GUILayout.Height(30));
+                    GUI.enabled = true;
+                }
                 // Bot-contract crafts are delivered to the builder's corporation
                 // channel as a blueprint — never imported as a live vessel (that
                 // would let them be re-imported/duplicated). Only player-to-player
                 // contracts deliver their craft into the save here.
-                if (botIssued)
+                else if (botIssued)
                 {
                     GUI.enabled = false;
                     GUILayout.Button("(Ok) Delivered to your corp", submitBtnStyle, GUILayout.Height(30));
@@ -1123,6 +1166,18 @@ namespace GeneKerman.UI
 
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
+
+            // Submission preview — once work has been submitted, either party can pull
+            // up the contractor's blueprint render(s) and (for active-vessel / rescue
+            // contracts) the orbital telemetry "mission state" image right here, in any
+            // state from review onward. The 🛰 Telemetry button inside the popup appears
+            // only when a telemetry image was rendered for this submission.
+            if (status == "submitted" || status == "disputed" || status == "completed")
+            {
+                GUILayout.Space(6);
+                if (GUILayout.Button("🖼 View Submission", submitBtnStyle, GUILayout.Height(28)))
+                    OpenBlueprintPreview(MiniJSON.GetString(c, "contract_id"));
+            }
         }
 
         private void DrawDetailRow(string label, string value)
@@ -2099,6 +2154,32 @@ namespace GeneKerman.UI
             string source = MiniJSON.GetString(entry, "source", "");
             string vesselNodeUrl = MiniJSON.GetString(entry, "vessel_node_url", null);
             string ownerName = MiniJSON.GetString(entry, "owner_name", "");
+            string flagUrl = MiniJSON.GetString(entry, "flag_url", null);
+
+            // Flag-design payout: a delivered flag PNG. Install it into the flag picker
+            // (GameData/GeneKerman/Flags) — never a craft or live vessel.
+            if (source == "flag" && !string.IsNullOrEmpty(flagUrl))
+            {
+                bool flagInstalled = false;
+                yield return GeneKermanMod.Instance.Api.DownloadFile(flagUrl, (ok, fileData) =>
+                {
+                    if (!ok || fileData == null) return;
+                    FlagTransfer.InstallStandaloneFlag(craftName, fileData);
+                    flagInstalled = true;
+                    GeneKermanMod.Instance.ShowNotification("🚩 Flag Installed",
+                        $"{craftName} is now available in your flag picker.");
+                });
+                if (!flagInstalled)
+                {
+                    // Leave it queued for the next poll (e.g. a download hiccup).
+                    processingImports.Remove(importId);
+                    yield break;
+                }
+                yield return GeneKermanMod.Instance.Api.Post(
+                    $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
+                processingImports.Remove(importId);
+                yield break;
+            }
 
             // Rescue deliveries are LIVE vessels (the rescued kerbals coming home, or a
             // cancelled rescue's vessel returning to its spot). Crew are tagged/stripped
@@ -2199,6 +2280,21 @@ namespace GeneKerman.UI
             blueprintVesselName = MiniJSON.GetString(data, "vessel_name", "");
             var images = MiniJSON.GetList(data, "images");
 
+            // Orbital telemetry diagram (active-vessel / rescue submissions only).
+            // Downloaded into its own texture and shown in a separate window — it is
+            // not a blueprint, so it doesn't belong in the blueprint scroll list.
+            string telemetryUrl = MiniJSON.GetString(data, "telemetry_url", "");
+            if (!string.IsNullOrEmpty(telemetryUrl))
+            {
+                yield return GeneKermanMod.Instance.Api.DownloadFile(telemetryUrl, (dok, bytes) =>
+                {
+                    if (!dok || bytes == null) return;
+                    var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+                    if (tex.LoadImage(bytes))
+                        telemetryTexture = tex;
+                });
+            }
+
             if (images == null || images.Count == 0)
             {
                 loadingBlueprints = false;
@@ -2235,9 +2331,15 @@ namespace GeneKerman.UI
             blueprintStatus = "";
             blueprintVesselName = "";
             blueprintScroll = Vector2.zero;
+            blueprintZoom = 1f;
+            blueprintResizingBR = false;
+            blueprintResizingTL = false;
             foreach (var tex in blueprintTextures)
                 if (tex != null) Object.Destroy(tex);
             blueprintTextures.Clear();
+            // Telemetry belongs to this same submission — tear it down too so a
+            // stale diagram never lingers when a different contract is opened.
+            CloseTelemetryWindow();
         }
 
         private void DrawBlueprintPopup(int id)
@@ -2251,6 +2353,27 @@ namespace GeneKerman.UI
                 : $"🖼 {blueprintVesselName}";
             GUILayout.Label(title, headerStyle);
             GUILayout.FlexibleSpace();
+
+            // Zoom controls (only meaningful once images are loaded).
+            bool hasImages = !loadingBlueprints && string.IsNullOrEmpty(blueprintStatus)
+                             && blueprintTextures.Count > 0;
+            if (hasImages)
+            {
+                if (GUILayout.Button("－", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+                    blueprintZoom = Mathf.Max(0.25f, blueprintZoom - 0.25f);
+                if (GUILayout.Button("＋", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+                    blueprintZoom = Mathf.Min(4f, blueprintZoom + 0.25f);
+                if (GUILayout.Button("Fit", tabStyle, GUILayout.Width(40), GUILayout.Height(26)))
+                    blueprintZoom = 1f;
+            }
+
+            // Active vessel info — opens the orbital telemetry diagram in its own window.
+            if (telemetryTexture != null &&
+                GUILayout.Button(gcVesselInfo, tabStyle, GUILayout.Width(34), GUILayout.Height(26)))
+            {
+                OpenTelemetryWindow();
+            }
+
             if (GUILayout.Button("✕", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
             {
                 CloseBlueprintPreview();
@@ -2262,25 +2385,25 @@ namespace GeneKerman.UI
 
             GUILayout.Space(6);
 
-            if (loadingBlueprints)
-            {
-                GUILayout.Label(blueprintStatus, labelStyle);
-            }
-            else if (!string.IsNullOrEmpty(blueprintStatus))
+            if (loadingBlueprints || !string.IsNullOrEmpty(blueprintStatus))
             {
                 GUILayout.Label(blueprintStatus, labelStyle);
             }
             else
             {
-                blueprintScroll = GUILayout.BeginScrollView(blueprintScroll, GUILayout.Height(470));
+                // Reserve everything between the header and footer for the scroll
+                // view so the images grow/shrink with the window.
+                float viewH = Mathf.Max(120f, blueprintRect.height - 110f);
+                blueprintScroll = GUILayout.BeginScrollView(blueprintScroll, GUILayout.Height(viewH));
+                // Fit each image to the current window width, then apply the zoom
+                // factor; preserve aspect ratio throughout.
+                float fitW = Mathf.Max(80f, blueprintRect.width - 50f);
                 foreach (var tex in blueprintTextures)
                 {
                     if (tex == null) continue;
-                    // Fit each image to the popup width, preserving aspect ratio.
-                    float maxW = 510f;
-                    float scale = tex.width > maxW ? maxW / tex.width : 1f;
-                    float w = tex.width * scale;
-                    float h = tex.height * scale;
+                    float baseScale = tex.width > fitW ? fitW / tex.width : 1f;
+                    float w = tex.width * baseScale * blueprintZoom;
+                    float h = tex.height * baseScale * blueprintZoom;
                     Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
                     GUI.DrawTexture(r, tex, ScaleMode.ScaleToFit);
                     GUILayout.Space(8);
@@ -2297,7 +2420,158 @@ namespace GeneKerman.UI
             }
 
             GUILayout.EndVertical();
+            blueprintRect = ResizeGrip(blueprintRect, ref blueprintResizingBR, 360f, 320f, topLeft: false);
+            blueprintRect = ResizeGrip(blueprintRect, ref blueprintResizingTL, 360f, 320f, topLeft: true);
             GUI.DragWindow();
+        }
+
+        // ── Orbital Telemetry Window ─────────────────────────────────────────
+        //
+        // A standalone, resizable/zoomable window for the server-rendered vessel
+        // state diagram. Opened from the blueprint popup's 🛰 button whenever the
+        // submission carried telemetry (active-vessel / rescue contracts).
+
+        private void OpenTelemetryWindow()
+        {
+            if (telemetryTexture == null) return;
+            showTelemetryWindow = true;
+            telemetryScroll = Vector2.zero;
+            telemetryZoom = 1f;
+        }
+
+        private void CloseTelemetryWindow()
+        {
+            showTelemetryWindow = false;
+            telemetryScroll = Vector2.zero;
+            telemetryZoom = 1f;
+            telemetryResizingBR = false;
+            telemetryResizingTL = false;
+            if (telemetryTexture != null)
+            {
+                Object.Destroy(telemetryTexture);
+                telemetryTexture = null;
+            }
+        }
+
+        private void DrawTelemetryWindow(int id)
+        {
+            InitStyles();
+            GUILayout.BeginVertical(windowStyle);
+
+            GUILayout.BeginHorizontal();
+            string title = string.IsNullOrEmpty(blueprintVesselName)
+                ? "🛰 Orbital Telemetry"
+                : $"🛰 {blueprintVesselName} — Telemetry";
+            GUILayout.Label(title, headerStyle);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button("－", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+                telemetryZoom = Mathf.Max(0.25f, telemetryZoom - 0.25f);
+            if (GUILayout.Button("＋", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+                telemetryZoom = Mathf.Min(4f, telemetryZoom + 0.25f);
+            if (GUILayout.Button("Fit", tabStyle, GUILayout.Width(40), GUILayout.Height(26)))
+                telemetryZoom = 1f;
+            if (GUILayout.Button("✕", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
+            {
+                showTelemetryWindow = false;  // keep the texture; reopenable from 🛰
+                GUILayout.EndHorizontal();
+                GUILayout.EndVertical();
+                return;
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(6);
+
+            if (telemetryTexture == null)
+            {
+                GUILayout.Label("No telemetry available for this submission.", labelStyle);
+            }
+            else
+            {
+                float viewH = Mathf.Max(120f, telemetryRect.height - 80f);
+                telemetryScroll = GUILayout.BeginScrollView(telemetryScroll, GUILayout.Height(viewH));
+                float fitW = Mathf.Max(80f, telemetryRect.width - 50f);
+                float baseScale = telemetryTexture.width > fitW ? fitW / telemetryTexture.width : 1f;
+                float w = telemetryTexture.width * baseScale * telemetryZoom;
+                float h = telemetryTexture.height * baseScale * telemetryZoom;
+                Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
+                GUI.DrawTexture(r, telemetryTexture, ScaleMode.ScaleToFit);
+                GUILayout.EndScrollView();
+            }
+
+            GUILayout.EndVertical();
+            telemetryRect = ResizeGrip(telemetryRect, ref telemetryResizingBR, 360f, 280f, topLeft: false);
+            telemetryRect = ResizeGrip(telemetryRect, ref telemetryResizingTL, 360f, 280f, topLeft: true);
+            GUI.DragWindow();
+        }
+
+        // ── Resizable Window Grip ────────────────────────────────────────────
+        //
+        // Draws a draggable grip in one corner of the window and applies drag deltas
+        // to the rect (clamped to a minimum). The bottom-right grip grows the size;
+        // the top-left grip moves the origin while keeping the opposite corner fixed.
+        // Must be called inside the window function and BEFORE GUI.DragWindow() —
+        // consuming the mouse events here stops the drag from also moving the window.
+        //
+        // The grip claims GUIUtility.hotControl on mouse-down and holds it until
+        // mouse-up, so IMGUI keeps delivering MouseDrag/MouseUp even when the cursor
+        // races outside the tiny grip rect (or the window) — without this, a fast
+        // drag drops out of the handle and scaling stops mid-motion.
+        //
+        // Each corner uses its own <paramref name="resizing"/> flag so the two grips
+        // never apply the same drag twice; GetControlID is called every event pass in
+        // a fixed order so the ids stay stable.
+        private Rect ResizeGrip(Rect rect, ref bool resizing, float minW, float minH, bool topLeft)
+        {
+            const float grip = 20f;
+            int id = GUIUtility.GetControlID(FocusType.Passive);
+            Rect handle = topLeft
+                ? new Rect(0f, 0f, grip, grip)
+                : new Rect(rect.width - grip, rect.height - grip, grip, grip);
+            GUI.Label(handle, topLeft ? "◤" : "◢", resizeGripStyle);
+
+            Event e = Event.current;
+            switch (e.GetTypeForControl(id))
+            {
+                case EventType.MouseDown:
+                    if (handle.Contains(e.mousePosition))
+                    {
+                        GUIUtility.hotControl = id;   // capture the drag globally
+                        resizing = true;
+                        e.Use();
+                    }
+                    break;
+                case EventType.MouseDrag:
+                    if (GUIUtility.hotControl == id)
+                    {
+                        if (topLeft)
+                        {
+                            // Resize toward the top-left: shrink/grow from the origin
+                            // and shift x/y so the bottom-right corner stays put.
+                            float newW = Mathf.Max(minW, rect.width - e.delta.x);
+                            float newH = Mathf.Max(minH, rect.height - e.delta.y);
+                            rect.x += rect.width - newW;
+                            rect.y += rect.height - newH;
+                            rect.width = newW;
+                            rect.height = newH;
+                        }
+                        else
+                        {
+                            rect.width = Mathf.Max(minW, rect.width + e.delta.x);
+                            rect.height = Mathf.Max(minH, rect.height + e.delta.y);
+                        }
+                        e.Use();
+                    }
+                    break;
+                case EventType.MouseUp:
+                    if (GUIUtility.hotControl == id)
+                    {
+                        GUIUtility.hotControl = 0;
+                        resizing = false;
+                        e.Use();
+                    }
+                    break;
+            }
+            return rect;
         }
 
     }

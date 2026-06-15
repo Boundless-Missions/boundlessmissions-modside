@@ -163,6 +163,30 @@ namespace GeneKerman
             }
         }
 
+        /// <summary>Install a standalone flag image delivered as a flag-design contract
+        /// payout. Writes it into the transfer dir under a readable, content-unique name
+        /// and registers it with GameDatabase so it shows in the flag picker without a
+        /// restart. <paramref name="flagName"/> only shapes the filename. Returns true if
+        /// something new was installed.</summary>
+        public static bool InstallStandaloneFlag(string flagName, byte[] data)
+        {
+            if (data == null || data.Length == 0) return false;
+            try
+            {
+                // Content-addressed (full SHA-256), exactly like transferred flags: the
+                // same image always maps to the same file (dedupes), different images
+                // never collide. flagName is for logging only — the path is the hash.
+                string url = ComputeContentUrl(data);
+                Debug.Log($"[GeneKerman] FlagTransfer: installing delivered flag '{flagName}' → {url}");
+                return InstallOneFlag(url, "png", data);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] FlagTransfer.InstallStandaloneFlag failed: {ex.Message}");
+                return false;
+            }
+        }
+
         /// <summary>Install + strip flags from raw .craft bytes before they're written to
         /// disk. Returns cleaned bytes; on failure returns the input unchanged.</summary>
         public static byte[] StripAndInstallFlagsFromCraft(byte[] rawCraftBytes)

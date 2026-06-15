@@ -322,15 +322,17 @@ namespace GeneKerman
                     "vessel.cfg", "application/gzip"));
             }
 
-            // Screenshots
+            // Screenshots — one render per submitted craft. Sent as a repeated
+            // "screenshots" field so the count isn't capped (a multi-vessel submission
+            // sends the active craft plus one render for each selected extra).
             if (screenshots != null)
             {
-                string[] fieldNames = { "screenshot1", "screenshot2", "screenshot3" };
-                for (int i = 0; i < Math.Min(screenshots.Count, 3); i++)
+                for (int i = 0; i < screenshots.Count; i++)
                 {
+                    if (screenshots[i] == null || screenshots[i].Length == 0) continue;
                     string name = (screenshotNames != null && i < screenshotNames.Count)
-                        ? screenshotNames[i] : $"screenshot_{i}.png";
-                    form.Add(new MultipartFormFileSection(fieldNames[i], screenshots[i],
+                        ? screenshotNames[i] : $"render_{i}.png";
+                    form.Add(new MultipartFormFileSection("screenshots", screenshots[i],
                         name, "image/png"));
                 }
             }
@@ -664,6 +666,42 @@ namespace GeneKerman
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] Marketplace list failed: {req.error} ({req.responseCode})");
+            }
+        }
+
+        /// <summary>
+        /// Quicksend a craft/vessel to another player. <paramref name="kind"/> is
+        /// "vessel" (a live ConfigNode the recipient spawns in-save) or "craft" (a
+        /// .craft blueprint installed to their Ships folder). The payload is gzip
+        /// compressed before upload; the server decompresses and stores it raw.
+        /// </summary>
+        public IEnumerator SendCraftToFriend(
+            string recipientId, string kind, string craftName,
+            byte[] fileData, string fileName, ApiCallback callback)
+        {
+            string url = serverUrl + "/api/v1/craft/send";
+
+            var form = new List<IMultipartFormSection>();
+            byte[] compressed = GzipCompress(fileData);
+            form.Add(new MultipartFormFileSection("file", compressed,
+                fileName ?? "payload.dat", "application/gzip"));
+            form.Add(new MultipartFormDataSection("recipient_id", recipientId ?? ""));
+            form.Add(new MultipartFormDataSection("kind", kind ?? "craft"));
+            form.Add(new MultipartFormDataSection("craft_name", craftName ?? "Craft"));
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                if (IsLinked)
+                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                req.timeout = 60;
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback(ok, req.downloadHandler?.text, req.responseCode);
+
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Quicksend failed: {req.error} ({req.responseCode})");
             }
         }
 

@@ -41,6 +41,7 @@ namespace GeneKerman.UI
         private GUIStyle checkboxStyle, mailRowStyle, mailSenderStyle;
         private GUIStyle mailSubjectStyle, mailAmountStyle, mailDateStyle;
         private GUIStyle iconBtnStyle;
+        private GUIStyle notifBadgeStyle;
         private GUIStyle resizeGripStyle;
         private bool stylesReady;
 
@@ -53,7 +54,11 @@ namespace GeneKerman.UI
         private GUIContent gcInbox, gcTrash, gcCompose, gcUnlink;
         private GUIContent gcDel, gcRestore, gcSell, gcOpen, gcVesselInfo;
 
-        private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Market", "Notifications", "Settings" };
+        // The Notifications view is no longer a tab — it's reached by clicking the
+        // unread badge in the header. Its content renders under this pseudo-index
+        // (one past the real tab buttons, so no tab highlights while it's open).
+        private const int NotifTab = 6;
+        private readonly string[] tabNames = { "Missions", "Contracts", "Profile", "Market", "Tools", "Settings" };
         private string serverUrlInput = "";
         private string disputeDateInput = ""; // proposed new deadline for a "More Time" dispute
 
@@ -67,6 +72,15 @@ namespace GeneKerman.UI
         private List<object> marketListings;
         private bool loadingMarket;
         private bool selling;
+
+        // Tools tab state
+        private string flagUrlInput = "";   // URL of an image to fast-import as a flag
+        private string flagNameInput = "";  // optional display name for the imported flag
+        private bool importingFlag;
+        private string lastExportPath = ""; // where the last flag-encoded craft was written
+        private List<object> sendRecipients; // corp owners = the roster of players to send to
+        private bool loadingRecipients;
+        private bool sending;
 
         // Craft import queue — crafts the player selected in Discord. The mod polls
         // /api/v1/craft/imports/pending and auto-imports each into the active save.
@@ -96,8 +110,9 @@ namespace GeneKerman.UI
         // Orbital telemetry standalone window — the server renders a vessel-state
         // diagram (orbit, Ap/Pe, situation, period) for active-vessel and rescue
         // submissions. Shown in its own resizable/zoomable window, separate from
-        // the blueprints. Only populated when the submission includes telemetry.
-        private Texture2D telemetryTexture;
+        // the blueprints. Only populated when the submission includes telemetry. A
+        // multi-craft submission carries one diagram per craft, shown stacked.
+        private readonly List<Texture2D> telemetryTextures = new List<Texture2D>();
         private bool showTelemetryWindow;
         private Vector2 telemetryScroll;
         private float telemetryZoom = 1f;
@@ -385,6 +400,17 @@ namespace GeneKerman.UI
             // Active vessel info / orbital telemetry button (falls back to 🛰).
             gcVesselInfo      = MakeGC(iconVesselInfo, "",              "🛰");
 
+            // Header notification badge — the clickable unread counter. Amber text on
+            // the tab background so it reads as "you have unread mail".
+            notifBadgeStyle = new GUIStyle(tabStyle)
+            {
+                fontSize = 13, fontStyle = FontStyle.Bold,
+                padding = new RectOffset(8, 8, 0, 0),
+                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.35f, 0.28f, 0.1f, 0.95f)), textColor = new Color(1f, 0.82f, 0.25f) },
+                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.45f, 0.36f, 0.14f, 0.95f)), textColor = new Color(1f, 0.9f, 0.4f) },
+                active = { background = GKSkin.MakeTex(2, 2, new Color(0.3f, 0.24f, 0.08f, 0.95f)), textColor = new Color(1f, 0.82f, 0.25f) },
+            };
+
             // Corner grips for resizable popups (blueprint / telemetry windows).
             resizeGripStyle = new GUIStyle(GUI.skin.label)
             {
@@ -422,13 +448,16 @@ namespace GeneKerman.UI
             // Header
             GUILayout.BeginHorizontal();
             GUILayout.Label("Gene Kerman Mission Manager", headerStyle);
+            GUILayout.FlexibleSpace();
             int unread = GeneKermanMod.Instance.UnreadNotifications;
-            if (unread > 0)
+            // The unread count IS the button — clicking the bell badge opens the
+            // notifications view (there is no Notifications tab anymore).
+            string badge = unread > 0 ? $"🔔 {unread}" : "🔔";
+            if (GUILayout.Button(badge, unread > 0 ? notifBadgeStyle : tabStyle,
+                    GUILayout.Height(25), GUILayout.MinWidth(34)))
             {
-                GUILayout.Label($" {unread}", new GUIStyle(GUI.skin.label) {
-                    fontSize = 14, fontStyle = FontStyle.Bold,
-                    normal = { textColor = new Color(1f, 0.8f, 0.2f) }
-                }, GUILayout.Width(40));
+                selectedTab = NotifTab;
+                scrollPos = Vector2.zero;
             }
             if (GUILayout.Button("✕", tabStyle, GUILayout.Width(25), GUILayout.Height(25)))
                 GeneKermanMod.Instance.ShowMainWindow = false;
@@ -441,7 +470,6 @@ namespace GeneKerman.UI
             for (int i = 0; i < tabNames.Length; i++)
             {
                 string label = tabNames[i];
-                if (i == 4 && unread > 0) label += $" ({unread})";
                 if (GUILayout.Button(label, i == selectedTab ? tabActiveStyle : tabStyle))
                 {
                     selectedTab = i;
@@ -460,8 +488,9 @@ namespace GeneKerman.UI
                 case 1: DrawContractsTab(); break;
                 case 2: DrawProfileTab(); break;
                 case 3: DrawMarketplaceTab(); break;
-                case 4: DrawNotificationsTab(); break;
+                case 4: DrawToolsTab(); break;
                 case 5: DrawSettingsTab(); break;
+                case NotifTab: DrawNotificationsTab(); break;
             }
             GUILayout.EndScrollView();
 
@@ -1425,6 +1454,264 @@ namespace GeneKerman.UI
             GeneKermanMod.Instance.UnreadNotifications = unread;
         }
 
+        // ── Tools Tab ───────────────────────────────────────────────────────
+        //
+        // Quick utilities that don't belong to the mission/contract flow:
+        //   • Fast-import a flag from an image URL into the flag picker.
+        //   • Export the loaded editor craft with its custom flags baked in.
+        //   • Quicksend the active vessel (live) or loaded craft (blueprint) to a
+        //     friend, delivered via their KSP import queue.
+
+        private void DrawToolsTab()
+        {
+            GUILayout.Label("🛠 Tools", headerStyle);
+            GUILayout.Space(4);
+
+            // ── Tool 1: Import a flag from a URL ─────────────────────────────
+            GUILayout.BeginVertical(boxDarkStyle);
+            GUILayout.Label("🚩 Import Flag from URL", valueStyle);
+            GUILayout.Label("Paste an image URL (PNG/JPG) to add it to your flag picker.", labelStyle);
+            flagUrlInput = GUILayout.TextField(flagUrlInput, GUILayout.Height(24));
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Name (optional):", labelStyle, GUILayout.Width(110));
+            flagNameInput = GUILayout.TextField(flagNameInput, GUILayout.Height(24));
+            GUILayout.EndHorizontal();
+            GUILayout.Space(4);
+            GUI.enabled = !importingFlag && !string.IsNullOrEmpty(flagUrlInput.Trim());
+            if (GUILayout.Button(importingFlag ? "Importing..." : "Import Flag", acceptBtnStyle, GUILayout.Height(28)))
+                GeneKermanMod.Instance.RunCoroutine(DoImportFlagFromUrl());
+            GUI.enabled = true;
+            GUILayout.EndVertical();
+
+            GUILayout.Space(6);
+
+            // ── Tool 2: Export a flag-encoded craft file ─────────────────────
+            GUILayout.BeginVertical(boxDarkStyle);
+            GUILayout.Label("💾 Export Flag-Encoded Craft", valueStyle);
+            GUILayout.Label("Writes the loaded craft with its custom flags baked in, so it carries over when you share the file.", labelStyle);
+            if (HighLogic.LoadedSceneIsEditor)
+            {
+                CaptureEditorCraft();
+                if (string.IsNullOrEmpty(editorCraftName))
+                {
+                    GUILayout.Label("No craft loaded in the VAB/SPH.", labelStyle);
+                }
+                else if (string.IsNullOrEmpty(editorCraftPath))
+                {
+                    GUILayout.Label($"Save '{editorCraftName}' first to export it.", labelStyle);
+                }
+                else
+                {
+                    GUILayout.Label($"[*] {editorCraftName} [{editorCraftType}]", labelStyle);
+                    if (GUILayout.Button("Export Craft (+flags)", submitBtnStyle, GUILayout.Height(28)))
+                        DoExportFlagCraft();
+                    if (!string.IsNullOrEmpty(lastExportPath))
+                        GUILayout.Label($"(Ok) Saved to: {lastExportPath}", new GUIStyle(labelStyle) { fontSize = 10, wordWrap = true });
+                }
+            }
+            else
+            {
+                GUILayout.Label("Open a craft in the VAB or SPH to export it.", labelStyle);
+            }
+            GUILayout.EndVertical();
+
+            GUILayout.Space(6);
+
+            // ── Tool 3: Quicksend to a friend ────────────────────────────────
+            GUILayout.BeginVertical(boxDarkStyle);
+            GUILayout.Label("📤 Quicksend to a Friend", valueStyle);
+
+            bool inFlight = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
+            bool inEditor = HighLogic.LoadedSceneIsEditor && !string.IsNullOrEmpty(editorCraftName)
+                            && !string.IsNullOrEmpty(editorCraftPath);
+
+            string sendKind = null;   // "vessel" (live) or "craft" (blueprint)
+            string sendLabel = null;
+            if (inFlight)
+            {
+                sendKind = "vessel";
+                sendLabel = $"Active vessel '{FlightGlobals.ActiveVessel.vesselName}' → delivered as a live, flyable vessel.";
+            }
+            else if (inEditor)
+            {
+                sendKind = "craft";
+                sendLabel = $"Loaded craft '{editorCraftName}' → delivered as a craft blueprint in their Ships folder.";
+            }
+
+            if (sendKind == null)
+            {
+                GUILayout.Label("Fly a vessel, or open a saved craft in the editor, to send it.", labelStyle);
+            }
+            else
+            {
+                GUILayout.Label(sendLabel, new GUIStyle(labelStyle) { wordWrap = true });
+                GUILayout.Space(4);
+
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Friends:", labelStyle, GUILayout.Width(60));
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button(gcRefreshOnly, tabStyle, GUILayout.Height(22), GUILayout.Width(30)))
+                    LoadRecipients();
+                GUILayout.EndHorizontal();
+
+                if (loadingRecipients)
+                {
+                    GUILayout.Label("Loading players...", labelStyle);
+                }
+                else if (sendRecipients == null)
+                {
+                    if (GUILayout.Button("Load player list", tabStyle, GUILayout.Height(24)))
+                        LoadRecipients();
+                }
+                else
+                {
+                    string myId = profile != null ? MiniJSON.GetString(profile, "user_id", "") : "";
+                    int shown = 0;
+                    foreach (var rObj in sendRecipients)
+                    {
+                        var r = rObj as Dictionary<string, object>;
+                        if (r == null) continue;
+                        string ownerId = MiniJSON.GetString(r, "owner_id", "");
+                        string ownerName = MiniJSON.GetString(r, "owner_name", "Unknown");
+                        string corpName = MiniJSON.GetString(r, "corp_name", "");
+                        if (string.IsNullOrEmpty(ownerId) || ownerId == myId) continue; // no self-send
+                        shown++;
+
+                        GUILayout.BeginHorizontal();
+                        string who = string.IsNullOrEmpty(corpName) ? ownerName : $"{ownerName} ({corpName})";
+                        GUILayout.Label(who, labelStyle);
+                        GUILayout.FlexibleSpace();
+                        GUI.enabled = !sending;
+                        if (GUILayout.Button("→ Send", acceptBtnStyle, GUILayout.Height(22), GUILayout.Width(80)))
+                            GeneKermanMod.Instance.RunCoroutine(DoQuicksend(ownerId, ownerName, sendKind));
+                        GUI.enabled = true;
+                        GUILayout.EndHorizontal();
+                    }
+                    if (shown == 0)
+                        GUILayout.Label("No other players found to send to.", labelStyle);
+                }
+            }
+            GUILayout.EndVertical();
+        }
+
+        private System.Collections.IEnumerator DoImportFlagFromUrl()
+        {
+            string url = flagUrlInput.Trim();
+            if (string.IsNullOrEmpty(url)) yield break;
+            importingFlag = true;
+            SetStatus("🚩 Downloading flag...");
+
+            string name = string.IsNullOrEmpty(flagNameInput.Trim()) ? "Imported Flag" : flagNameInput.Trim();
+            yield return GeneKermanMod.Instance.Api.DownloadFile(url, (ok, data) =>
+            {
+                importingFlag = false;
+                if (!ok || data == null || data.Length == 0)
+                {
+                    SetStatus("(No) Could not download the image. Check the URL.");
+                    return;
+                }
+                bool installed = FlagTransfer.InstallStandaloneFlag(name, data);
+                SetStatus(installed
+                    ? "(Ok) Flag added to your flag picker."
+                    : "(Ok) Flag already present in your picker.");
+                flagUrlInput = "";
+                flagNameInput = "";
+            });
+        }
+
+        private void DoExportFlagCraft()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(editorCraftPath) || !System.IO.File.Exists(editorCraftPath))
+                {
+                    SetStatus("(No) Save your craft first.");
+                    return;
+                }
+                byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+                craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+
+                string dir = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "ExportedCrafts");
+                System.IO.Directory.CreateDirectory(dir);
+                string outPath = System.IO.Path.Combine(dir, editorCraftName + ".craft");
+                System.IO.File.WriteAllBytes(outPath, craftBytes);
+
+                lastExportPath = outPath;
+                SetStatus("(Ok) Flag-encoded craft exported.");
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Export flag-encoded craft failed: {ex.Message}");
+                SetStatus("(No) Failed to export craft.");
+            }
+        }
+
+        private void LoadRecipients()
+        {
+            loadingRecipients = true;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetCorps((ok, data, err) =>
+            {
+                loadingRecipients = false;
+                if (ok && data != null)
+                    sendRecipients = MiniJSON.GetList(data, "corps");
+                else
+                    SetStatus("(No) " + (err ?? "Failed to load players."));
+            }));
+        }
+
+        private System.Collections.IEnumerator DoQuicksend(string recipientId, string recipientName, string kind)
+        {
+            byte[] payload;
+            string fileName;
+            string craftName;
+
+            if (kind == "vessel")
+            {
+                // Live, flyable vessel — flags + crew roster embedded so it arrives intact.
+                string node = VesselTransfer.ExportActiveVessel(embedRoster: true);
+                if (string.IsNullOrEmpty(node))
+                {
+                    SetStatus("(No) Could not read the active vessel.");
+                    yield break;
+                }
+                payload = System.Text.Encoding.UTF8.GetBytes(node);
+                fileName = "vessel.cfg";
+                craftName = FlightGlobals.ActiveVessel != null ? FlightGlobals.ActiveVessel.vesselName : "Vessel";
+            }
+            else // "craft"
+            {
+                if (string.IsNullOrEmpty(editorCraftPath) || !System.IO.File.Exists(editorCraftPath))
+                {
+                    SetStatus("(No) Save your craft first.");
+                    yield break;
+                }
+                byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+                payload = FlagTransfer.EmbedFlagsInCraft(craftBytes); // carry custom flags
+                fileName = editorCraftName + ".craft";
+                craftName = editorCraftName;
+            }
+
+            sending = true;
+            SetStatus($"📤 Sending to {recipientName}...");
+            yield return GeneKermanMod.Instance.Api.SendCraftToFriend(
+                recipientId, kind, craftName, payload, fileName, (ok, resp, status) =>
+            {
+                sending = false;
+                if (ok && !string.IsNullOrEmpty(resp))
+                {
+                    var d = MiniJSON.DeserializeDict(resp);
+                    if (MiniJSON.GetBool(d, "success", false))
+                        SetStatus($"(Ok) Sent to {recipientName}! They'll get it at the Space Center.");
+                    else
+                        SetStatus("(No) " + MiniJSON.GetString(d, "message", "Failed to send."));
+                }
+                else
+                {
+                    SetStatus("(No) Failed to send.");
+                }
+            });
+        }
+
         // ── Settings Tab ────────────────────────────────────────────────────────
 
         private void DrawSettingsTab()
@@ -1861,11 +2148,18 @@ namespace GeneKerman.UI
                 string vesselNodeStr = DecompressToString(fileData);
                 Debug.Log($"[GeneKerman] Vessel node string: {vesselNodeStr.Length} chars");
 
-                string vesselName = VesselTransfer.ImportVessel(vesselNodeStr, ownerName, myName);
+                // A submission may carry several crafts (GKFLEET) or just one (legacy
+                // VESSEL); ImportFleet spawns each and installs any embedded blueprints.
+                int imported = VesselTransfer.ImportFleet(vesselNodeStr, ownerName, myName);
 
-                if (!string.IsNullOrEmpty(vesselName))
+                if (imported > 0)
                 {
-                    SetStatus($"[!] Vessel imported: {vesselName}");
+                    SetStatus(imported == 1
+                        ? "[!] Vessel imported."
+                        : $"[!] {imported} crafts imported.");
+                    if (imported > 1)
+                        GeneKermanMod.Instance.ShowNotification("🚀 Crafts Received",
+                            $"{imported} crafts arrived in your save.");
                     if (GKContractScenario.Instance != null)
                     {
                         GKContractScenario.Instance.MarkVesselImported(contractId);
@@ -2181,11 +2475,12 @@ namespace GeneKerman.UI
                 yield break;
             }
 
-            // Rescue deliveries are LIVE vessels (the rescued kerbals coming home, or a
-            // cancelled rescue's vessel returning to its spot). Crew are tagged/stripped
-            // by owner on import — the issuer's own kerbals come back to their original
-            // names; anyone else's keep their owner tag.
-            if (source == "rescue_delivery" && !string.IsNullOrEmpty(vesselNodeUrl))
+            // Rescue deliveries and friend quicksends are LIVE vessels. Rescue: the
+            // rescued kerbals coming home (or a cancelled rescue returning to its spot).
+            // gift_vessel: a vessel a friend sent straight to your save. Crew are
+            // tagged/stripped by owner on import — your own kerbals come back to their
+            // original names; anyone else's keep their owner tag.
+            if ((source == "rescue_delivery" || source == "gift_vessel") && !string.IsNullOrEmpty(vesselNodeUrl))
             {
                 string myName = GeneKermanMod.Instance.LinkedUsername;
                 bool spawned = false;
@@ -2197,8 +2492,10 @@ namespace GeneKerman.UI
                     if (!string.IsNullOrEmpty(vesselName))
                     {
                         spawned = true;
-                        GeneKermanMod.Instance.ShowNotification("🛟 Rescue Delivered",
-                            $"{vesselName} has arrived in your save.");
+                        string title = source == "gift_vessel" ? "🎁 Vessel Received" : "🛟 Rescue Delivered";
+                        string from = string.IsNullOrEmpty(ownerName) ? "" : $" from {ownerName}";
+                        GeneKermanMod.Instance.ShowNotification(title,
+                            $"{vesselName}{(source == "gift_vessel" ? from : "")} has arrived in your save.");
                     }
                 });
                 if (!spawned)
@@ -2280,18 +2577,33 @@ namespace GeneKerman.UI
             blueprintVesselName = MiniJSON.GetString(data, "vessel_name", "");
             var images = MiniJSON.GetList(data, "images");
 
-            // Orbital telemetry diagram (active-vessel / rescue submissions only).
-            // Downloaded into its own texture and shown in a separate window — it is
-            // not a blueprint, so it doesn't belong in the blueprint scroll list.
-            string telemetryUrl = MiniJSON.GetString(data, "telemetry_url", "");
-            if (!string.IsNullOrEmpty(telemetryUrl))
+            // Orbital telemetry diagrams (active-vessel / rescue submissions, one per
+            // craft for multi-vessel submissions). Downloaded into their own textures and
+            // shown in a separate window — they're not blueprints, so they don't belong in
+            // the blueprint scroll list.
+            var telemetryUrls = new List<string>();
+            var telemetryList = MiniJSON.GetList(data, "telemetry_urls");
+            if (telemetryList != null)
             {
-                yield return GeneKermanMod.Instance.Api.DownloadFile(telemetryUrl, (dok, bytes) =>
+                foreach (var t in telemetryList)
+                {
+                    string u = t as string;
+                    if (!string.IsNullOrEmpty(u)) telemetryUrls.Add(u);
+                }
+            }
+            if (telemetryUrls.Count == 0)
+            {
+                string single = MiniJSON.GetString(data, "telemetry_url", "");
+                if (!string.IsNullOrEmpty(single)) telemetryUrls.Add(single);
+            }
+            foreach (var turl in telemetryUrls)
+            {
+                yield return GeneKermanMod.Instance.Api.DownloadFile(turl, (dok, bytes) =>
                 {
                     if (!dok || bytes == null) return;
                     var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
                     if (tex.LoadImage(bytes))
-                        telemetryTexture = tex;
+                        telemetryTextures.Add(tex);
                 });
             }
 
@@ -2367,8 +2679,8 @@ namespace GeneKerman.UI
                     blueprintZoom = 1f;
             }
 
-            // Active vessel info — opens the orbital telemetry diagram in its own window.
-            if (telemetryTexture != null &&
+            // Active vessel info — opens the orbital telemetry diagram(s) in their window.
+            if (telemetryTextures.Count > 0 &&
                 GUILayout.Button(gcVesselInfo, tabStyle, GUILayout.Width(34), GUILayout.Height(26)))
             {
                 OpenTelemetryWindow();
@@ -2433,7 +2745,7 @@ namespace GeneKerman.UI
 
         private void OpenTelemetryWindow()
         {
-            if (telemetryTexture == null) return;
+            if (telemetryTextures.Count == 0) return;
             showTelemetryWindow = true;
             telemetryScroll = Vector2.zero;
             telemetryZoom = 1f;
@@ -2446,11 +2758,9 @@ namespace GeneKerman.UI
             telemetryZoom = 1f;
             telemetryResizingBR = false;
             telemetryResizingTL = false;
-            if (telemetryTexture != null)
-            {
-                Object.Destroy(telemetryTexture);
-                telemetryTexture = null;
-            }
+            foreach (var tex in telemetryTextures)
+                if (tex != null) Object.Destroy(tex);
+            telemetryTextures.Clear();
         }
 
         private void DrawTelemetryWindow(int id)
@@ -2459,9 +2769,11 @@ namespace GeneKerman.UI
             GUILayout.BeginVertical(windowStyle);
 
             GUILayout.BeginHorizontal();
-            string title = string.IsNullOrEmpty(blueprintVesselName)
-                ? "🛰 Orbital Telemetry"
-                : $"🛰 {blueprintVesselName} — Telemetry";
+            string title = telemetryTextures.Count > 1
+                ? $"🛰 Orbital Telemetry ({telemetryTextures.Count} craft)"
+                : (string.IsNullOrEmpty(blueprintVesselName)
+                    ? "🛰 Orbital Telemetry"
+                    : $"🛰 {blueprintVesselName} — Telemetry");
             GUILayout.Label(title, headerStyle);
             GUILayout.FlexibleSpace();
             if (GUILayout.Button("－", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))
@@ -2481,7 +2793,7 @@ namespace GeneKerman.UI
 
             GUILayout.Space(6);
 
-            if (telemetryTexture == null)
+            if (telemetryTextures.Count == 0)
             {
                 GUILayout.Label("No telemetry available for this submission.", labelStyle);
             }
@@ -2490,11 +2802,16 @@ namespace GeneKerman.UI
                 float viewH = Mathf.Max(120f, telemetryRect.height - 80f);
                 telemetryScroll = GUILayout.BeginScrollView(telemetryScroll, GUILayout.Height(viewH));
                 float fitW = Mathf.Max(80f, telemetryRect.width - 50f);
-                float baseScale = telemetryTexture.width > fitW ? fitW / telemetryTexture.width : 1f;
-                float w = telemetryTexture.width * baseScale * telemetryZoom;
-                float h = telemetryTexture.height * baseScale * telemetryZoom;
-                Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
-                GUI.DrawTexture(r, telemetryTexture, ScaleMode.ScaleToFit);
+                foreach (var tex in telemetryTextures)
+                {
+                    if (tex == null) continue;
+                    float baseScale = tex.width > fitW ? fitW / tex.width : 1f;
+                    float w = tex.width * baseScale * telemetryZoom;
+                    float h = tex.height * baseScale * telemetryZoom;
+                    Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.Width(w), GUILayout.Height(h));
+                    GUI.DrawTexture(r, tex, ScaleMode.ScaleToFit);
+                    GUILayout.Space(8);
+                }
                 GUILayout.EndScrollView();
             }
 

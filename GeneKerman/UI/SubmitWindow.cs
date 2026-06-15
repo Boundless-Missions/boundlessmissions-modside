@@ -52,11 +52,28 @@ namespace GeneKerman.UI
 
         // Flight data
         private VesselDataCollector.VesselSnapshot activeVessel;
-        private List<VesselDataCollector.VesselSnapshot> nearbyVessels;
+
+        // Extra crafts in physics range that can be packed into the submission.
+        private class NearbyEntry
+        {
+            public Vessel vessel;
+            public VesselDataCollector.VesselSnapshot snap;
+            public bool selected;
+            public double distance;   // metres from the active vessel
+        }
+        private List<NearbyEntry> nearbyEntries = new List<NearbyEntry>();
+        private Vector2 nearbyScroll;
+        private string rangeFilterKm = "2.5";
+
+        // Physics Range Extender lifecycle: we pause PRE while the submit window is
+        // open (so far craft unload and the in-range list is the stock bubble), then
+        // restore it on close. preDisabledByUs is true only when we actually paused it.
+        private bool preDisabledByUs;
+        private bool physicsStabilizing;   // waiting for far vessels to unload
 
         // Submission
         private bool isSubmitting;
-        private string screenshotPath;
+        private List<string> screenshotPaths = new List<string>();
         private bool screenshotTaken;
 
         // Validation
@@ -135,8 +152,9 @@ namespace GeneKerman.UI
                 if (HighLogic.LoadedSceneIsFlight)
                 {
                     sceneValid = true;
-                    CaptureFlightData();
-                    ValidateVesselState();
+                    // Pause PRE (if any), let far craft unload, then capture the
+                    // active vessel + the stock-range neighbours offered as extras.
+                    GeneKermanMod.Instance.RunCoroutine(PreparePhysicsThenCapture());
                 }
                 else
                 {
@@ -341,7 +359,7 @@ namespace GeneKerman.UI
             GUILayout.BeginHorizontal();
             GUILayout.Label("📤 Submit Contract", headerStyle);
             if (GUILayout.Button("✕", GUILayout.Width(25), GUILayout.Height(25)))
-                IsVisible = false;
+                CloseWindow();
             GUILayout.EndHorizontal();
 
             GUILayout.Space(3);
@@ -390,7 +408,7 @@ namespace GeneKerman.UI
             GUILayout.Space(5);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("Cancel", cancelBtnStyle, GUILayout.Width(80)))
-                IsVisible = false;
+                CloseWindow();
             GUILayout.FlexibleSpace();
 
             if (sceneValid)
@@ -550,11 +568,94 @@ namespace GeneKerman.UI
         private void CaptureFlightData()
         {
             activeVessel = VesselDataCollector.CaptureActiveVessel();
-            nearbyVessels = VesselDataCollector.CaptureLoadedVessels();
+            BuildNearbyEntries();
+        }
+
+        /// <summary>Pause PRE, wait for out-of-range craft to unload, then capture. Keeps
+        /// the "Stabilizing physics range…" notice up while the bubble collapses so the
+        /// neighbour list reflects the stock range, not PRE's inflated one.</summary>
+        private IEnumerator PreparePhysicsThenCapture()
+        {
+            physicsStabilizing = true;
+            statusMsg = "Stabilizing physics range...";
+
+            // Rescue is strictly single-vessel — leave PRE alone for it.
+            preDisabledByUs = !IsRescue && PhysicsRangeManager.TryDisable();
+            if (preDisabledByUs)
+            {
+                // Give KSP a few frames + a beat to drop now-out-of-range vessels.
+                for (int i = 0; i < 5; i++) yield return new WaitForEndOfFrame();
+                yield return new WaitForSeconds(0.5f);
+            }
+
+            CaptureFlightData();
+            ValidateVesselState();
+
+            physicsStabilizing = false;
+            if (statusMsg == "Stabilizing physics range...") statusMsg = "";
+        }
+
+        /// <summary>(Re)build the in-range extra-craft list, preserving the player's
+        /// existing on/off choices for vessels that are still loaded.</summary>
+        private void BuildNearbyEntries()
+        {
+            var prevSelected = new Dictionary<Guid, bool>();
+            if (nearbyEntries != null)
+                foreach (var e in nearbyEntries)
+                    if (e.vessel != null) prevSelected[e.vessel.id] = e.selected;
+
+            nearbyEntries = new List<NearbyEntry>();
+
+            var active = FlightGlobals.ActiveVessel;
+            if (active == null) return;
+            Vector3d aPos = active.GetWorldPos3D();
+
+            foreach (var v in VesselDataCollector.GetNearbyVessels(active))
+            {
+                var entry = new NearbyEntry
+                {
+                    vessel = v,
+                    snap = VesselDataCollector.CaptureVessel(v),
+                    distance = Vector3d.Distance(aPos, v.GetWorldPos3D()),
+                };
+                bool wasSelected;
+                if (prevSelected.TryGetValue(v.id, out wasSelected)) entry.selected = wasSelected;
+                nearbyEntries.Add(entry);
+            }
+
+            nearbyEntries.Sort((a, b) => a.distance.CompareTo(b.distance));
+        }
+
+        private void SetAllSelected(bool value)
+        {
+            if (nearbyEntries == null) return;
+            foreach (var e in nearbyEntries) e.selected = value;
+        }
+
+        private void SelectWithinRange()
+        {
+            double km;
+            if (!double.TryParse(rangeFilterKm, out km)) return;
+            double metres = km * 1000.0;
+            foreach (var e in nearbyEntries) e.selected = e.distance <= metres;
+        }
+
+        private static string FormatDistance(double metres)
+        {
+            return metres >= 1000.0 ? $"{metres / 1000.0:F2} km" : $"{metres:F0} m";
         }
 
         private void DrawFlightMode()
         {
+            if (physicsStabilizing)
+            {
+                GUILayout.BeginVertical(boxStyle);
+                GUILayout.Label("⏳ Stabilizing physics range…", valueStyle);
+                GUILayout.Label("Pausing Physics Range Extender and letting distant craft unload.", labelStyle);
+                GUILayout.EndVertical();
+                return;
+            }
+
             if (activeVessel == null)
             {
                 GUILayout.Label("❌ No active vessel detected.", valueStyle);
@@ -595,8 +696,68 @@ namespace GeneKerman.UI
                 ValidateVesselState();
             }
 
+            // Multi-craft sending is for ordinary active-vessel contracts only.
+            if (!IsRescue)
+                DrawNearbySection();
+
             GUILayout.Space(10);
             DrawScreenshotSection();
+        }
+
+        // ── Extra Crafts (multi-vessel submission) ──────────────────────────
+
+        private void DrawNearbySection()
+        {
+            GUILayout.Space(8);
+            GUILayout.Label("Send Extra Crafts in Range", headerStyle);
+            GUILayout.BeginVertical(boxStyle);
+
+            if (preDisabledByUs)
+                GUILayout.Label("ℹ️ Physics Range Extender paused — showing stock-range craft.", labelStyle);
+
+            if (nearbyEntries == null || nearbyEntries.Count == 0)
+            {
+                GUILayout.Label("No other vessels in physics range.", labelStyle);
+                if (GUILayout.Button("🔄 Rescan Range", GUILayout.Height(24)))
+                    CaptureFlightData();
+                GUILayout.EndVertical();
+                return;
+            }
+
+            int selCount = 0;
+            foreach (var e in nearbyEntries) if (e.selected) selCount++;
+            GUILayout.Label($"{selCount}/{nearbyEntries.Count} selected — packed and sent with this submission.", labelStyle);
+
+            // Batch selectors
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Select All", GUILayout.Height(22))) SetAllSelected(true);
+            if (GUILayout.Button("Select None", GUILayout.Height(22))) SetAllSelected(false);
+            GUILayout.EndHorizontal();
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("In range ≤", labelStyle, GUILayout.Width(62));
+            rangeFilterKm = GUILayout.TextField(rangeFilterKm ?? "", GUILayout.Width(50));
+            GUILayout.Label("km", labelStyle, GUILayout.Width(22));
+            if (GUILayout.Button("Apply", GUILayout.Height(22), GUILayout.Width(60))) SelectWithinRange();
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(4);
+            nearbyScroll = GUILayout.BeginScrollView(nearbyScroll, GUILayout.Height(130));
+            foreach (var e in nearbyEntries)
+            {
+                e.selected = GUILayout.Toggle(e.selected,
+                    $"{e.snap.vesselName}  ·  {FormatDistance(e.distance)}", checkboxStyle);
+                GUILayout.Label(
+                    $"      {e.snap.vesselType} · {e.snap.body} {e.snap.situation} · " +
+                    $"{e.snap.partCount} parts · {e.snap.crewCount} crew", labelStyle);
+            }
+            GUILayout.EndScrollView();
+
+            GUILayout.Space(4);
+            if (GUILayout.Button("🔄 Rescan Range", GUILayout.Height(24)))
+                CaptureFlightData();
+
+            GUILayout.EndVertical();
         }
 
         // ── Screenshot ──────────────────────────────────────────────────────
@@ -605,28 +766,60 @@ namespace GeneKerman.UI
         {
             GUILayout.BeginVertical(boxStyle);
             GUILayout.Label("📸 Vessel Render", valueStyle);
-            GUILayout.Label("Orthographic vessel render will be captured automatically.", labelStyle);
+
+            int extras = CountSelectedExtras();
+            if (extras > 0)
+                GUILayout.Label($"Renders the active craft + {extras} selected extra(s).", labelStyle);
+            else
+                GUILayout.Label("Orthographic vessel render will be captured automatically.", labelStyle);
 
             if (screenshotTaken)
             {
-                GUILayout.Label($"✅ Captured: {Path.GetFileName(screenshotPath)}", successStyle);
-                if (GUILayout.Button("🔄 Retake Render", GUILayout.Height(26)))
+                GUILayout.Label($"✅ Captured {screenshotPaths.Count} render(s)", successStyle);
+                if (GUILayout.Button("🔄 Retake Renders", GUILayout.Height(26)))
                     TakeScreenshot();
             }
             else
             {
-                if (GUILayout.Button("📸 Capture Vessel Render", GUILayout.Height(30)))
+                if (GUILayout.Button("📸 Capture Vessel Renders", GUILayout.Height(30)))
                     TakeScreenshot();
             }
             GUILayout.EndVertical();
         }
 
+        /// <summary>Capture an orthographic render of the active (contract) craft, plus
+        /// one for each selected extra craft so every submitted vessel has a blueprint
+        /// image. Renders run synchronously — a deliberate one-tap action.</summary>
         private void TakeScreenshot()
         {
-            Vessel vessel = HighLogic.LoadedSceneIsFlight ? FlightGlobals.ActiveVessel : null;
-            screenshotPath = KVVIntegration.CaptureWithFallback(vessel);
-            screenshotTaken = true;
-            statusMsg = "📸 Captured! (may take a moment to save)";
+            screenshotPaths = new List<string>();
+
+            Vessel active = HighLogic.LoadedSceneIsFlight ? FlightGlobals.ActiveVessel : null;
+            string activePath = KVVIntegration.CaptureWithFallback(active);
+            if (!string.IsNullOrEmpty(activePath)) screenshotPaths.Add(activePath);
+
+            if (!IsRescue && nearbyEntries != null)
+            {
+                foreach (var e in nearbyEntries)
+                {
+                    if (!e.selected || e.vessel == null) continue;
+                    string ep = KVVIntegration.CaptureWithFallback(e.vessel);
+                    if (!string.IsNullOrEmpty(ep)) screenshotPaths.Add(ep);
+                }
+            }
+
+            screenshotTaken = screenshotPaths.Count > 0;
+            statusMsg = screenshotPaths.Count > 1
+                ? $"📸 Captured {screenshotPaths.Count} renders! (may take a moment to save)"
+                : "📸 Captured! (may take a moment to save)";
+        }
+
+        private int CountSelectedExtras()
+        {
+            if (IsRescue || nearbyEntries == null) return 0;
+            int n = 0;
+            foreach (var e in nearbyEntries) if (e.selected && e.vessel != null) n++;
+            return n;
         }
 
         // ── Submission ──────────────────────────────────────────────────────
@@ -644,6 +837,19 @@ namespace GeneKerman.UI
 
             // active_vessel: need vessel data AND matching state
             return activeVessel != null && vesselValid;
+        }
+
+        /// <summary>Hide the window and restore Physics Range Extender if we paused it.
+        /// All close paths (✕, Cancel, successful/awaiting submit) route through here so
+        /// PRE is never left disabled.</summary>
+        private void CloseWindow()
+        {
+            if (preDisabledByUs)
+            {
+                PhysicsRangeManager.Reenable();
+                preDisabledByUs = false;
+            }
+            IsVisible = false;
         }
 
         private void DoSubmit()
@@ -678,12 +884,26 @@ namespace GeneKerman.UI
                     { "active_vessel", activeVessel.ToDict() },
                 };
 
-                if (nearbyVessels != null)
+                // Extra crafts the player toggled on (never for rescue — that flow is
+                // strictly single-vessel and tracks the handed-over craft by pid).
+                var selectedExtras = new List<Vessel>();
+                if (!IsRescue && nearbyEntries != null)
+                    foreach (var e in nearbyEntries)
+                        if (e.selected && e.vessel != null) selectedExtras.Add(e.vessel);
+
+                // Telemetry for the extras actually being sent (informational context
+                // for the issuer's review).
+                if (selectedExtras.Count > 0)
                 {
-                    var nearbyList = new List<object>();
-                    foreach (var v in nearbyVessels)
-                        nearbyList.Add(v.ToDict());
-                    submission["nearby_vessels"] = nearbyList;
+                    var sentList = new List<object>();
+                    foreach (var e in nearbyEntries)
+                    {
+                        if (!e.selected || e.vessel == null) continue;
+                        var d = e.snap.ToDict();
+                        d["sent"] = true;
+                        sentList.Add(d);
+                    }
+                    submission["sent_vessels"] = sentList;
                 }
 
                 vesselDataJson = MiniJSON.Serialize(submission);
@@ -697,23 +917,31 @@ namespace GeneKerman.UI
                     loadmeta = VesselDataCollector.ReadLoadmeta(craftPath);
                 }
 
-                // Export the full vessel state for transfer, embedding the crew roster so
-                // the importing save recreates each kerbal with their real attributes
-                // (gender / profession / courage / stupidity) and owner tag.
-                vesselNodeData = VesselTransfer.ExportActiveVessel(true);
+                // Export full vessel state for transfer, embedding the crew roster so the
+                // importing save recreates each kerbal with their real attributes
+                // (gender / profession / courage / stupidity) and owner tag. When extras
+                // are selected this becomes a GKFLEET bundle carrying every craft's state,
+                // flags and blueprint; otherwise it's a single VESSEL node as before.
+                vesselNodeData = selectedExtras.Count > 0
+                    ? VesselTransfer.ExportFleet(FlightGlobals.ActiveVessel, selectedExtras, true)
+                    : VesselTransfer.ExportActiveVessel(true);
             }
 
-            // Read screenshot
+            // Read every captured render (active + selected extras).
             var screenshots = new List<byte[]>();
             var ssNames = new List<string>();
 
-            if (screenshotTaken && !string.IsNullOrEmpty(screenshotPath))
+            if (screenshotTaken && screenshotPaths != null)
             {
-                byte[] ssData = VesselDataCollector.ReadScreenshot(screenshotPath);
-                if (ssData != null)
+                foreach (var sp in screenshotPaths)
                 {
-                    screenshots.Add(ssData);
-                    ssNames.Add(Path.GetFileName(screenshotPath));
+                    if (string.IsNullOrEmpty(sp)) continue;
+                    byte[] ssData = VesselDataCollector.ReadScreenshot(sp);
+                    if (ssData != null)
+                    {
+                        screenshots.Add(ssData);
+                        ssNames.Add(Path.GetFileName(sp));
+                    }
                 }
             }
 
@@ -766,7 +994,7 @@ namespace GeneKerman.UI
                             int coins = MiniJSON.GetInt(result, "coins_awarded");
                             GeneKermanMod.Instance.ShowNotification("✅ Mission Approved!", $"+{coins} KCoins, +{xp} XP");
                             EditorPartEnforcer.Instance?.StopEnforcing();
-                            IsVisible = false;
+                            CloseWindow();
                             GeneKermanMod.Instance.RefreshContracts();
                         }
                         else if (reviewStatus == "refused")
@@ -777,7 +1005,7 @@ namespace GeneKerman.UI
                         {
                             // Submitted and awaiting review — clear enforcer so VAB is unlocked
                             EditorPartEnforcer.Instance?.StopEnforcing();
-                            IsVisible = false;
+                            CloseWindow();
                             GeneKermanMod.Instance.RefreshContracts();
                         }
                     }

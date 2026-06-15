@@ -52,6 +52,19 @@ namespace GeneKerman
                 return null;
             }
 
+            return ExportVesselNode(vessel, embedRoster);
+        }
+
+        /// <summary>
+        /// Serialize an arbitrary loaded vessel into a "VESSEL" ConfigNode (flags +
+        /// optional crew roster embedded). Works for any vessel in physics range, not
+        /// just the active one, so multiple crafts can be packed into one submission.
+        /// Returns null on failure.
+        /// </summary>
+        public static ConfigNode ExportVesselNode(Vessel vessel, bool embedRoster = false)
+        {
+            if (vessel == null) return null;
+
             try
             {
                 // Force all parts to update their state before backup
@@ -89,6 +102,74 @@ namespace GeneKerman
         {
             ConfigNode node = ExportActiveVesselNode(embedRoster);
             return node?.ToString();
+        }
+
+        // ── Fleet Export (active + selected nearby vessels) ──────────────────
+
+        /// <summary>
+        /// Pack the active vessel plus any selected nearby vessels into a single
+        /// "GKFLEET" container so a submission can deliver multiple crafts at once.
+        /// Each extra vessel carries its own flags, crew roster, and (when found) its
+        /// editor blueprint embedded as a GKCRAFT child. With no extras this returns a
+        /// plain "VESSEL" node string, identical to <see cref="ExportActiveVessel"/>,
+        /// so the legacy single-vessel path stays byte-for-byte compatible.
+        /// </summary>
+        public static string ExportFleet(Vessel active, List<Vessel> extras, bool embedRoster = false)
+        {
+            ConfigNode activeNode = (active != null)
+                ? ExportVesselNode(active, embedRoster)
+                : ExportActiveVesselNode(embedRoster);
+            if (activeNode == null) return null;
+
+            // No extras → keep the historical single-VESSEL payload (back-compat).
+            if (extras == null || extras.Count == 0)
+                return activeNode.ToString();
+
+            ConfigNode fleet = new ConfigNode("GKFLEET");
+            fleet.AddNode(activeNode);   // primary (contract) vessel goes first
+
+            int packed = 1;
+            foreach (var v in extras)
+            {
+                if (v == null || v == active) continue;
+                ConfigNode vn = ExportVesselNode(v, embedRoster);
+                if (vn == null) continue;
+                EmbedCraftBlueprint(vn, v);
+                fleet.AddNode(vn);
+                packed++;
+            }
+
+            Debug.Log($"[GeneKerman] Exported fleet: {packed} vessels.");
+            return fleet.ToString();
+        }
+
+        /// <summary>Attach a vessel's editor blueprint (.craft + loadmeta, flags
+        /// embedded) to its VESSEL node as a base64 "GKCRAFT" child so the recipient
+        /// can re-edit it in the VAB/SPH. Silently skips if no blueprint is found.</summary>
+        private static void EmbedCraftBlueprint(ConfigNode vesselNode, Vessel v)
+        {
+            try
+            {
+                string path = VesselDataCollector.FindCraftFile(v.vesselName);
+                if (string.IsNullOrEmpty(path)) return;
+
+                byte[] craftBytes = System.IO.File.ReadAllBytes(path);
+                // Carry custom mission flags inside the blueprint too.
+                craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+
+                ConfigNode cn = vesselNode.AddNode("GKCRAFT");
+                cn.AddValue("name", System.IO.Path.GetFileName(path));
+                cn.AddValue("data", Convert.ToBase64String(craftBytes));
+
+                string loadmeta = VesselDataCollector.ReadLoadmeta(path);
+                if (!string.IsNullOrEmpty(loadmeta))
+                    cn.AddValue("loadmeta",
+                        Convert.ToBase64String(Encoding.UTF8.GetBytes(loadmeta)));
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] EmbedCraftBlueprint failed for '{v.vesselName}': {ex.Message}");
+            }
         }
 
         /// <summary>Save each crew member's full ProtoCrewMember into a GKCREW child
@@ -167,6 +248,104 @@ namespace GeneKerman
         }
 
         /// <summary>
+        /// Import a delivered payload that may be a single "VESSEL" node (legacy) or a
+        /// "GKFLEET" container holding several. Every vessel is spawned and any embedded
+        /// GKCRAFT blueprint installed. Returns the number of vessels imported.
+        /// </summary>
+        public static int ImportFleet(string vesselNodeStr, string ownerName, string myName)
+        {
+            if (!CanImport()) return 0;
+
+            try
+            {
+                ConfigNode root = LoadRootNode(vesselNodeStr);
+                if (root == null) return 0;
+
+                // ConfigNode.Load wraps the file's top-level node(s) under an unnamed
+                // root, so the GKFLEET / VESSEL node may be `root` itself or a child.
+                ConfigNode fleet = (root.name == "GKFLEET") ? root : root.GetNode("GKFLEET");
+
+                // Fleet container → import each VESSEL child.
+                if (fleet != null)
+                {
+                    int count = 0;
+                    foreach (ConfigNode vNode in fleet.GetNodes("VESSEL"))
+                        if (ImportOneInner(vNode, ownerName, myName)) count++;
+                    Debug.Log($"[GeneKerman] ImportFleet: imported {count} vessels.");
+                    return count;
+                }
+
+                // Single vessel (root is VESSEL, or a wrapper around one).
+                ConfigNode inner = (root.name == "VESSEL") ? root : root.GetNode("VESSEL");
+                if (inner == null && root.CountNodes > 0) inner = root.nodes[0];
+                if (inner == null)
+                {
+                    Debug.LogError("[GeneKerman] ImportFleet: no VESSEL node found.");
+                    return 0;
+                }
+                return ImportOneInner(inner, ownerName, myName) ? 1 : 0;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[GeneKerman] ImportFleet failed: {ex}");
+                return 0;
+            }
+        }
+
+        /// <summary>Run the full per-vessel import pipeline on an already-parsed inner
+        /// VESSEL node: install its embedded blueprint, freshen ids/flags, reset
+        /// controls, tag crew, pin its orbit epoch, and spawn it. Returns false on
+        /// failure (so one bad vessel doesn't abort the rest of a fleet).</summary>
+        private static bool ImportOneInner(ConfigNode innerNode, string ownerName, string myName)
+        {
+            try
+            {
+                InstallEmbeddedCraft(innerNode);   // pulls + strips any GKCRAFT children
+                PrepareInnerNode(innerNode);       // fresh pid + install GKFLAG textures
+                ResetControls(innerNode);
+                TagCrew(innerNode, ownerName, myName);
+                FreezeOrbitEpochToNow(innerNode);
+                SpawnInnerNode(innerNode);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[GeneKerman] ImportOneInner failed: {ex}");
+                return false;
+            }
+        }
+
+        /// <summary>Install any GKCRAFT blueprint(s) embedded in a VESSEL node into the
+        /// save's Ships directory, then strip them so the ProtoVessel build never sees
+        /// them.</summary>
+        private static void InstallEmbeddedCraft(ConfigNode vesselNode)
+        {
+            foreach (ConfigNode cn in vesselNode.GetNodes("GKCRAFT"))
+            {
+                try
+                {
+                    string b64 = cn.GetValue("data");
+                    if (string.IsNullOrEmpty(b64)) continue;
+                    byte[] craftBytes = Convert.FromBase64String(b64);
+                    string name = cn.GetValue("name") ?? "received.craft";
+
+                    string loadmeta = null;
+                    string lmB64 = cn.GetValue("loadmeta");
+                    if (!string.IsNullOrEmpty(lmB64))
+                        loadmeta = Encoding.UTF8.GetString(Convert.FromBase64String(lmB64));
+
+                    CraftInstaller.Install(craftBytes, name, loadmeta);
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] InstallEmbeddedCraft failed: {ex.Message}");
+                }
+            }
+            while (vesselNode.GetNode("GKCRAFT") != null)
+                vesselNode.RemoveNode("GKCRAFT");
+        }
+
+        /// <summary>
         /// Import a vessel and optionally place it at a rescue target. Crew are tagged
         /// with their owner's name (stripped when they come home).
         /// </summary>
@@ -237,25 +416,8 @@ namespace GeneKerman
         /// pid/persistentId so it can't collide with an existing vessel.</summary>
         private static ConfigNode LoadInnerVesselNode(string vesselNodeStr)
         {
-            if (string.IsNullOrEmpty(vesselNodeStr))
-            {
-                Debug.LogWarning("[GeneKerman] Import: Empty vessel data.");
-                return null;
-            }
-
-            // Write to temp file and load — ConfigNode.Parse() is unreliable.
-            string tempPath = System.IO.Path.Combine(
-                KSPUtil.ApplicationRootPath, "PluginData", "GeneKerman_vessel_import.cfg");
-            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(tempPath));
-            System.IO.File.WriteAllText(tempPath, vesselNodeStr, Encoding.UTF8);
-            ConfigNode fileNode = ConfigNode.Load(tempPath);
-            try { System.IO.File.Delete(tempPath); } catch { }
-
-            if (fileNode == null)
-            {
-                Debug.LogError("[GeneKerman] Import: ConfigNode.Load returned null.");
-                return null;
-            }
+            ConfigNode fileNode = LoadRootNode(vesselNodeStr);
+            if (fileNode == null) return null;
 
             ConfigNode innerNode = fileNode;
             if (fileNode.name != "VESSEL")
@@ -268,6 +430,38 @@ namespace GeneKerman
                 }
             }
 
+            PrepareInnerNode(innerNode);
+            return innerNode;
+        }
+
+        /// <summary>Write a ConfigNode string to a temp file and load it back — the
+        /// reliable way to parse a serialized node (ConfigNode.Parse() is flaky). Returns
+        /// the root node (which may be a bare VESSEL or a GKFLEET container).</summary>
+        private static ConfigNode LoadRootNode(string vesselNodeStr)
+        {
+            if (string.IsNullOrEmpty(vesselNodeStr))
+            {
+                Debug.LogWarning("[GeneKerman] Import: Empty vessel data.");
+                return null;
+            }
+
+            string tempPath = System.IO.Path.Combine(
+                KSPUtil.ApplicationRootPath, "PluginData", "GeneKerman_vessel_import.cfg");
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(tempPath));
+            System.IO.File.WriteAllText(tempPath, vesselNodeStr, Encoding.UTF8);
+            ConfigNode fileNode = ConfigNode.Load(tempPath);
+            try { System.IO.File.Delete(tempPath); } catch { }
+
+            if (fileNode == null)
+                Debug.LogError("[GeneKerman] Import: ConfigNode.Load returned null.");
+            return fileNode;
+        }
+
+        /// <summary>Freshen an inner VESSEL node so it can be spawned without colliding
+        /// with an existing vessel: assign a new pid/persistentId and install (then
+        /// strip) any custom mission flags it carries, so parts resolve textures.</summary>
+        private static void PrepareInnerNode(ConfigNode innerNode)
+        {
             Guid newGuid = Guid.NewGuid();
             innerNode.SetValue("pid", newGuid.ToString("D"), true);
             innerNode.SetValue("persistentId", ((uint)rng.Next(100000, int.MaxValue)).ToString(), true);
@@ -276,7 +470,6 @@ namespace GeneKerman
             // GKFLAG nodes) before the ProtoVessel is built, so its parts resolve
             // the textures on spawn.
             FlagTransfer.ExtractAndInstallFlags(innerNode);
-            return innerNode;
         }
 
         /// <summary>Register an inner VESSEL node into the running universe (after

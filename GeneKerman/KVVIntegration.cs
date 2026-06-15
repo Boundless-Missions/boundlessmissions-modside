@@ -49,12 +49,13 @@ namespace GeneKerman
         public static bool IsAvailable => true;
 
         /// <summary>
-        /// Capture an orthographic vessel render using the built-in renderer.
-        /// The vessel parameter is ignored — we auto-detect from the scene.
+        /// Capture an orthographic vessel render using the built-in renderer. When a
+        /// vessel is supplied that specific craft is rendered (for multi-vessel
+        /// submissions); otherwise the active vessel / editor ship is auto-detected.
         /// </summary>
         public static string CaptureWithFallback(Vessel vessel = null)
         {
-            return VesselRenderer.CaptureVessel();
+            return VesselRenderer.CaptureVessel(vessel);
         }
     }
 }

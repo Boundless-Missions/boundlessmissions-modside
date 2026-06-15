@@ -29,6 +29,9 @@ namespace GeneKerman
         const int ISOLATION_LAYER = 30;
         const float PADDING = 1.35f;
 
+        // Monotonic counter to keep render filenames unique within a process.
+        static int _renderSeq;
+
         // Column X positions (4 columns)
         static readonly int[] COL_X = { 64, 544, 1024, 1504 };
         // Row Y positions in screen coords (top-down, cell top edge)
@@ -81,13 +84,34 @@ namespace GeneKerman
                 if (HighLogic.LoadedSceneIsEditor)
                     return CaptureFromEditor();
                 else if (HighLogic.LoadedSceneIsFlight)
-                    return CaptureFromFlight();
+                    return CaptureFromFlightVessel(FlightGlobals.ActiveVessel);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[GeneKerman] Blueprint render failed: {ex}");
             }
             return VesselDataCollector.CaptureScreenshot();
+        }
+
+        /// <summary>
+        /// Render a specific loaded vessel (not necessarily the active one). Used to
+        /// capture blueprints for every craft selected in a multi-vessel submission.
+        /// Any vessel in physics range is renderable — its parts are isolated on a
+        /// dedicated layer and shot with an off-screen camera, so it need not be active.
+        /// </summary>
+        public static string CaptureVessel(Vessel vessel)
+        {
+            try
+            {
+                if (vessel == null || !HighLogic.LoadedSceneIsFlight)
+                    return CaptureVessel();
+                return CaptureFromFlightVessel(vessel);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[GeneKerman] Blueprint render failed for '{vessel?.vesselName}': {ex}");
+                return VesselDataCollector.CaptureScreenshot();
+            }
         }
 
         // ── Scene Capture Entry Points ──────────────────────────────────────
@@ -113,12 +137,11 @@ namespace GeneKerman
 
             // Editor: vessel is aligned to world axes
             return RenderBlueprint(renderers, bounds, Quaternion.identity,
-                name, partCount, mass, cost);
+                name, partCount, mass, cost, ship.parts);
         }
 
-        private static string CaptureFromFlight()
+        private static string CaptureFromFlightVessel(Vessel vessel)
         {
-            var vessel = FlightGlobals.ActiveVessel;
             if (vessel == null || vessel.parts == null || vessel.parts.Count == 0)
                 return VesselDataCollector.CaptureScreenshot();
 
@@ -137,20 +160,23 @@ namespace GeneKerman
                 vessel.vesselName ?? "Vessel",
                 vessel.parts.Count,
                 (float)vessel.totalMass,
-                0f);
+                0f, vessel.parts);
         }
 
         // ── Core Rendering ──────────────────────────────────────────────────
 
         private static string RenderBlueprint(
             Renderer[] renderers, Bounds bounds, Quaternion vesselRotation,
-            string vesselName, int partCount, float mass, float cost)
+            string vesselName, int partCount, float mass, float cost,
+            List<Part> isolationParts)
         {
             int layerMask = 1 << ISOLATION_LAYER;
 
             // ── Isolate vessel on dedicated layer ──
-            // Use part-level isolation to avoid duplicate-gameObject layer bugs
-            List<Part> parts = GetCurrentParts();
+            // Use part-level isolation to avoid duplicate-gameObject layer bugs.
+            // Isolate exactly the parts we're rendering (the target vessel), which
+            // may be a nearby craft rather than the active one.
+            List<Part> parts = isolationParts;
             var origLayers = IsolatePartLayers(parts, ISOLATION_LAYER);
 
             // Replace scene lighting with uniform fill lights so all 8 views
@@ -283,7 +309,10 @@ namespace GeneKerman
             string dir = Path.Combine(GeneKermanMod.PluginDataPath, "renders");
             Directory.CreateDirectory(dir);
             string safeName = string.Join("_", vesselName.Split(Path.GetInvalidFileNameChars()));
-            string filename = $"{safeName}_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+            // Include a per-process sequence so two vessels captured in the same second
+            // (e.g. two same-named probes in a multi-craft submission) don't collide on
+            // the timestamp and overwrite each other's render.
+            string filename = $"{safeName}_{DateTime.Now:yyyyMMdd_HHmmss}_{++_renderSeq}.png";
             string path = Path.Combine(dir, filename);
             File.WriteAllBytes(path, png);
 

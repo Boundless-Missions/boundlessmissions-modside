@@ -134,16 +134,42 @@ namespace GeneKerman
 
             foreach (var vessel in FlightGlobals.VesselsLoaded)
             {
-                // Skip debris and asteroids
-                if (vessel.vesselType == VesselType.Debris ||
-                    vessel.vesselType == VesselType.SpaceObject ||
-                    vessel.vesselType == VesselType.Unknown)
-                    continue;
-
+                if (!IsTransferable(vessel)) continue;
                 snapshots.Add(CaptureVessel(vessel));
             }
 
             return snapshots;
+        }
+
+        /// <summary>
+        /// Real Vessel references for every transferable craft currently in physics
+        /// range, excluding <paramref name="active"/>. Used by the submit window to
+        /// offer extra crafts for multi-vessel submission (it needs the live Vessel,
+        /// not just a snapshot, to export the full state).
+        /// </summary>
+        public static List<Vessel> GetNearbyVessels(Vessel active)
+        {
+            var result = new List<Vessel>();
+            if (FlightGlobals.VesselsLoaded == null) return result;
+
+            foreach (var vessel in FlightGlobals.VesselsLoaded)
+            {
+                if (vessel == null || vessel == active) continue;
+                if (!IsTransferable(vessel)) continue;
+                result.Add(vessel);
+            }
+            return result;
+        }
+
+        /// <summary>A vessel worth offering/transferring — excludes debris, asteroids
+        /// and flags/EVA-less junk.</summary>
+        private static bool IsTransferable(Vessel vessel)
+        {
+            if (vessel == null) return false;
+            return vessel.vesselType != VesselType.Debris &&
+                   vessel.vesselType != VesselType.SpaceObject &&
+                   vessel.vesselType != VesselType.Unknown &&
+                   vessel.vesselType != VesselType.Flag;
         }
 
         // ── Craft File Reading ──────────────────────────────────────────────

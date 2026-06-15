@@ -1980,6 +1980,8 @@ namespace GeneKerman.UI
             try
             {
                 craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+                // Carry the craft's custom mission flags so the buyer sees them.
+                craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
             }
             catch (System.Exception ex)
             {

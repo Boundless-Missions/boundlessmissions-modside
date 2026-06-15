@@ -740,6 +740,11 @@ namespace GeneKerman.UI
             string submittedPid = (IsRescue && FlightGlobals.ActiveVessel != null)
                 ? FlightGlobals.ActiveVessel.id.ToString() : null;
 
+            // Carry the craft's custom mission flags so the receiving player sees
+            // them instead of a missing decal (the live vessel node embeds its own).
+            if (craftData != null)
+                craftData = FlagTransfer.EmbedFlagsInCraft(craftData);
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist,

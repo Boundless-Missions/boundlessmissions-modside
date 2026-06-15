@@ -66,6 +66,10 @@ namespace GeneKerman
                 if (embedRoster)
                     EmbedRosterData(vesselNode, vessel);
 
+                // Carry any custom mission flags the parts use so the receiving
+                // save renders them instead of a missing decal.
+                FlagTransfer.EmbedFlagsInNode(vesselNode);
+
                 Debug.Log($"[GeneKerman] Exported vessel '{vessel.vesselName}': " +
                           $"{vessel.parts.Count} parts, {vessel.GetCrewCount()} crew");
                 return vesselNode;
@@ -267,6 +271,11 @@ namespace GeneKerman
             Guid newGuid = Guid.NewGuid();
             innerNode.SetValue("pid", newGuid.ToString("D"), true);
             innerNode.SetValue("persistentId", ((uint)rng.Next(100000, int.MaxValue)).ToString(), true);
+
+            // Install any custom mission flags this vessel carried (and strip the
+            // GKFLAG nodes) before the ProtoVessel is built, so its parts resolve
+            // the textures on spawn.
+            FlagTransfer.ExtractAndInstallFlags(innerNode);
             return innerNode;
         }
 

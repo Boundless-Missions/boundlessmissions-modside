@@ -52,6 +52,10 @@ namespace GeneKerman
                 }
             }
 
+            // Install any custom mission flags this craft carried and strip the
+            // GKFLAG side-channel nodes so the blueprint written to disk is clean.
+            rawData = FlagTransfer.StripAndInstallFlagsFromCraft(rawData);
+
             // Parse craft type from header
             string craftType = ParseCraftType(rawData);
             if (string.IsNullOrEmpty(craftType))

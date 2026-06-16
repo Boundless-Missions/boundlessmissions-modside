@@ -87,8 +87,9 @@ namespace GeneKerman.UI
         private bool importPollInFlight;
         private readonly HashSet<string> processingImports = new HashSet<string>();
 
-        // Rescue wrecks already spawned this session, keyed by contract id, so a
-        // retried/repeated accept coroutine can't spawn the stranded vessel twice.
+        // Rescue wrecks whose download is currently in flight, keyed by contract id, so
+        // a rapid double-click of the Spawn button can't kick off two spawns at once.
+        // Permanent dedup lives in GKContractScenario.HasImportedVessel (per-save).
         private readonly HashSet<string> spawnedRescueWrecks = new HashSet<string>();
 
         // Blueprint preview popup — shows the contractor's submitted render(s) so the
@@ -999,6 +1000,49 @@ namespace GeneKerman.UI
                 GUILayout.Space(8);
             }
 
+            // Rescue: spawn the stranded vessel on demand. Done here (a button) rather
+            // than automatically on accept, so the player triggers it from a valid scene
+            // and can retry if it fails. Spawn-state is persisted per-save in
+            // GKContractScenario, so this survives restarts and never double-spawns —
+            // which is what makes a failed/missed spawn recoverable.
+            if (status == "active" && mType == "rescue")
+            {
+                string rcid = MiniJSON.GetString(c, "contract_id");
+                GUILayout.BeginVertical(boxDarkStyle);
+                GUILayout.Label("🛟 Stranded Vessel", headerStyle);
+
+                bool alreadySpawned = GKContractScenario.Instance != null
+                    && GKContractScenario.Instance.HasImportedVessel(rcid);
+                bool sceneOk = HighLogic.LoadedSceneIsFlight
+                    || HighLogic.LoadedScene == GameScenes.SPACECENTER
+                    || HighLogic.LoadedScene == GameScenes.TRACKSTATION;
+
+                if (alreadySpawned)
+                {
+                    GUILayout.Label("(Ok) Already spawned into this save.", labelStyle);
+                }
+                else if (!sceneOk)
+                {
+                    GUILayout.Label("Enter Flight, Space Center, or Tracking Station, then spawn the stranded vessel.", labelStyle);
+                }
+                else
+                {
+                    string wreckUrl = MiniJSON.GetString(c, "rescue_vessel_node_url", null);
+                    if (string.IsNullOrEmpty(wreckUrl))
+                    {
+                        GUILayout.Label("Vessel data unavailable — Refresh contracts and retry.", labelStyle);
+                    }
+                    else if (GUILayout.Button("🛟 Spawn stranded vessel", acceptBtnStyle, GUILayout.Height(30)))
+                    {
+                        string issuerName = MiniJSON.GetString(c, "issuer_name", "");
+                        RescueTargetSpec target = RescueTargetSpec.FromDict(MiniJSON.GetDict(c, "rescue_target"));
+                        GeneKermanMod.Instance.RunCoroutine(DoSpawnRescueWreck(rcid, wreckUrl, target, issuerName));
+                    }
+                }
+                GUILayout.EndVertical();
+                GUILayout.Space(8);
+            }
+
             // Action buttons
             GUILayout.BeginHorizontal();
 
@@ -1902,19 +1946,16 @@ namespace GeneKerman.UI
 
         private System.Collections.IEnumerator DoAcceptContract(string contractId, string issuerName = "")
         {
-            string wreckUrl = null;
-            RescueTargetSpec wreckTarget = null;
+            // Accept only flips the contract to active. The rescue wreck is NOT spawned
+            // here anymore — it spawns on demand via the "Spawn stranded vessel" button on
+            // the active contract, so the player triggers it from a valid scene (Flight /
+            // Space Center / Tracking Station) and can retry if a spawn fails. Auto-spawning
+            // on accept silently lost the wreck whenever accept happened from the editor.
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/accept", "{}", (ok, resp, status) =>
             {
                 if (ok)
                 {
                     SetStatus("(Ok) Contract accepted!");
-                    if (!string.IsNullOrEmpty(resp))
-                    {
-                        var data = MiniJSON.DeserializeDict(resp);
-                        wreckUrl = MiniJSON.GetString(data, "rescue_vessel_node_url", null);
-                        wreckTarget = RescueTargetSpec.FromDict(MiniJSON.GetDict(data, "rescue_target"));
-                    }
                     RefreshContracts();
                 }
                 else
@@ -1922,15 +1963,21 @@ namespace GeneKerman.UI
                     SetStatus("(No) Failed to accept contract.");
                 }
             });
-
-            // Rescue: spawn the stranded vessel; its crew are tagged with the issuer's name.
-            if (!string.IsNullOrEmpty(wreckUrl) && wreckTarget != null)
-                yield return DoSpawnRescueWreck(contractId, wreckUrl, wreckTarget, issuerName);
         }
 
         private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName)
         {
-            // Guard against a double spawn if accept is retried for the same contract.
+            // Permanent, per-save dedup: if the wreck is already in this save, never
+            // spawn a second one. This is persisted in GKContractScenario, so it holds
+            // across restarts (the in-memory set below only guards a double-click while
+            // a download is mid-flight).
+            if (!string.IsNullOrEmpty(contractId) && GKContractScenario.Instance != null
+                && GKContractScenario.Instance.HasImportedVessel(contractId))
+            {
+                SetStatus("🛟 Stranded vessel already spawned for this contract.");
+                yield break;
+            }
+            // Transient guard against a double-click while the download is in flight.
             if (!string.IsNullOrEmpty(contractId) && !spawnedRescueWrecks.Add(contractId))
                 yield break;
             string myName = GeneKermanMod.Instance.LinkedUsername;
@@ -1938,8 +1985,7 @@ namespace GeneKerman.UI
             {
                 if (!ok || fileData == null)
                 {
-                    spawnedRescueWrecks.Remove(contractId); // let a later retry try again
-                    SetStatus("⚠ Accepted, but could not download the stranded vessel.");
+                    SetStatus("⚠ Could not download the stranded vessel — try again.");
                     return;
                 }
                 string node = DecompressToString(fileData);
@@ -1952,10 +1998,21 @@ namespace GeneKerman.UI
                 // the current universe time. Crew are tagged with the issuer's name; the
                 // rescuer collects them and brings them to the target to complete.
                 string name = VesselTransfer.ImportVesselAtTarget(node, null, issuerName, myName);
-                SetStatus(!string.IsNullOrEmpty(name)
-                    ? $"🛟 Stranded vessel '{name}' is adrift — find it and bring the crew to {target.body}."
-                    : "⚠ Could not spawn the stranded vessel — try from the Space Center.");
+                if (!string.IsNullOrEmpty(name))
+                {
+                    // Mark imported only on a real spawn, so a scene-guard / parse
+                    // failure leaves the contract retryable instead of locked out.
+                    GKContractScenario.Instance?.MarkVesselImported(contractId);
+                    string dest = target != null ? target.body : "the target";
+                    SetStatus($"🛟 Stranded vessel '{name}' is adrift — find it and bring the crew to {dest}.");
+                }
+                else
+                {
+                    SetStatus("⚠ Could not spawn — enter Flight, Space Center, or Tracking Station and try again.");
+                }
             });
+            // Always clear the transient guard so a failed attempt can be retried.
+            if (!string.IsNullOrEmpty(contractId)) spawnedRescueWrecks.Remove(contractId);
         }
 
         private System.Collections.IEnumerator DoReviewContract(string contractId, bool approve)

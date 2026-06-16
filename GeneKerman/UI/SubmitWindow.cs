@@ -485,6 +485,18 @@ namespace GeneKerman.UI
                     editorCraftName = ship.shipName ?? "Untitled";
                     editorPartCount = ship.parts?.Count ?? 0;
 
+                    // Auto-save the editor craft to disk so the .craft file we look
+                    // up below is current — the player no longer has to save manually
+                    // before submitting.
+                    if (editorPartCount > 0)
+                    {
+                        try { ShipConstruction.SaveShip(editorCraftName); }
+                        catch (Exception saveEx)
+                        {
+                            Debug.LogWarning($"[GeneKerman] Could not auto-save craft: {saveEx.Message}");
+                        }
+                    }
+
                     if (ship.parts != null)
                     {
                         foreach (var part in ship.parts)
@@ -973,6 +985,12 @@ namespace GeneKerman.UI
             if (craftData != null)
                 craftData = FlagTransfer.EmbedFlagsInCraft(craftData);
 
+            // Record our TweakScale version so the recipient is warned if theirs is
+            // missing/different (a scaled craft only rebuilds correctly on a matching
+            // TweakScale). Appended AFTER flags so the block sits last in the file.
+            if (craftData != null)
+                craftData = TweakScaleGuard.EmbedVersionInCraft(craftData);
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist,
@@ -1038,9 +1056,21 @@ namespace GeneKerman.UI
             foreach (var part in parts)
             {
                 var info = part?.partInfo;
-                if (info == null || IsPartAllowed(info.partUrl)) continue;
-                string label = $"• {info.title} (from {GetModFolder(info.partUrl)})";
-                if (seen.Add(label)) bad.Add(label);
+                if (info == null) continue;
+
+                if (!IsPartAllowed(info.partUrl))
+                {
+                    string label = $"• {info.title} (from {GetModFolder(info.partUrl)})";
+                    if (seen.Add(label)) bad.Add(label);
+                }
+                // TweakScale is a modifier, not a part owner, so it never shows up via
+                // partUrl. A scaled craft installed without (the same) TweakScale loads
+                // mis-scaled, so flag scaled parts when TweakScale isn't in the modlist.
+                else if (PartUsesTweakScale(part) && !allowedMods.Contains("TweakScale"))
+                {
+                    string label = $"• {info.title} (scaled with TweakScale)";
+                    if (seen.Add(label)) bad.Add(label);
+                }
             }
 
             if (bad.Count == 0) return null;
@@ -1066,9 +1096,25 @@ namespace GeneKerman.UI
                 string url = part?.partInfo?.partUrl;
                 if (!string.IsNullOrEmpty(url))
                     folders.Add(url.Split('/')[0]);
+
+                // TweakScale never owns a part, so it won't appear via partUrl. Scan
+                // modules so a scaled (even stock-only) craft reports TweakScale as a
+                // dependency for the server's modlist validation.
+                if (PartUsesTweakScale(part))
+                    folders.Add("TweakScale");
             }
 
             return folders.Count > 0 ? string.Join(",", folders.ToArray()) : null;
+        }
+
+        // TweakScale attaches a "TweakScale" PartModule to every scaled part. It owns
+        // no parts of its own, so module inspection is the only way to detect its use.
+        private static bool PartUsesTweakScale(Part part)
+        {
+            if (part?.Modules == null) return false;
+            foreach (var m in part.Modules)
+                if (m != null && m.moduleName == "TweakScale") return true;
+            return false;
         }
 
         private bool IsPartAllowed(string partUrl)

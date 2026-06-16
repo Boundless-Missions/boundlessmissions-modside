@@ -52,6 +52,12 @@ namespace GeneKerman
                 }
             }
 
+            // Warn the player if this craft uses TweakScale and theirs is missing or a
+            // different version, then strip the GKTSVER block. Must run BEFORE the flag
+            // strip: the version block is appended after the GKFLAG blocks, and the flag
+            // strip cuts everything from the first GKFLAG block to end of file.
+            rawData = TweakScaleGuard.CheckAndStripFromCraft(rawData);
+
             // Install any custom mission flags this craft carried and strip the
             // GKFLAG side-channel nodes so the blueprint written to disk is clean.
             rawData = FlagTransfer.StripAndInstallFlagsFromCraft(rawData);

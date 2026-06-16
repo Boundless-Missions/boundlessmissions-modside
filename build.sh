@@ -4,9 +4,15 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$SCRIPT_DIR/GeneKerman"
-KSP_PATH="/home/ayd/Documents/Kerbal Space Program"
+# Deploy to every KSP install here. First entry is the "normal" instance (logs are
+# its KSP.log); the Steam instance is the "heavymod" instance used for TweakScale /
+# mod-compatibility testing (its KSP.log is the "heavymod log").
+KSP_PATHS=(
+    "/home/ayd/Documents/Kerbal Space Program"
+    "/home/ayd/.local/share/Steam/steamapps/common/Kerbal Space Program"
+    "/home/ayd/Documents/Fake Kerman KSP Clone"
+)
 GAMEDATA_SRC="$SCRIPT_DIR/GameData/GeneKerman"
-GAMEDATA_DST="$KSP_PATH/GameData/GeneKerman"
 
 echo "═══════════════════════════════════════════════════"
 echo "  Gene Kerman KSP Mod — Build Script"
@@ -75,18 +81,26 @@ fi
 
 # ── Step 3: Deploy to KSP ───────────────────────────────
 echo ""
-echo "▶ Deploying to KSP test instance..."
+echo "▶ Deploying to KSP instance(s)..."
 
-if [ -d "$KSP_PATH" ]; then
-    mkdir -p "$GAMEDATA_DST"
-    cp -r "$GAMEDATA_SRC/"* "$GAMEDATA_DST/"
-    echo "  → Deployed to $GAMEDATA_DST"
-    echo ""
-    echo "✅ Build complete! DLL deployed to KSP GameData."
-    echo "   Size: $(du -h "$GAMEDATA_DST/Plugins/GeneKerman.dll" | cut -f1)"
+deployed=0
+for KSP_PATH in "${KSP_PATHS[@]}"; do
+    GAMEDATA_DST="$KSP_PATH/GameData/GeneKerman"
+    if [ -d "$KSP_PATH" ]; then
+        mkdir -p "$GAMEDATA_DST"
+        cp -r "$GAMEDATA_SRC/"* "$GAMEDATA_DST/"
+        echo "  → Deployed to $GAMEDATA_DST ($(du -h "$GAMEDATA_DST/Plugins/GeneKerman.dll" | cut -f1))"
+        deployed=$((deployed + 1))
+    else
+        echo "  ⚠️  KSP not found at $KSP_PATH — skipping."
+    fi
+done
+
+echo ""
+if [ "$deployed" -gt 0 ]; then
+    echo "✅ Build complete! Deployed to $deployed KSP instance(s)."
 else
-    echo "⚠️  KSP not found at $KSP_PATH — skipping deployment."
-    echo "   DLL is at: $GAMEDATA_SRC/Plugins/GeneKerman.dll"
+    echo "⚠️  No KSP install found — DLL is at: $GAMEDATA_SRC/Plugins/GeneKerman.dll"
 fi
 
 echo ""

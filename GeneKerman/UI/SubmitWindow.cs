@@ -886,6 +886,13 @@ namespace GeneKerman.UI
                 craftData = VesselDataCollector.ReadCraftFile(editorCraftPath);
                 craftName = Path.GetFileName(editorCraftPath);
                 // No loadmeta or vessel node for craft_build
+
+                // Bake the live editor parts' TweakScale-computed scale into the blueprint
+                // so it reconstructs identically for every receiver, regardless of their
+                // TweakScale version (see ScaleBridge).
+                var editorParts = EditorLogic.fetch?.ship?.parts;
+                if (craftData != null && editorParts != null)
+                    craftData = ScaleBridge.SnapshotIntoCraftBytes(craftData, editorParts);
             }
             else if (activeVessel != null) // active_vessel or rescue — both submit from flight
             {
@@ -927,6 +934,12 @@ namespace GeneKerman.UI
                     craftData = VesselDataCollector.ReadCraftFile(craftPath);
                     craftName = Path.GetFileName(craftPath);
                     loadmeta = VesselDataCollector.ReadLoadmeta(craftPath);
+
+                    // Bake scale into the editable blueprint too, matching parts by craftID
+                    // against the live flight vessel (the proto VESSEL node is handled
+                    // separately via SnapshotIntoVesselNode).
+                    if (craftData != null && FlightGlobals.ActiveVessel?.parts != null)
+                        craftData = ScaleBridge.SnapshotIntoCraftBytes(craftData, FlightGlobals.ActiveVessel.parts);
                 }
 
                 // Export full vessel state for transfer, embedding the crew roster so the
@@ -1068,14 +1081,10 @@ namespace GeneKerman.UI
                     string label = $"• {info.title} (from {GetModFolder(info.partUrl)})";
                     if (seen.Add(label)) bad.Add(label);
                 }
-                // TweakScale is a modifier, not a part owner, so it never shows up via
-                // partUrl. A scaled craft installed without (the same) TweakScale loads
-                // mis-scaled, so flag scaled parts when TweakScale isn't in the modlist.
-                else if (PartUsesTweakScale(part) && !allowedMods.Contains("TweakScale"))
-                {
-                    string label = $"• {info.title} (scaled with TweakScale)";
-                    if (seen.Add(label)) bad.Add(label);
-                }
+                // Scaled parts are no longer flagged: GeneKermanScale bakes the final scale
+                // into the submitted craft (see ScaleBridge) and re-applies it on the receiver
+                // without TweakScale, so a scaled craft no longer depends on the recipient
+                // having (a matching) TweakScale.
             }
 
             if (bad.Count == 0) return null;
@@ -1102,24 +1111,13 @@ namespace GeneKerman.UI
                 if (!string.IsNullOrEmpty(url))
                     folders.Add(url.Split('/')[0]);
 
-                // TweakScale never owns a part, so it won't appear via partUrl. Scan
-                // modules so a scaled (even stock-only) craft reports TweakScale as a
-                // dependency for the server's modlist validation.
-                if (PartUsesTweakScale(part))
-                    folders.Add("TweakScale");
+                // TweakScale is intentionally NOT reported as a dependency: GeneKermanScale
+                // bakes the scale into the delivered craft and applies it without TweakScale
+                // (see ScaleBridge), so a scaled craft does not require the recipient to have
+                // TweakScale installed.
             }
 
             return folders.Count > 0 ? string.Join(",", folders.ToArray()) : null;
-        }
-
-        // TweakScale attaches a "TweakScale" PartModule to every scaled part. It owns
-        // no parts of its own, so module inspection is the only way to detect its use.
-        private static bool PartUsesTweakScale(Part part)
-        {
-            if (part?.Modules == null) return false;
-            foreach (var m in part.Modules)
-                if (m != null && m.moduleName == "TweakScale") return true;
-            return false;
         }
 
         private bool IsPartAllowed(string partUrl)

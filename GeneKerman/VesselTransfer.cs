@@ -88,6 +88,12 @@ namespace GeneKerman
                 // recipient missing them gets a CKAN modpack to install them.
                 CkanGenerator.EmbedModsInNode(vesselNode, vessel);
 
+                // Snapshot the final values of any TweakScale-rescaled parts (absolute
+                // model scale / mass / stats) into each part's GeneKermanScale module, so
+                // the craft reconstructs identically for every receiver regardless of
+                // their TweakScale version. Reads the live parts here while they exist.
+                ScaleBridge.SnapshotIntoVesselNode(vessel, vesselNode);
+
                 Debug.Log($"[GeneKerman] Exported vessel '{vessel.vesselName}': " +
                           $"{vessel.parts.Count} parts, {vessel.GetCrewCount()} crew");
                 return vesselNode;
@@ -481,6 +487,11 @@ namespace GeneKerman
             // Read + strip the carried mod list; write a CKAN modpack for any mod the
             // recipient is missing (so they can install what this vessel needs).
             CkanGenerator.ExtractCheckAndStripMods(innerNode);
+
+            // For any part carrying a GeneKermanScale snapshot, strip its TweakScale
+            // module so the receiver's TweakScale (if any) stays at 1× and our applicator
+            // is the sole authority — making the scaled craft deterministic across versions.
+            ScaleBridge.NeutralizeTweakScaleForImport(innerNode);
         }
 
         /// <summary>Register an inner VESSEL node into the running universe (after

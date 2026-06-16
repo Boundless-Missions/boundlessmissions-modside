@@ -1674,6 +1674,7 @@ namespace GeneKerman.UI
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list (last)
 
                 string dir = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "ExportedCrafts");
                 System.IO.Directory.CreateDirectory(dir);
@@ -1731,6 +1732,7 @@ namespace GeneKerman.UI
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 payload = FlagTransfer.EmbedFlagsInCraft(craftBytes); // carry custom flags
+                payload = CkanGenerator.EmbedModsInCraft(payload);   // carry mod list (last)
                 fileName = editorCraftName + ".craft";
                 craftName = editorCraftName;
             }
@@ -2388,6 +2390,7 @@ namespace GeneKerman.UI
                 craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 // Carry the craft's custom mission flags so the buyer sees them.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list (last)
             }
             catch (System.Exception ex)
             {

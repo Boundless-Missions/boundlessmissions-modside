@@ -8,6 +8,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using System.Text;
 using UnityEngine;
 
@@ -83,6 +84,10 @@ namespace GeneKerman
                 // save renders them instead of a missing decal.
                 FlagTransfer.EmbedFlagsInNode(vesselNode);
 
+                // Record which non-stock mods this vessel's parts come from so a
+                // recipient missing them gets a CKAN modpack to install them.
+                CkanGenerator.EmbedModsInNode(vesselNode, vessel);
+
                 Debug.Log($"[GeneKerman] Exported vessel '{vessel.vesselName}': " +
                           $"{vessel.parts.Count} parts, {vessel.GetCrewCount()} crew");
                 return vesselNode;
@@ -156,6 +161,8 @@ namespace GeneKerman
                 byte[] craftBytes = System.IO.File.ReadAllBytes(path);
                 // Carry custom mission flags inside the blueprint too.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                // …and the mod list (appended last so the strip stays a clean cut).
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
 
                 ConfigNode cn = vesselNode.AddNode("GKCRAFT");
                 cn.AddValue("name", System.IO.Path.GetFileName(path));
@@ -470,6 +477,10 @@ namespace GeneKerman
             // GKFLAG nodes) before the ProtoVessel is built, so its parts resolve
             // the textures on spawn.
             FlagTransfer.ExtractAndInstallFlags(innerNode);
+
+            // Read + strip the carried mod list; write a CKAN modpack for any mod the
+            // recipient is missing (so they can install what this vessel needs).
+            CkanGenerator.ExtractCheckAndStripMods(innerNode);
         }
 
         /// <summary>Register an inner VESSEL node into the running universe (after
@@ -499,8 +510,43 @@ namespace GeneKerman
                 }
             }
 
+            // If we're in the Tracking Station, its vessel list was built on scene
+            // entry and won't show the new craft until a scene reload. Rebuild it in
+            // place so the import is immediately selectable.
+            RefreshTrackingStation();
+
             Debug.Log($"[GeneKerman] (Ok) Spawned vessel '{vesselName}'");
             return vesselName;
+        }
+
+        /// <summary>Rebuild the Tracking Station's vessel list so a just-imported vessel
+        /// appears without leaving and re-entering the scene. No-op outside the Tracking
+        /// Station. SpaceTracking.buildVesselsList() is a private instance method that
+        /// repopulates the vessel widgets from the live vessel list, so we call it via
+        /// reflection (SpaceTracking.Instance itself is public).</summary>
+        private static void RefreshTrackingStation()
+        {
+            if (HighLogic.LoadedScene != GameScenes.TRACKSTATION) return;
+            try
+            {
+                var st = KSP.UI.Screens.SpaceTracking.Instance;
+                if (st == null) return;
+
+                var build = typeof(KSP.UI.Screens.SpaceTracking).GetMethod(
+                    "buildVesselsList", BindingFlags.Instance | BindingFlags.NonPublic);
+                if (build == null)
+                {
+                    Debug.LogWarning("[GeneKerman] Tracking Station refresh: buildVesselsList not found — KSP API may have changed.");
+                    return;
+                }
+
+                build.Invoke(st, null);
+                Debug.Log("[GeneKerman] Tracking Station vessel list rebuilt after import.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Tracking Station refresh failed: {ex.Message}");
+            }
         }
 
         // ── Rescue placement ─────────────────────────────────────────────────

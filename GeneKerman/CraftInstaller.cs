@@ -52,6 +52,12 @@ namespace GeneKerman
                 }
             }
 
+            // Pull off the carried mod list FIRST: the GKMODS block is appended after
+            // both the GKFLAG and GKTSVER blocks, so it must be stripped before either of
+            // those strips runs. The parsed list is used after the craft is written.
+            System.Collections.Generic.List<CkanGenerator.ModEntry> requiredMods;
+            rawData = CkanGenerator.CheckAndStripFromCraft(rawData, out requiredMods);
+
             // Warn the player if this craft uses TweakScale and theirs is missing or a
             // different version, then strip the GKTSVER block. Must run BEFORE the flag
             // strip: the version block is appended after the GKFLAG blocks, and the flag
@@ -100,6 +106,10 @@ namespace GeneKerman
             // Write craft file
             File.WriteAllBytes(finalPath, rawData);
             Debug.Log($"[GeneKerman] Craft installed: {finalPath} ({rawData.Length} bytes)");
+
+            // Drop a .gkmods sidecar and, if the player is missing any of the craft's
+            // mods, write a CKAN modpack they can use to install them.
+            CkanGenerator.OnCraftInstalled(finalPath, requiredMods);
 
             // Write loadmeta if provided
             if (!string.IsNullOrEmpty(loadmetaContent))

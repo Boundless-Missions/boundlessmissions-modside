@@ -991,6 +991,11 @@ namespace GeneKerman.UI
             if (craftData != null)
                 craftData = TweakScaleGuard.EmbedVersionInCraft(craftData);
 
+            // Record the craft's mods so a recipient missing any gets a CKAN modpack.
+            // Appended LAST so the GKMODS block is a clean cut to strip on the other side.
+            if (craftData != null)
+                craftData = CkanGenerator.EmbedModsInCraft(craftData);
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist,

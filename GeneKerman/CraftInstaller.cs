@@ -52,9 +52,16 @@ namespace GeneKerman
                 }
             }
 
-            // Pull off the carried mod list FIRST: the GKMODS block is appended after
-            // both the GKFLAG and GKTSVER blocks, so it must be stripped before either of
-            // those strips runs. The parsed list is used after the craft is written.
+            // Pull off the carried thumbnail FIRST of all: the GKTHUMB block is appended
+            // after every other side-channel block (GKFLAG / GKTSVER / GKMODS), so it must
+            // be stripped before any of them. The PNG is written to KSP's thumbs/ folder
+            // after the craft lands on disk (we need its final name/facility for the path).
+            byte[] thumbPng;
+            rawData = CraftThumb.CheckAndStripFromCraft(rawData, out thumbPng);
+
+            // Then the carried mod list: the GKMODS block sits after the GKFLAG and GKTSVER
+            // blocks, so it must be stripped before either of those strips runs. The parsed
+            // list is used after the craft is written.
             System.Collections.Generic.List<CkanGenerator.ModEntry> requiredMods;
             rawData = CkanGenerator.CheckAndStripFromCraft(rawData, out requiredMods);
 
@@ -110,6 +117,10 @@ namespace GeneKerman
             // Drop a .gkmods sidecar and, if the player is missing any of the craft's
             // mods, write a CKAN modpack they can use to install them.
             CkanGenerator.OnCraftInstalled(finalPath, requiredMods);
+
+            // Write the carried NW-view thumbnail so the craft browser shows it on first
+            // browse instead of KSP's missing-thumbnail placeholder. No-op if none rode along.
+            CraftThumb.InstallThumbnail(finalPath, thumbPng);
 
             // Write loadmeta if provided
             if (!string.IsNullOrEmpty(loadmetaContent))

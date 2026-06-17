@@ -26,6 +26,7 @@ namespace GeneKerman
         const int IMG_H = 1100;
         const int CELL  = 440;          // Each view cell size
         const int RENDER_SIZE = 440;    // Individual render resolution
+        const int THUMB_SIZE = 256;     // Craft-thumbnail render resolution (KSP browser tile)
         const int ISOLATION_LAYER = 30;
         const float PADDING = 1.35f;
 
@@ -112,6 +113,159 @@ namespace GeneKerman
                 Debug.LogError($"[GeneKerman] Blueprint render failed for '{vessel?.vesselName}': {ex}");
                 return VesselDataCollector.CaptureScreenshot();
             }
+        }
+
+        // ── NW-view craft thumbnail ─────────────────────────────────────────
+
+        /// <summary>
+        /// Render just the NW perspective view of the current craft as a square,
+        /// transparent-background PNG sized for KSP's craft-browser tile. Used to embed
+        /// a thumbnail in a shared .craft so the recipient sees the craft on import
+        /// instead of KSP's missing-thumbnail placeholder. Returns null if there's no
+        /// renderable craft or the off-screen capture produced nothing.
+        /// </summary>
+        public static byte[] CaptureNWThumbnail()
+        {
+            try
+            {
+                if (HighLogic.LoadedSceneIsEditor)
+                {
+                    var ship = EditorLogic.fetch?.ship;
+                    if (ship == null || ship.parts == null || ship.parts.Count == 0) return null;
+                    var renderers = CollectRenderers(ship.parts);
+                    if (renderers.Length == 0) return null;
+                    return RenderNWThumbnail(renderers, ComputeBounds(renderers),
+                        Quaternion.identity, ship.parts);
+                }
+                if (HighLogic.LoadedSceneIsFlight)
+                    return CaptureNWThumbnail(FlightGlobals.ActiveVessel);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] NW thumbnail failed: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>NW thumbnail for a specific loaded vessel (used for fleet-extra
+        /// blueprints in a multi-vessel submission). Returns null on failure.</summary>
+        public static byte[] CaptureNWThumbnail(Vessel vessel)
+        {
+            try
+            {
+                if (vessel == null || vessel.parts == null || vessel.parts.Count == 0) return null;
+                var renderers = CollectRenderers(vessel.parts);
+                if (renderers.Length == 0) return null;
+                Quaternion rot = vessel.ReferenceTransform != null
+                    ? vessel.ReferenceTransform.rotation : vessel.transform.rotation;
+                return RenderNWThumbnail(renderers, ComputeBounds(renderers), rot, vessel.parts);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] NW thumbnail failed for '{vessel?.vesselName}': {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Render the single NW view (dual-pass alpha, same as the blueprint)
+        /// to a transparent-background PNG. Mirrors RenderBlueprint's isolation/lighting/
+        /// camera setup but for one view at thumbnail resolution.</summary>
+        private static byte[] RenderNWThumbnail(
+            Renderer[] renderers, Bounds bounds, Quaternion vesselRotation, List<Part> isolationParts)
+        {
+            int layerMask = 1 << ISOLATION_LAYER;
+            var origLayers = IsolatePartLayers(isolationParts, ISOLATION_LAYER);
+
+            var origAmbientMode  = RenderSettings.ambientMode;
+            var origAmbientLight = RenderSettings.ambientLight;
+            RenderSettings.ambientMode  = UnityEngine.Rendering.AmbientMode.Flat;
+            RenderSettings.ambientLight = new Color(0.35f, 0.35f, 0.35f);
+            var fillLightObjects = CreateBlueprintLights(layerMask);
+
+            var rt = new RenderTexture(THUMB_SIZE, THUMB_SIZE, 24, RenderTextureFormat.ARGB32);
+            rt.antiAliasing = 4;
+            rt.Create();
+            var resolveRt = new RenderTexture(THUMB_SIZE, THUMB_SIZE, 0, RenderTextureFormat.ARGB32);
+            resolveRt.antiAliasing = 1;
+            resolveRt.Create();
+
+            var camObj = new GameObject("GK_ThumbCam");
+            var cam = camObj.AddComponent<Camera>();
+            cam.targetTexture = rt;
+            cam.cullingMask = layerMask;
+            cam.nearClipPlane = 0.01f;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.allowHDR = false;
+            cam.allowMSAA = true;
+
+            var readTex = new Texture2D(THUMB_SIZE, THUMB_SIZE, TextureFormat.ARGB32, false);
+
+            // NW view (index 3), rotated into the craft's own frame.
+            ViewDef v = VIEWS[3];
+            ViewDef nw = new ViewDef(v.label,
+                vesselRotation * v.direction, vesselRotation * v.up, v.perspective);
+            ConfigureCamera(cam, nw, bounds);
+
+            cam.backgroundColor = Color.black;
+            cam.Render();
+            Graphics.Blit(rt, resolveRt);
+            RenderTexture.active = resolveRt;
+            readTex.ReadPixels(new Rect(0, 0, THUMB_SIZE, THUMB_SIZE), 0, 0);
+            readTex.Apply();
+            Color32[] black = readTex.GetPixels32();
+
+            cam.backgroundColor = Color.white;
+            cam.Render();
+            Graphics.Blit(rt, resolveRt);
+            RenderTexture.active = resolveRt;
+            readTex.ReadPixels(new Rect(0, 0, THUMB_SIZE, THUMB_SIZE), 0, 0);
+            readTex.Apply();
+            Color32[] white = readTex.GetPixels32();
+            RenderTexture.active = null;
+
+            UnityEngine.Object.DestroyImmediate(readTex);
+            UnityEngine.Object.DestroyImmediate(camObj);
+            rt.Release();
+            UnityEngine.Object.DestroyImmediate(rt);
+            resolveRt.Release();
+            UnityEngine.Object.DestroyImmediate(resolveRt);
+
+            RestorePartLayers(origLayers);
+            foreach (var go in fillLightObjects)
+                UnityEngine.Object.DestroyImmediate(go);
+            RenderSettings.ambientMode  = origAmbientMode;
+            RenderSettings.ambientLight = origAmbientLight;
+
+            // Recover straight-alpha RGBA from the dual passes so the craft sits on a
+            // transparent tile (the black pass is the foreground premultiplied by alpha).
+            var outPix = new Color32[THUMB_SIZE * THUMB_SIZE];
+            bool any = false;
+            for (int i = 0; i < outPix.Length; i++)
+            {
+                Color32 bl = black[i], wh = white[i];
+                float oma = ((wh.r - bl.r) + (wh.g - bl.g) + (wh.b - bl.b)) / (3f * 255f);
+                float a = 1f - oma;
+                if (a <= 0.004f) { outPix[i] = new Color32(0, 0, 0, 0); continue; }
+                any = true;
+                outPix[i] = new Color32(
+                    (byte)Math.Min(255, (int)(bl.r / a + 0.5f)),
+                    (byte)Math.Min(255, (int)(bl.g / a + 0.5f)),
+                    (byte)Math.Min(255, (int)(bl.b / a + 0.5f)),
+                    (byte)Math.Min(255, (int)(a * 255f + 0.5f)));
+            }
+            if (!any)
+            {
+                Debug.LogWarning("[GeneKerman] NW thumbnail capture produced no craft pixels.");
+                return null;
+            }
+
+            var tex = new Texture2D(THUMB_SIZE, THUMB_SIZE, TextureFormat.ARGB32, false);
+            tex.SetPixels32(outPix);
+            tex.Apply();
+            byte[] png = tex.EncodeToPNG();
+            UnityEngine.Object.DestroyImmediate(tex);
+            Debug.Log($"[GeneKerman] NW thumbnail rendered ({png.Length / 1024}KB).");
+            return png;
         }
 
         // ── Scene Capture Entry Points ──────────────────────────────────────

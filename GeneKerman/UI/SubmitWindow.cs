@@ -1005,9 +1005,15 @@ namespace GeneKerman.UI
                 craftData = TweakScaleGuard.EmbedVersionInCraft(craftData);
 
             // Record the craft's mods so a recipient missing any gets a CKAN modpack.
-            // Appended LAST so the GKMODS block is a clean cut to strip on the other side.
+            // Appended after flags/TweakScale so the GKMODS block stays a clean strip.
             if (craftData != null)
                 craftData = CkanGenerator.EmbedModsInCraft(craftData);
+
+            // Embed an NW-view thumbnail rendered from the live editor craft, so the
+            // recipient's craft browser shows it on import instead of KSP's green
+            // placeholder. Appended LAST (stripped first on import).
+            if (craftData != null)
+                craftData = CraftThumb.EmbedThumbForCurrentCraft(craftData);
 
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,

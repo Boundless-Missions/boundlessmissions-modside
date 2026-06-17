@@ -286,8 +286,9 @@ namespace GeneKerman
                 File.WriteAllText(outPath, MiniJSON.Serialize(doc), Encoding.UTF8);
                 Debug.Log($"[GeneKerman] CkanGenerator: wrote modpack for {missing.Count} missing mod(s) → {outPath}");
 
-                Post($"⚠ This craft needs {missing.Count} mod(s) you don't have: {list}. "
-                     + $"A CKAN file to install them was saved to GeneKerman_MissingMods/{Path.GetFileName(outPath)} — "
+                Post($"⚠ Missing {missing.Count} mod(s) for '{context}'",
+                     $"Needs: {list}. A CKAN installer was saved to "
+                     + $"GeneKerman_MissingMods/{Path.GetFileName(outPath)} — "
                      + "open it in CKAN (File ▸ Install from .ckan file).");
             }
             catch (Exception ex)
@@ -491,10 +492,26 @@ namespace GeneKerman
             return r;
         }
 
-        private static void Post(string msg)
+        /// <summary>Surface a missing-mod alert. Prefers the mod's toast notification
+        /// (persistent, styled, dismiss-on-click) over the ephemeral green ScreenMessage,
+        /// which vanished after a few seconds with no way to get it back. Falls back to a
+        /// ScreenMessage only when the mod instance isn't available (e.g. headless).</summary>
+        private static void Post(string title, string body)
         {
-            Debug.LogWarning("[GeneKerman] " + msg);
-            try { ScreenMessages.PostScreenMessage(msg, 12f, ScreenMessageStyle.UPPER_CENTER); }
+            Debug.LogWarning($"[GeneKerman] {title} — {body}");
+
+            var mod = GeneKermanMod.Instance;
+            if (mod != null)
+            {
+                try { mod.ShowNotification(title, body); return; }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] CkanGenerator: notification failed, " +
+                                     $"falling back to screen message: {ex.Message}");
+                }
+            }
+
+            try { ScreenMessages.PostScreenMessage($"{title}: {body}", 12f, ScreenMessageStyle.UPPER_CENTER); }
             catch { /* no screen (headless) — the log line is enough */ }
         }
     }

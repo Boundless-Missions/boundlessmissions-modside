@@ -839,6 +839,7 @@ namespace GeneKerman.UI
                 return;
             }
             string pid = FlightGlobals.ActiveVessel.id.ToString();
+            string vesselName = FlightGlobals.ActiveVessel.vesselName;
 
             // The names the rescuer will see (and must recover) = "{me}'s {kerbal}".
             var taggedKerbals = new List<object>();
@@ -864,7 +865,7 @@ namespace GeneKerman.UI
                             statusMsg = $"✅ Rescue sent to {corp.ownerName}! Your vessel will be removed.";
                             currentBalance -= payment;
                             // Can't Die() the active vessel mid-flight — queue removal for a safe scene.
-                            GeneKermanMod.Instance.QueueRescueVesselRemoval(pid);
+                            GeneKermanMod.Instance.QueueRescueVesselRemoval(pid, vesselName);
                         }
                         else
                         {

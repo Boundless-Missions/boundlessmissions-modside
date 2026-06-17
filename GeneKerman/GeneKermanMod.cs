@@ -608,15 +608,28 @@ namespace GeneKerman
         // Station. rescueSubmittedPids remembers which craft the rescuer handed
         // over per contract, so we know what to remove when the issuer approves.
 
-        private readonly List<string> pendingRescueRemovals = new List<string>();
+        // pid → friendly vessel name, captured at queue time so the removal notice can
+        // still name the craft after it's destroyed.
+        private readonly Dictionary<string, string> pendingRescueRemovals = new Dictionary<string, string>();
         private readonly Dictionary<string, string> rescueSubmittedPids = new Dictionary<string, string>();
 
-        /// <summary>Queue a vessel (by pid) for removal at the next safe scene.</summary>
-        public void QueueRescueVesselRemoval(string pid)
+        /// <summary>Queue a vessel (by pid) for removal at the next safe scene. Pass a
+        /// vesselName when the caller already knows it (e.g. the active vessel); otherwise
+        /// it's resolved from the pid while the craft still exists.</summary>
+        public void QueueRescueVesselRemoval(string pid, string vesselName = null)
         {
             if (string.IsNullOrEmpty(pid)) return;
-            if (!pendingRescueRemovals.Contains(pid)) pendingRescueRemovals.Add(pid);
+            if (!pendingRescueRemovals.ContainsKey(pid))
+                pendingRescueRemovals[pid] = string.IsNullOrEmpty(vesselName)
+                    ? VesselTransfer.GetVesselName(pid) : vesselName;
+
             ProcessPendingRescueRemovals(); // run now if we're already somewhere safe
+
+            // Still queued → we couldn't delete it yet (player is in flight). Warn them so
+            // the craft doesn't silently vanish the next time they reach the Space Center.
+            if (pendingRescueRemovals.ContainsKey(pid))
+                notificationPopup.Show("🛰️ Craft scheduled for removal",
+                    $"\"{pendingRescueRemovals[pid]}\" will be deleted when you return to the Space Center.");
         }
 
         /// <summary>Record the craft a rescuer submitted, so it can be removed once
@@ -635,9 +648,15 @@ namespace GeneKerman
                 return; // can't safely Die() the focused flight vessel — wait
 
             var done = new List<string>();
-            foreach (var pid in pendingRescueRemovals)
-                if (VesselTransfer.RemoveVesselFromSave(pid)) done.Add(pid);
-            foreach (var pid in done) pendingRescueRemovals.Remove(pid);
+            foreach (var kv in pendingRescueRemovals)
+                if (VesselTransfer.RemoveVesselFromSave(kv.Key)) done.Add(kv.Key);
+            foreach (var pid in done)
+            {
+                string name = pendingRescueRemovals[pid];
+                pendingRescueRemovals.Remove(pid);
+                notificationPopup.Show("🗑️ Craft removed",
+                    $"\"{name}\" was removed from your save.");
+            }
         }
 
         public void RefreshContracts()

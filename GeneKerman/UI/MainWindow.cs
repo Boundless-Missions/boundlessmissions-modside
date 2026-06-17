@@ -579,6 +579,7 @@ namespace GeneKerman.UI
         private readonly string[] filterLabels = { "All", "Incoming", "Outgoing" };
         private string openContractId; // If set, shows detail view
         private string rescueAcceptConfirmId; // Contract awaiting modded-target accept confirm
+        private string giveUpConfirmId; // Active contract awaiting a give-up confirm click
 
         /// <summary>Coerce a MiniJSON list into a List&lt;string&gt; (used for rescue kerbal names).</summary>
         private static List<string> ToStringList(List<object> list)
@@ -1065,6 +1066,31 @@ namespace GeneKerman.UI
                     }
                     GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody, reqModlist,
                         rescueSpec, rescueKerbals);
+                }
+
+                // Give Up: the contractor can back out of work they accepted, paying the
+                // agreed fine. Issuer side (outgoing) doesn't give up — they'd cancel.
+                // A two-click confirm guards against fat-fingering away the fine.
+                if (!MiniJSON.GetBool(c, "is_outgoing"))
+                {
+                    string cid = MiniJSON.GetString(c, "contract_id");
+                    int giveUpFine = (int)MiniJSON.GetDouble(c, "fine", 0);
+                    GUILayout.Space(8);
+                    if (giveUpConfirmId == cid)
+                    {
+                        if (GUILayout.Button("⚠ Confirm give up", deleteBtnStyle, GUILayout.Height(30)))
+                        {
+                            giveUpConfirmId = null;
+                            GeneKermanMod.Instance.RunCoroutine(DoGiveUpContract(cid));
+                            openContractId = null;
+                        }
+                    }
+                    else
+                    {
+                        string label = giveUpFine > 0 ? $"🏳️ Give Up (fine {giveUpFine})" : "🏳️ Give Up";
+                        if (GUILayout.Button(label, deleteBtnStyle, GUILayout.Height(30)))
+                            giveUpConfirmId = cid;
+                    }
                 }
             }
             else if (status == "pending")
@@ -1674,7 +1700,8 @@ namespace GeneKerman.UI
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
-                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list (last)
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
+                craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
 
                 string dir = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "ExportedCrafts");
                 System.IO.Directory.CreateDirectory(dir);
@@ -1732,7 +1759,8 @@ namespace GeneKerman.UI
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 payload = FlagTransfer.EmbedFlagsInCraft(craftBytes); // carry custom flags
-                payload = CkanGenerator.EmbedModsInCraft(payload);   // carry mod list (last)
+                payload = CkanGenerator.EmbedModsInCraft(payload);   // carry mod list
+                payload = CraftThumb.EmbedThumbForCurrentCraft(payload); // NW thumbnail (last)
                 fileName = editorCraftName + ".craft";
                 craftName = editorCraftName;
             }
@@ -2084,6 +2112,33 @@ namespace GeneKerman.UI
             });
         }
 
+        private System.Collections.IEnumerator DoGiveUpContract(string contractId)
+        {
+            yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/give_up", "{}", (ok, resp, status) =>
+            {
+                // The endpoint returns 200 + success:false for soft failures (e.g. the
+                // contractor can't cover the fine), so read the body rather than trust
+                // the HTTP status alone — and show the server's own message.
+                var d = MiniJSON.DeserializeDict(resp);
+                bool success = ok && d != null && MiniJSON.GetBool(d, "success", false);
+                string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+
+                if (success)
+                {
+                    SetStatus("🏳️ " + (string.IsNullOrEmpty(msg) ? "Contract given up." : msg));
+                    // Clear the editor enforcer if it was gating parts for this contract.
+                    if (EditorPartEnforcer.Instance != null &&
+                        EditorPartEnforcer.Instance.ActiveContractId == contractId)
+                        EditorPartEnforcer.Instance.StopEnforcing();
+                    RefreshContracts();
+                }
+                else
+                {
+                    SetStatus("(No) " + (string.IsNullOrEmpty(msg) ? "Failed to give up contract." : msg));
+                }
+            });
+        }
+
         private void SetStatus(string msg)
         {
             statusMsg = msg;
@@ -2390,7 +2445,8 @@ namespace GeneKerman.UI
                 craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
                 // Carry the craft's custom mission flags so the buyer sees them.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
-                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list (last)
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
+                craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
             }
             catch (System.Exception ex)
             {

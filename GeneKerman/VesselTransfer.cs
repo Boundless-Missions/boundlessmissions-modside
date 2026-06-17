@@ -167,8 +167,11 @@ namespace GeneKerman
                 byte[] craftBytes = System.IO.File.ReadAllBytes(path);
                 // Carry custom mission flags inside the blueprint too.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
-                // …and the mod list (appended last so the strip stays a clean cut).
+                // …the mod list…
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
+                // …and an NW-view thumbnail rendered from this specific vessel (appended
+                // last so every strip stays a clean cut on import).
+                craftBytes = CraftThumb.EmbedThumbForVessel(craftBytes, v);
 
                 ConfigNode cn = vesselNode.AddNode("GKCRAFT");
                 cn.AddValue("name", System.IO.Path.GetFileName(path));
@@ -662,6 +665,22 @@ namespace GeneKerman
         }
 
         // ── Remove a vessel from this save ───────────────────────────────────
+
+        /// <summary>
+        /// Friendly name of a vessel by pid GUID, looked up while it still exists.
+        /// Used for player-facing removal notices so the message can name the craft
+        /// even after it's been destroyed. Falls back to a generic label.
+        /// </summary>
+        public static string GetVesselName(string pid)
+        {
+            Guid g;
+            if (string.IsNullOrEmpty(pid) || !Guid.TryParse(pid, out g))
+                return "Your craft";
+            foreach (var v in FlightGlobals.Vessels)
+                if (v != null && v.id == g)
+                    return string.IsNullOrEmpty(v.vesselName) ? "Your craft" : v.vesselName;
+            return "Your craft";
+        }
 
         /// <summary>
         /// Remove a vessel (by pid GUID) from the current save and drop its crew

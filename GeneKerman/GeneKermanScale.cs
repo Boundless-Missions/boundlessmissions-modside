@@ -54,6 +54,26 @@ namespace GeneKerman
         /// See <see cref="StatFields"/> for which fields travel.</summary>
         [KSPField(isPersistant = true)] public string gkFields = "";
 
+        // ── Persistent EDITOR layout pin (filled in by ScaleBridge on the sender) ──
+        //
+        // Surface attachment to a rescaled parent only reconstructs correctly with KSP-Recall
+        // (or matching TweakScale) re-seating the child off the scaled collider. Without it,
+        // KSP re-seats the child off the PREFAB (unscaled) node and the part collapses inward
+        // or flings off (radial structures especially). Baking the part's correct `pos` into
+        // the craft is not enough: KSP's re-seat overrides `pos` a few frames after load and on
+        // every undo/redo. So we also record each part's correct position in ROOT-LOCAL space
+        // (frame-independent) and re-assert it over the settle window, pinning the layout the
+        // sender actually had regardless of how KSP re-seats. Independent of gkActive so an
+        // unscaled child of a scaled parent can be pinned too. Editor-only.
+
+        /// <summary>True if this part carries a baked editor-layout pin.</summary>
+        [KSPField(isPersistant = true)] public bool gkPin = false;
+
+        /// <summary>The part's correct position relative to the ship root, expressed in the
+        /// root part's local frame (so it survives the ship being placed differently on the
+        /// receiver). Applied by <see cref="ApplyPin"/>.</summary>
+        [KSPField(isPersistant = true)] public Vector3 gkPinPos = Vector3.zero;
+
         // ── Which module fields we snapshot & restore ────────────────────────────
         //
         // We carry only simple scalar (float) fields whose value TweakScale scales.
@@ -74,24 +94,62 @@ namespace GeneKerman
 
         // ── Lifecycle ────────────────────────────────────────────────────────────
 
+        public override void OnLoad(ConfigNode node)
+        {
+            base.OnLoad(node);
+            if (!gkActive && !gkPin) return;
+
+            // Apply the GEOMETRY (model + attach nodes) as early as possible. OnLoad runs
+            // before KSP builds the physics joints between stacked parts in flight, so the
+            // joints anchor on the already-scaled node positions instead of compressing the
+            // structure inward (which would then get persisted into orgPos on save). OnStart
+            // re-applies everything (incl. mass/stats/drag, and to win over TweakScale's
+            // module ordering); the geometry calls here are idempotent so re-running is safe.
+            try
+            {
+                if (gkActive && gkLinear > 0f) { ScaleModel(); ScaleNodes(); }
+                ApplyPin();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] GeneKermanScale.OnLoad scale failed on '{part?.partInfo?.name}': {ex.Message}");
+            }
+        }
+
         public override void OnStart(StartState state)
         {
             base.OnStart(state);
-            if (!gkActive) return;
+            if (!gkActive && !gkPin) return;
 
             ApplyScale();
 
-            // TweakScale (if present on this part) also runs on start; whichever module
-            // applies LAST wins. Re-assert a frame later so we are authoritative no matter
-            // the module order. `part` is a MonoBehaviour, so it can host the coroutine.
-            try { part.StartCoroutine(ReapplyNextFrame()); }
+            // TweakScale (if present) and KSP's own surface-attach re-projection both run on
+            // start, the latter finishing a few frames AFTER load — so a single re-apply can be
+            // partially overwritten (the panel moves out but not all the way). Re-assert the
+            // geometry over several frames so we settle last. Idempotent, so this just converges.
+            try { part.StartCoroutine(ReapplyGeometry()); }
             catch { /* no coroutine host (prefab compile) — the OnStart pass is enough */ }
         }
 
-        private IEnumerator ReapplyNextFrame()
+        private IEnumerator ReapplyGeometry()
         {
-            yield return new WaitForFixedUpdate();
-            ApplyScale();
+            for (int i = 0; i < 12; i++)
+            {
+                yield return new WaitForFixedUpdate();
+                ApplyGeometry();
+            }
+        }
+
+        /// <summary>Re-assert the scaled geometry after the editor rebuilds the ship (undo/redo).
+        /// That rebuild re-runs KSP's surface-attach re-projection without re-triggering OnStart,
+        /// so a surface-attached child reverts onto its prefab/unscaled node positions and gets
+        /// flung off the vessel. Restart the same multi-frame settle OnStart uses so we converge
+        /// last. No-op on dormant/unscaled parts; driven by <see cref="ScaleEditorReapply"/>.</summary>
+        public void RequestGeometryReassert()
+        {
+            if (!gkActive && !gkPin) return;
+            try { StartCoroutine(ReapplyGeometry()); }
+            catch { ApplyGeometry(); } // no coroutine host — single best-effort pass
         }
 
         // ── The applicator ───────────────────────────────────────────────────────
@@ -101,19 +159,51 @@ namespace GeneKerman
         /// so calling it repeatedly converges instead of compounding.</summary>
         public void ApplyScale()
         {
-            if (!gkActive || gkLinear <= 0f) return;
+            if (!gkActive && !gkPin) return;
             try
             {
-                ScaleModel();
-                ScaleNodes();
-                if (gkMass > 0f) part.mass = gkMass;
-                ApplyStatFields();
-                RebuildDragCubes();
+                ApplyGeometry();
+                if (gkActive && gkLinear > 0f)
+                {
+                    if (gkMass > 0f) part.mass = gkMass;
+                    ApplyStatFields();
+                    RebuildDragCubes();
+                }
             }
             catch (Exception ex)
             {
                 Debug.LogWarning($"[GeneKerman] GeneKermanScale.ApplyScale failed on '{part?.partInfo?.name}': {ex.Message}");
             }
+        }
+
+        /// <summary>The cheap, repeatable part of the apply: model scale, attach-node offsets,
+        /// and the editor-layout pin. Safe to call every frame (idempotent); excludes the
+        /// one-shot mass/stat/drag-cube work in <see cref="ApplyScale"/>.</summary>
+        private void ApplyGeometry()
+        {
+            if (gkActive && gkLinear > 0f)
+            {
+                ScaleModel();
+                ScaleNodes();
+            }
+            ApplyPin();
+        }
+
+        /// <summary>Force the part back to the baked layout position the sender had, re-anchored
+        /// on the live ship root so it's independent of where the ship sits on the receiver.
+        /// Counters KSP's surface-attach re-seat (which otherwise pulls a child off a rescaled
+        /// parent). Editor-only; in flight physics owns the layout. Each part is pinned on its
+        /// own — moving a parent does not move its children's transforms in the editor — so the
+        /// whole layout reconstructs exactly when every part re-asserts.</summary>
+        private void ApplyPin()
+        {
+            if (!gkPin || !HighLogic.LoadedSceneIsEditor) return;
+
+            Part root = part.localRoot;
+            if (root == null || root == part) return; // the root is its own anchor — nothing to do
+
+            Transform rt = root.transform;
+            part.transform.position = rt.position + rt.rotation * gkPinPos;
         }
 
         private void ScaleModel()

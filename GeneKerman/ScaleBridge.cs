@@ -102,15 +102,55 @@ namespace GeneKerman
         {
             try
             {
+                // Primary: the linear factor actually baked onto the model transform.
                 Transform model = part.transform.Find("model");
                 Transform prefabModel = part.partInfo?.partPrefab?.transform?.Find("model");
-                if (model == null || prefabModel == null) return 1f;
+                if (model != null && prefabModel != null)
+                {
+                    float baseScale = prefabModel.localScale.x;
+                    if (Math.Abs(baseScale) >= 1e-6f)
+                    {
+                        float fromModel = model.localScale.x / baseScale;
+                        if (Math.Abs(fromModel - 1f) >= SCALE_EPSILON) return fromModel;
+                    }
+                }
 
-                float baseScale = prefabModel.localScale.x;
-                if (Math.Abs(baseScale) < 1e-6f) return 1f;
-                return model.localScale.x / baseScale;
+                // Fallback: some parts (expandable/animated — e.g. the SSPX centrifuge) don't
+                // carry TweakScale's factor on the "model" transform, so the ratio above reads
+                // ~1 even though the part is scaled. Read the factor straight off the live
+                // TweakScale module (currentScale / defaultScale): a pure linear number,
+                // version-independent for geometry.
+                float fromTweakScale = TweakScaleFactor(part);
+                if (Math.Abs(fromTweakScale - 1f) >= SCALE_EPSILON) return fromTweakScale;
+
+                return 1f;
             }
             catch { return 1f; }
+        }
+
+        /// <summary>The linear factor TweakScale applied, read as currentScale / defaultScale off
+        /// the live module via reflection (1 if absent/unreadable). The fields are floating-point
+        /// — double in Lisias' fork, float in others — so we accept either.</summary>
+        private static float TweakScaleFactor(Part part)
+        {
+            if (part?.Modules == null) return 1f;
+            foreach (PartModule pm in part.Modules)
+            {
+                if (pm == null || pm.GetType().Name != TWEAKSCALE_MODULE) continue;
+                double cur = ReadFloatingField(pm, "currentScale");
+                double def = ReadFloatingField(pm, "defaultScale");
+                return (def > 1e-6 && cur > 0) ? (float)(cur / def) : 1f;
+            }
+            return 1f;
+        }
+
+        private static double ReadFloatingField(object obj, string name)
+        {
+            FieldInfo fi = obj.GetType().GetField(name, BindingFlags.Public | BindingFlags.Instance);
+            object v = fi?.GetValue(obj);
+            if (v is double d) return d;
+            if (v is float f) return f;
+            return double.NaN;
         }
 
         /// <summary>Encode the curated stat fields (see GeneKermanScale.StatFields) of a
@@ -163,10 +203,12 @@ namespace GeneKerman
                 foreach (Part p in liveParts)
                     if (p != null) byId[p.craftID] = p;
 
+                var matched = new Part[partNodes.Length]; // node → live part (for the pos rewrite)
                 int scaled = 0;
                 for (int i = 0; i < partNodes.Length; i++)
                 {
                     Part part = MatchCraftPart(partNodes[i], byId, liveParts, i);
+                    matched[i] = part;
                     if (part?.partInfo == null) continue;
 
                     if (SnapshotPart(part, partNodes[i]))
@@ -180,6 +222,8 @@ namespace GeneKerman
 
                 if (scaled == 0) return craftBytes; // unscaled craft — leave it byte-for-byte
 
+                RewritePositionsFromLive(partNodes, matched, liveParts);
+
                 Debug.Log($"[GeneKerman] ScaleBridge: snapshotted {scaled} rescaled part(s) into craft blueprint.");
                 return Encoding.UTF8.GetBytes(SerializeBareCraft(root));
             }
@@ -189,6 +233,90 @@ namespace GeneKerman
                 return craftBytes;
             }
         }
+
+        /// <summary>Overwrite each artifacted part's craft <c>pos</c> with its true live
+        /// position. KSP serializes a surface-attached part on a SCALED parent using a
+        /// KSP-Recall-dependent attachment encoding, so the raw craft <c>pos</c> only renders
+        /// correctly WITH KSP-Recall installed; the live editor transform is the actually-
+        /// correct layout. We re-anchor every part on the (artifact-free) root part and rewrite
+        /// ONLY parts whose live position disagrees with the craft — correctly-placed parts are
+        /// left byte-identical, so this is surgical: it touches the misplaced parts and nothing
+        /// else.</summary>
+        private static void RewritePositionsFromLive(ConfigNode[] partNodes, Part[] matched, IList<Part> liveParts)
+        {
+            try
+            {
+                Part liveRoot = null;
+                foreach (Part p in liveParts)
+                    if (p != null && p.parent == null) { liveRoot = p; break; }
+                if (liveRoot == null) return;
+
+                // Root's craft pos is the anchor shared by the craft frame and the live frame.
+                // If we can't locate it, bail rather than risk mis-anchoring the whole craft.
+                bool haveRoot = false;
+                Vector3 rootCraftPos = Vector3.zero;
+                for (int i = 0; i < matched.Length; i++)
+                    if (matched[i] == liveRoot && TryParseVec3(partNodes[i].GetValue("pos"), out rootCraftPos))
+                    { haveRoot = true; break; }
+                if (!haveRoot) return;
+
+                Vector3 liveRootPos = liveRoot.transform.position;
+                Quaternion rootInv = Quaternion.Inverse(liveRoot.transform.rotation);
+                int fixedCount = 0;
+                int pinnedCount = 0;
+                for (int i = 0; i < partNodes.Length; i++)
+                {
+                    Part part = matched[i];
+                    if (part == null) continue;
+
+                    Vector3 liveOffset = part.transform.position - liveRootPos;
+
+                    // Bake a ROOT-LOCAL layout pin into every part. The `pos` rewrite below makes
+                    // the craft LOAD correct, but KSP's surface-attach re-seat overrides `pos` a
+                    // few frames later and on every undo; the pin lets GeneKermanScale re-assert
+                    // the true layout at runtime. Root-local so it survives the receiver placing
+                    // the ship differently. Skip the root itself (it is its own anchor).
+                    if (part != liveRoot)
+                    {
+                        WritePin(partNodes[i], rootInv * liveOffset);
+                        pinnedCount++;
+                    }
+
+                    if (!TryParseVec3(partNodes[i].GetValue("pos"), out Vector3 craftPos)) continue;
+
+                    Vector3 craftOffset = craftPos - rootCraftPos;
+                    if ((liveOffset - craftOffset).sqrMagnitude < 0.0025f) continue; // <0.05m: already correct
+
+                    partNodes[i].SetValue("pos", FormatVec3(rootCraftPos + liveOffset), true);
+                    fixedCount++;
+                }
+
+                if (fixedCount > 0 || pinnedCount > 0)
+                    Debug.Log($"[GeneKerman] ScaleBridge: re-anchored {fixedCount} part position(s) and pinned {pinnedCount} to the live layout.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] ScaleBridge.RewritePositionsFromLive failed: {ex.Message}");
+            }
+        }
+
+        private static bool TryParseVec3(string s, out Vector3 v)
+        {
+            v = Vector3.zero;
+            if (string.IsNullOrEmpty(s)) return false;
+            string[] a = s.Split(',');
+            if (a.Length != 3) return false;
+            if (float.TryParse(a[0].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float x) &&
+                float.TryParse(a[1].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float y) &&
+                float.TryParse(a[2].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float z))
+            { v = new Vector3(x, y, z); return true; }
+            return false;
+        }
+
+        private static string FormatVec3(Vector3 v)
+            => v.x.ToString("R", CultureInfo.InvariantCulture) + "," +
+               v.y.ToString("R", CultureInfo.InvariantCulture) + "," +
+               v.z.ToString("R", CultureInfo.InvariantCulture);
 
         /// <summary>Resolve a .craft PART node to its live Part by craftID (exact), falling
         /// back to index alignment if the id can't be parsed.</summary>
@@ -270,6 +398,16 @@ namespace GeneKerman
         }
 
         // ── ConfigNode helpers ───────────────────────────────────────────────────
+
+        /// <summary>Record a root-local layout pin into a part node's GeneKermanScale MODULE so
+        /// the receiver can re-assert the true position over KSP's surface-attach re-seat. The
+        /// node exists on every part (ModuleManager patch); we add one only if it somehow doesn't.</summary>
+        private static void WritePin(ConfigNode partNode, Vector3 rootLocalPos)
+        {
+            ConfigNode mod = FindOrAddModuleNode(partNode, MODULE_NAME);
+            mod.SetValue("gkPin", "True", true);
+            mod.SetValue("gkPinPos", FormatVec3(rootLocalPos), true);
+        }
 
         private static ConfigNode FindOrAddModuleNode(ConfigNode partNode, string moduleName)
         {

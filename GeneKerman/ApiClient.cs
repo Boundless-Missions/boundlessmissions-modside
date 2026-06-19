@@ -291,6 +291,7 @@ namespace GeneKerman
             List<byte[]> screenshots, List<string> screenshotNames,
             string modlist,
             string usedModlist,
+            string usedParts,
             ApiCallback callback)
         {
             string url = serverUrl + "/api/v1/contracts/" + contractId + "/submit";
@@ -345,6 +346,11 @@ namespace GeneKerman
             // these against the contract's required modlist.
             if (!string.IsNullOrEmpty(usedModlist))
                 form.Add(new MultipartFormDataSection("used_modlist", usedModlist));
+
+            // Per-part classification of the craft — server re-checks the contract's
+            // mission-limit constraints (forbidden/required parts, fuels, engine types).
+            if (!string.IsNullOrEmpty(usedParts))
+                form.Add(new MultipartFormDataSection("used_parts", usedParts));
 
             using (var req = UnityWebRequest.Post(url, form))
             {

@@ -786,7 +786,8 @@ namespace GeneKerman.UI
                     // and title turn red only while that contract's part filter is
                     // actively being enforced in the editor — not merely present.
                     string modlist = MiniJSON.GetString(c, "modlist", "");
-                    bool restricted = !string.IsNullOrEmpty(modlist);
+                    bool hasPartLimits = !ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints")).IsEmpty;
+                    bool restricted = !string.IsNullOrEmpty(modlist) || hasPartLimits;
                     bool filterActive = restricted
                         && EditorPartEnforcer.Instance != null
                         && EditorPartEnforcer.Instance.IsEnforcing()
@@ -971,16 +972,21 @@ namespace GeneKerman.UI
             if (HighLogic.LoadedSceneIsEditor && status == "active")
             {
                 string reqModlist = MiniJSON.GetString(c, "modlist", "");
+                ContractConstraints limits = ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints"));
                 GUILayout.BeginVertical(boxDarkStyle);
                 GUILayout.Label("🛠 Required Mods", headerStyle);
 
-                if (string.IsNullOrEmpty(reqModlist))
+                if (string.IsNullOrEmpty(reqModlist) && limits.IsEmpty)
                 {
                     GUILayout.Label("No part restriction — all parts allowed.", labelStyle);
                 }
                 else
                 {
-                    GUILayout.Label(reqModlist, labelStyle);
+                    if (!string.IsNullOrEmpty(reqModlist))
+                        GUILayout.Label(reqModlist, labelStyle);
+                    // Mission part limits ("can't use the Thud", "nuclear only", ...).
+                    if (!limits.IsEmpty)
+                        GUILayout.Label("⚠ Mission limits — " + limits.Describe(), labelStyle);
                     GUILayout.Space(5);
 
                     bool currentlyEnforcing = EditorPartEnforcer.Instance != null &&
@@ -992,7 +998,7 @@ namespace GeneKerman.UI
                     if (enforce != currentlyEnforcing)
                     {
                         if (enforce)
-                            EditorPartEnforcer.Instance?.EnforceModlist(openContractId, reqModlist);
+                            EditorPartEnforcer.Instance?.EnforceModlist(openContractId, reqModlist, limits);
                         else
                             EditorPartEnforcer.Instance?.StopEnforcing();
                     }
@@ -1057,6 +1063,7 @@ namespace GeneKerman.UI
                     string reqSit = MiniJSON.GetString(c, "required_situation", "");
                     string reqBody = MiniJSON.GetString(c, "required_body", "");
                     string reqModlist = MiniJSON.GetString(c, "modlist", "");
+                    ContractConstraints limits = ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints"));
                     RescueTargetSpec rescueSpec = null;
                     List<string> rescueKerbals = null;
                     if (mT == "rescue")
@@ -1065,7 +1072,7 @@ namespace GeneKerman.UI
                         rescueKerbals = ToStringList(MiniJSON.GetList(c, "rescue_kerbals"));
                     }
                     GeneKermanMod.Instance.OpenSubmitWindow(cid, mission, mT, reqSit, reqBody, reqModlist,
-                        rescueSpec, rescueKerbals);
+                        rescueSpec, rescueKerbals, limits);
                 }
 
                 // Give Up: the contractor can back out of work they accepted, paying the
@@ -1907,6 +1914,9 @@ namespace GeneKerman.UI
 
         public void RefreshContracts()
         {
+            // Make sure the bot has this install's part list so it can resolve the
+            // exact parts named in any mission limits (hash-gated, ~once per session).
+            PartCatalogUploader.EnsureUploaded(GeneKermanMod.Instance.Api);
             loadingContracts = true;
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetActiveContracts((ok, data, err) =>
             {

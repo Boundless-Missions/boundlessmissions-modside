@@ -585,10 +585,11 @@ namespace GeneKerman
 
         public void OpenSubmitWindow(string contractId, string mission,
             string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "", string requiredModlist = "",
-            RescueTargetSpec rescueTarget = null, List<string> rescueKerbals = null)
+            RescueTargetSpec rescueTarget = null, List<string> rescueKerbals = null,
+            ContractConstraints constraints = null)
         {
             submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist,
-                rescueTarget, rescueKerbals);
+                rescueTarget, rescueKerbals, constraints);
         }
 
         public void RunCoroutine(IEnumerator routine)

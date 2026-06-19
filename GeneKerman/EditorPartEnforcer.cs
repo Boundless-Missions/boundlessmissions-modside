@@ -13,6 +13,7 @@ namespace GeneKerman
         public string ActiveContractId { get; private set; }
         private HashSet<string> allowedMods;
         private List<string> excludePaths; // partUrl prefixes to block even if folder is allowed
+        private ContractConstraints constraints; // part-limit rules (may be null)
         private bool isEnforcing;
 
         void Awake()
@@ -22,12 +23,18 @@ namespace GeneKerman
 
         public void EnforceModlist(string contractId, string modlistCsv)
         {
+            EnforceModlist(contractId, modlistCsv, null);
+        }
+
+        public void EnforceModlist(string contractId, string modlistCsv, ContractConstraints partLimits)
+        {
             ActiveContractId = contractId;
+            constraints = (partLimits != null && !partLimits.IsEmpty) ? partLimits : null;
+
             if (string.IsNullOrEmpty(modlistCsv))
             {
                 allowedMods = null;
                 excludePaths = null;
-                isEnforcing = false;
             }
             else
             {
@@ -39,9 +46,10 @@ namespace GeneKerman
                     if (t.StartsWith("-")) excludePaths.Add(t.Substring(1));
                     else allowedMods.Add(t);
                 }
-                isEnforcing = true;
             }
 
+            // Enforce when either a modlist allow-list or part-limit rules apply.
+            isEnforcing = allowedMods != null || constraints != null;
             RefreshEditor();
         }
 
@@ -51,6 +59,7 @@ namespace GeneKerman
             isEnforcing = false;
             allowedMods = null;
             excludePaths = null;
+            constraints = null;
             RefreshEditor();
         }
 
@@ -86,7 +95,12 @@ namespace GeneKerman
 
         private bool PartFilterFunc(AvailablePart part)
         {
-            if (!isEnforcing || allowedMods == null) return true;
+            if (!isEnforcing) return true;
+
+            // Part-limit rules: hide parts that break a "forbidden" constraint.
+            if (constraints != null && constraints.IsForbidden(part)) return false;
+
+            if (allowedMods == null) return true;
 
             string modFolder = GetModFolder(part);
             if (string.IsNullOrEmpty(modFolder)) return true;
@@ -104,6 +118,9 @@ namespace GeneKerman
 
             return true;
         }
+
+        /// <summary>The active contract's part limits, or null. Used by the submit gate.</summary>
+        public ContractConstraints ActiveConstraints => isEnforcing ? constraints : null;
 
         private string GetModFolder(AvailablePart part)
         {

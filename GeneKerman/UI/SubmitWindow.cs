@@ -37,6 +37,7 @@ namespace GeneKerman.UI
         // Rescue mission data
         private RescueTargetSpec rescueTarget;
         private List<string> rescueKerbals;
+        private ContractConstraints partLimits; // mission part-usage limits (may be null)
         private bool IsRescue { get { return missionType == "rescue"; } }
 
         private Vector2 scrollPos;
@@ -91,7 +92,8 @@ namespace GeneKerman.UI
 
         public void Open(string contractId, string mission,
             string type = "active_vessel", string situation = "", string body = "", string modlist = "",
-            RescueTargetSpec rescueTargetSpec = null, List<string> rescueKerbalNames = null)
+            RescueTargetSpec rescueTargetSpec = null, List<string> rescueKerbalNames = null,
+            ContractConstraints constraints = null)
         {
             ContractId = contractId;
             ContractMission = mission;
@@ -100,6 +102,7 @@ namespace GeneKerman.UI
             requiredBody = body ?? "";
             rescueTarget = rescueTargetSpec;
             rescueKerbals = rescueKerbalNames;
+            partLimits = (constraints != null && !constraints.IsEmpty) ? constraints : null;
             // For rescue, derive the body the rescuer must reach from the target.
             if (IsRescue && rescueTarget != null && string.IsNullOrEmpty(requiredBody))
                 requiredBody = rescueTarget.body;
@@ -875,6 +878,20 @@ namespace GeneKerman.UI
         {
             yield return new WaitForSeconds(1.5f);
 
+            // Mission-limit gate: reject before uploading anything if the craft
+            // breaks a part-usage constraint. The server re-checks authoritatively,
+            // but failing here is instant and explains exactly what's wrong.
+            if (partLimits != null && !partLimits.IsEmpty)
+            {
+                var violations = partLimits.CheckCraft(GetSubmissionParts());
+                if (violations.Count > 0)
+                {
+                    isSubmitting = false;
+                    statusMsg = "❌ Mission limits not met:\n- " + string.Join("\n- ", violations.ToArray());
+                    yield break;
+                }
+            }
+
             byte[] craftData = null;
             string craftName = null;
             string loadmeta = null;
@@ -988,6 +1005,9 @@ namespace GeneKerman.UI
             // client-side gate.
             string usedModlist = CollectUsedModFolders();
 
+            // Per-part summary for the server's authoritative mission-limit re-check.
+            string usedParts = CollectUsedPartsJson();
+
             // For rescue, remember which craft we handed over so it can be removed
             // from our save once the issuer approves and it's delivered to them.
             string submittedPid = (IsRescue && FlightGlobals.ActiveVessel != null)
@@ -1017,7 +1037,7 @@ namespace GeneKerman.UI
 
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
-                vesselNodeData, screenshots, ssNames, modlist, usedModlist,
+                vesselNodeData, screenshots, ssNames, modlist, usedModlist, usedParts,
                 (ok, resp, status) =>
                 {
                     isSubmitting = false;
@@ -1097,18 +1117,40 @@ namespace GeneKerman.UI
             return "❌ Illegal parts for this contract:\n" + string.Join("\n", bad.ToArray());
         }
 
+        // The parts of the craft being submitted: editor ship for craft builds,
+        // active vessel otherwise. Shared by the modlist, mission-limit and
+        // used-parts collectors so they all judge the same set of parts.
+        private System.Collections.Generic.IEnumerable<Part> GetSubmissionParts()
+        {
+            if (missionType == "craft_build")
+                return EditorLogic.fetch?.ship?.parts;
+            return FlightGlobals.ActiveVessel?.parts;
+        }
+
+        // Per-part classification of the submitted craft (title, propellants,
+        // engine/part categories) as a JSON array, so the server can re-verify
+        // the contract's mission limits independently of the client gate.
+        private string CollectUsedPartsJson()
+        {
+            var parts = GetSubmissionParts();
+            if (parts == null) return null;
+
+            var list = new List<object>();
+            foreach (var part in parts)
+            {
+                if (part == null) continue;
+                list.Add(PartClassifier.Classify(part).ToDict());
+            }
+            return list.Count > 0 ? MiniJSON.Serialize(list) : null;
+        }
+
         // Distinct top-level mod folders used by the craft being submitted (editor ship
         // for craft builds, active vessel otherwise). Sent to the server for validation.
         private string CollectUsedModFolders()
         {
             var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            System.Collections.Generic.IEnumerable<Part> parts = null;
-            if (missionType == "craft_build")
-                parts = EditorLogic.fetch?.ship?.parts;
-            else
-                parts = FlightGlobals.ActiveVessel?.parts;
-
+            System.Collections.Generic.IEnumerable<Part> parts = GetSubmissionParts();
             if (parts == null) return null;
 
             foreach (var part in parts)

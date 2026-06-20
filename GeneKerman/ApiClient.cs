@@ -292,6 +292,7 @@ namespace GeneKerman
             string modlist,
             string usedModlist,
             string usedParts,
+            string deltaVVac,
             ApiCallback callback)
         {
             string url = serverUrl + "/api/v1/contracts/" + contractId + "/submit";
@@ -351,6 +352,10 @@ namespace GeneKerman
             // mission-limit constraints (forbidden/required parts, fuels, engine types).
             if (!string.IsNullOrEmpty(usedParts))
                 form.Add(new MultipartFormDataSection("used_parts", usedParts));
+
+            // Craft's vacuum Δv (m/s) — server re-checks the contract's min/max-Δv limit.
+            if (!string.IsNullOrEmpty(deltaVVac))
+                form.Add(new MultipartFormDataSection("delta_v_vac", deltaVVac));
 
             using (var req = UnityWebRequest.Post(url, form))
             {

@@ -878,12 +878,17 @@ namespace GeneKerman.UI
         {
             yield return new WaitForSeconds(1.5f);
 
+            // Craft's vacuum Δv (editor = full-fuel design, flight = current). Read
+            // once: used by the gate below and reported to the server for the
+            // authoritative Δv check. -1 when unavailable (Δv limit then skipped).
+            double deltaVVac = CraftDeltaV.TotalVacuum();
+
             // Mission-limit gate: reject before uploading anything if the craft
             // breaks a part-usage constraint. The server re-checks authoritatively,
             // but failing here is instant and explains exactly what's wrong.
             if (partLimits != null && !partLimits.IsEmpty)
             {
-                var violations = partLimits.CheckCraft(GetSubmissionParts());
+                var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac);
                 if (violations.Count > 0)
                 {
                     isSubmitting = false;
@@ -1008,6 +1013,12 @@ namespace GeneKerman.UI
             // Per-part summary for the server's authoritative mission-limit re-check.
             string usedParts = CollectUsedPartsJson();
 
+            // Vacuum Δv (m/s) for the server's Δv-limit re-check, invariant-formatted
+            // so the decimal point survives locales. null when unavailable.
+            string deltaVField = deltaVVac >= 0
+                ? deltaVVac.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)
+                : null;
+
             // For rescue, remember which craft we handed over so it can be removed
             // from our save once the issuer approves and it's delivered to them.
             string submittedPid = (IsRescue && FlightGlobals.ActiveVessel != null)
@@ -1038,6 +1049,7 @@ namespace GeneKerman.UI
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist, usedParts,
+                deltaVField,
                 (ok, resp, status) =>
                 {
                     isSubmitting = false;

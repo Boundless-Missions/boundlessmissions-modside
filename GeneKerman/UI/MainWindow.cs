@@ -580,6 +580,7 @@ namespace GeneKerman.UI
         private string openContractId; // If set, shows detail view
         private string rescueAcceptConfirmId; // Contract awaiting modded-target accept confirm
         private string giveUpConfirmId; // Active contract awaiting a give-up confirm click
+        private bool logoutAllConfirm;  // "Log out all devices" awaiting a confirm click
 
         /// <summary>Coerce a MiniJSON list into a List&lt;string&gt; (used for rescue kerbal names).</summary>
         private static List<string> ToStringList(List<object> list)
@@ -1372,7 +1373,49 @@ namespace GeneKerman.UI
                 GeneKermanMod.Instance.ShowLinkWindow = true;
                 SetStatus("Account unlinked.");
             }
+
+            // Log out of all devices — invalidates every session token linked to
+            // this account (including this one). A two-click confirm guards against
+            // an accidental tap, since it logs this device out too.
+            GUILayout.Space(6);
+            if (logoutAllConfirm)
+            {
+                GUILayout.Label("This logs out every device, including this one. Continue?", labelStyle);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button("⚠ Confirm log out all", deleteBtnStyle, GUILayout.Height(28)))
+                {
+                    logoutAllConfirm = false;
+                    GeneKermanMod.Instance.RunCoroutine(DoLogoutAllDevices());
+                }
+                if (GUILayout.Button("Cancel", GUILayout.Height(28)))
+                    logoutAllConfirm = false;
+                GUILayout.EndHorizontal();
+            }
+            else if (GUILayout.Button("🔒 Log Out All Devices", GUILayout.Height(28)))
+            {
+                logoutAllConfirm = true;
+            }
             GUILayout.EndVertical();
+        }
+
+        /// Calls the server to invalidate every token for this account. On success
+        /// our token is already cleared (by ApiClient.LogoutAllDevices), so return
+        /// to the link screen. On failure nothing was revoked — stay linked.
+        private System.Collections.IEnumerator DoLogoutAllDevices()
+        {
+            yield return GeneKermanMod.Instance.Api.LogoutAllDevices((ok, resp, status) =>
+            {
+                if (ok)
+                {
+                    GeneKermanMod.Instance.ShowMainWindow = false;
+                    GeneKermanMod.Instance.ShowLinkWindow = true;
+                    SetStatus("Logged out of all devices.");
+                }
+                else
+                {
+                    SetStatus("(No) Could not log out all devices — try again.");
+                }
+            });
         }
 
         private void DrawStatRow(string label, string value)

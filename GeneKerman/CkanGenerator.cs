@@ -54,6 +54,11 @@ namespace GeneKerman
         // is a per-instance suffix, not part of the part name.
         private static readonly Regex PartLineRx =
             new Regex(@"(?m)^\s*part\s*=\s*(.+?)\s*$", RegexOptions.Compiled);
+        // KIS records each stored item's part as `partName = <name>` (stock items in a
+        // .craft already ride the `part = ` lines above). Caught so inventory-only mods
+        // aren't dropped from the modpack.
+        private static readonly Regex PartNameLineRx =
+            new Regex(@"(?m)^\s*partName\s*=\s*(.+?)\s*$", RegexOptions.Compiled);
         private static readonly Regex InstanceSuffixRx =
             new Regex(@"_\d+$", RegexOptions.Compiled);
 
@@ -111,6 +116,51 @@ namespace GeneKerman
             return CollectMods(parts);
         }
 
+        /// <summary>Recursively gather the part names of items stashed inside inventory
+        /// modules — stock <c>ModuleInventoryPart</c> (STOREDPART nodes) and KIS
+        /// <c>ModuleKISInventory</c> (ITEM nodes). These items are never vessel parts, so
+        /// the normal part walk misses the mods they come from; without this a craft that
+        /// only carries (say) a deployed-science part inside a container would ship without
+        /// listing that mod. Recurses, so a container nested inside another is covered.</summary>
+        private static void CollectInventoryPartNames(ConfigNode node, List<string> names)
+        {
+            if (node == null) return;
+            for (int i = 0; i < node.nodes.Count; i++)
+            {
+                ConfigNode child = node.nodes[i];
+                if (child.name == "STOREDPART" || child.name == "ITEM")
+                {
+                    // KIS stores the part name directly on the ITEM; stock keeps it in the
+                    // nested PART snapshot's `name`. Take whichever is present.
+                    string pn = child.GetValue("partName");
+                    if (string.IsNullOrEmpty(pn))
+                    {
+                        ConfigNode p = child.GetNode("PART");
+                        if (p != null) pn = p.GetValue("name") ?? p.GetValue("part");
+                    }
+                    if (!string.IsNullOrEmpty(pn))
+                        names.Add(InstanceSuffixRx.Replace(pn.Trim(), ""));
+                }
+                CollectInventoryPartNames(child, names); // nested containers
+            }
+        }
+
+        /// <summary>Resolve the stored inventory items in a VESSEL node (see
+        /// <see cref="CollectInventoryPartNames"/>) to their loaded AvailableParts.</summary>
+        private static List<AvailablePart> ResolveInventoryParts(ConfigNode node)
+        {
+            var names = new List<string>();
+            CollectInventoryPartNames(node, names);
+
+            var parts = new List<AvailablePart>();
+            foreach (var n in names)
+            {
+                var ap = PartLoader.getPartInfoByName(n);
+                if (ap != null) parts.Add(ap);
+            }
+            return parts;
+        }
+
         // ── Export: embed ────────────────────────────────────────────────────
 
         /// <summary>Embed a GKMODS node listing the mods a live vessel's parts come from
@@ -121,7 +171,12 @@ namespace GeneKerman
             try
             {
                 node.RemoveNodes(MODS_NODE); // avoid duplicates on re-export
-                var mods = CollectMods(vessel.parts.Select(p => p.partInfo));
+
+                var parts = vessel.parts.Select(p => p.partInfo).ToList();
+                // Items inside inventory modules aren't vessel parts — pull their mods too.
+                parts.AddRange(ResolveInventoryParts(node));
+
+                var mods = CollectMods(parts);
                 if (mods.Count == 0) return;
 
                 ConfigNode mn = node.AddNode(MODS_NODE);
@@ -152,6 +207,10 @@ namespace GeneKerman
 
                 var names = new List<string>();
                 foreach (Match m in PartLineRx.Matches(text))
+                    names.Add(m.Groups[1].Value);
+                // KIS inventory items list their part as `partName = ` rather than a
+                // `part = ` line, so grab those too (non-parts resolve to null and drop).
+                foreach (Match m in PartNameLineRx.Matches(text))
                     names.Add(m.Groups[1].Value);
                 if (names.Count == 0) return craftBytes;
 

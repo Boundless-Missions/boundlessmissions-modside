@@ -419,25 +419,64 @@ namespace GeneKerman
             string json = MiniJSON.Serialize(body);
 
             yield return Post("/api/v1/auth/link", json, (ok, resp, status) =>
+                HandleLinkResponse(ok, resp, callback));
+        }
+
+        /// Submit the code DM'd to the user (when 2FA is enabled) to finish linking.
+        public IEnumerator VerifyTwoFA(string challengeId, string code,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            var body = new Dictionary<string, object>
             {
-                if (ok && !string.IsNullOrEmpty(resp))
+                { "challenge_id", challengeId },
+                { "code", code },
+            };
+            yield return Post("/api/v1/auth/link/2fa", MiniJSON.Serialize(body), (ok, resp, status) =>
+                HandleLinkResponse(ok, resp, callback));
+        }
+
+        // Shared handling for both link steps. A token in the response means we're
+        // linked (store it). A "2fa_required" status means the caller must collect
+        // the DM'd code and call VerifyTwoFA — the response carries challenge_id.
+        // Anything else is an error, surfacing the server's detail when present.
+        private void HandleLinkResponse(bool ok, string resp,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            if (ok && !string.IsNullOrEmpty(resp))
+            {
+                var data = MiniJSON.DeserializeDict(resp);
+                string token = MiniJSON.GetString(data, "token");
+                if (!string.IsNullOrEmpty(token))
                 {
-                    var data = MiniJSON.DeserializeDict(resp);
-                    string token = MiniJSON.GetString(data, "token");
-                    if (!string.IsNullOrEmpty(token))
-                    {
-                        SetToken(token);
-                        callback(true, data, null);
-                        return;
-                    }
+                    SetToken(token);
+                    callback(true, data, null);
+                    return;
                 }
-                string error = "Link failed";
-                if (!string.IsNullOrEmpty(resp))
+                if (MiniJSON.GetString(data, "status") == "2fa_required")
                 {
-                    var errData = MiniJSON.DeserializeDict(resp);
-                    error = MiniJSON.GetString(errData, "detail", error);
+                    callback(true, data, null);   // not linked yet — 2FA pending
+                    return;
                 }
-                callback(false, null, error);
+            }
+            string error = "Link failed";
+            if (!string.IsNullOrEmpty(resp))
+            {
+                var errData = MiniJSON.DeserializeDict(resp);
+                error = MiniJSON.GetString(errData, "detail", error);
+            }
+            callback(false, null, error);
+        }
+
+        /// Log out of every device linked to this account. On success the server
+        /// has invalidated all of this user's tokens, so we drop our own token too
+        /// and the caller returns to the link screen.
+        public IEnumerator LogoutAllDevices(ApiCallback callback)
+        {
+            yield return Post("/api/v1/auth/logout_all", "{}", (ok, resp, status) =>
+            {
+                if (ok)
+                    ClearToken();
+                callback(ok, resp, status);
             });
         }
 

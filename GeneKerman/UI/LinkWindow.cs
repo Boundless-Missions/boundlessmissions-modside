@@ -16,6 +16,11 @@ namespace GeneKerman.UI
         private string linkCode = "";
         private string statusMessage = "";
         private bool isLinking;
+
+        // Discord DM 2FA: set once /auth/link returns a "2fa_required" challenge.
+        private bool awaiting2FA;
+        private string twofaChallengeId = "";
+        private string twofaCode = "";
         private string serverUrlInput = "";
         private bool showSettings;
 
@@ -105,26 +110,58 @@ namespace GeneKerman.UI
             GUILayout.Label("🎮 Gene Kerman — Link KSP", titleStyle);
             GUILayout.Space(10);
 
-            // Instructions
-            GUILayout.Label(
-                "1. In Discord, type /g linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
-                labelStyle
-            );
-            GUILayout.Space(15);
-
-            // Code input
-            GUI.SetNextControlName("LinkCodeField");
-            linkCode = GUILayout.TextField(linkCode, 6, codeFieldStyle);
-
-            GUILayout.Space(10);
-
-            // Link button
-            GUI.enabled = !isLinking && linkCode.Length == 6;
-            if (GUILayout.Button(isLinking ? "Linking..." : "[Link] Link Account", buttonStyle))
+            if (!awaiting2FA)
             {
-                DoLink();
+                // Instructions
+                GUILayout.Label(
+                    "1. In Discord, type /g linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
+                    labelStyle
+                );
+                GUILayout.Space(15);
+
+                // Code input
+                GUI.SetNextControlName("LinkCodeField");
+                linkCode = GUILayout.TextField(linkCode, 6, codeFieldStyle);
+
+                GUILayout.Space(10);
+
+                // Link button
+                GUI.enabled = !isLinking && linkCode.Length == 6;
+                if (GUILayout.Button(isLinking ? "Linking..." : "[Link] Link Account", buttonStyle))
+                {
+                    DoLink();
+                }
+                GUI.enabled = true;
             }
-            GUI.enabled = true;
+            else
+            {
+                // Second factor: code delivered to the user's Discord DMs.
+                GUILayout.Label(
+                    "Check your Discord DMs for a verification code,\nthen enter it below.",
+                    labelStyle
+                );
+                GUILayout.Space(15);
+
+                GUI.SetNextControlName("TwoFAField");
+                twofaCode = GUILayout.TextField(twofaCode, 6, codeFieldStyle);
+
+                GUILayout.Space(10);
+
+                GUI.enabled = !isLinking && twofaCode.Length == 6;
+                if (GUILayout.Button(isLinking ? "Verifying..." : "[Verify] Verify Code", buttonStyle))
+                {
+                    DoVerify2FA();
+                }
+                GUI.enabled = true;
+
+                if (GUILayout.Button("← Back", GUI.skin.label))
+                {
+                    awaiting2FA = false;
+                    twofaCode = "";
+                    twofaChallengeId = "";
+                    statusMessage = "";
+                }
+            }
 
             // Status message
             if (!string.IsNullOrEmpty(statusMessage))
@@ -209,7 +246,15 @@ namespace GeneKerman.UI
                 GeneKermanMod.Instance.Api.LinkAccount(linkCode, (ok, data, err) =>
                 {
                     isLinking = false;
-                    if (ok)
+                    if (ok && MiniJSON.GetString(data, "status") == "2fa_required")
+                    {
+                        // Server DM'd a code — switch to the verification step.
+                        twofaChallengeId = MiniJSON.GetString(data, "challenge_id");
+                        twofaCode = "";
+                        awaiting2FA = true;
+                        statusMessage = "(Ok) Code sent to your Discord DMs.";
+                    }
+                    else if (ok)
                     {
                         statusMessage = "(Ok) Linked as " + MiniJSON.GetString(data, "username") + "!";
                         GeneKermanMod.Instance.OnAccountLinked(data);
@@ -217,6 +262,29 @@ namespace GeneKerman.UI
                     else
                     {
                         statusMessage = "(No) " + (err ?? "Link failed. Check the code and try again.");
+                    }
+                })
+            );
+        }
+
+        private void DoVerify2FA()
+        {
+            isLinking = true;
+            statusMessage = "Verifying...";
+
+            GeneKermanMod.Instance.RunCoroutine(
+                GeneKermanMod.Instance.Api.VerifyTwoFA(twofaChallengeId, twofaCode, (ok, data, err) =>
+                {
+                    isLinking = false;
+                    if (ok)
+                    {
+                        awaiting2FA = false;
+                        statusMessage = "(Ok) Linked as " + MiniJSON.GetString(data, "username") + "!";
+                        GeneKermanMod.Instance.OnAccountLinked(data);
+                    }
+                    else
+                    {
+                        statusMessage = "(No) " + (err ?? "Verification failed. Try again.");
                     }
                 })
             );

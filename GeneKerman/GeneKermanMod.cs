@@ -106,6 +106,10 @@ namespace GeneKerman
             // Initialize API client
             Api = new ApiClient();
             notifSocket = new NotificationSocket(Api);
+            // Authenticate the notification WebSocket with a short-lived single-use
+            // ticket (fetched over HTTPS) instead of putting the 30-day session token
+            // in the WS URL, where it would end up in server/proxy access logs.
+            notifSocket.TicketProvider = onTicket => StartCoroutine(Api.GetWsTicket(onTicket));
 
             // Initialize UI windows
             mainWindow = new UI.MainWindow();

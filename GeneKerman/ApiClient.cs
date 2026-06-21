@@ -50,21 +50,58 @@ namespace GeneKerman
         /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) are enabled.</summary>
         public bool CheckpointPhotosEnabled => checkpointPhotosEnabled;
 
+        /// <summary>ws/wss base derived from the configured http/https server URL.</summary>
+        private string WebSocketBase
+        {
+            get
+            {
+                string wsBase = serverUrl;
+                if (wsBase.StartsWith("https://")) wsBase = "wss://" + wsBase.Substring(8);
+                else if (wsBase.StartsWith("http://")) wsBase = "ws://" + wsBase.Substring(7);
+                return wsBase;
+            }
+        }
+
         /// <summary>
-        /// WebSocket URL for the live notification stream, with the session token
-        /// in the query string (UnityWebRequest cannot set headers on a WS handshake).
-        /// Derives ws/wss from the configured http/https server URL. Empty if unlinked.
+        /// Legacy WebSocket URL carrying the long-lived session token in the query
+        /// string. Deprecated — the token then lands in server/proxy access logs.
+        /// Prefer GetWsTicket + WebSocketUrlForTicket. Kept only as a fallback when
+        /// the server is too old to issue tickets. Empty if unlinked.
         /// </summary>
         public string NotificationsWebSocketUrl
         {
             get
             {
                 if (string.IsNullOrEmpty(sessionToken)) return "";
-                string wsBase = serverUrl;
-                if (wsBase.StartsWith("https://")) wsBase = "wss://" + wsBase.Substring(8);
-                else if (wsBase.StartsWith("http://")) wsBase = "ws://" + wsBase.Substring(7);
-                return wsBase + "/ws/v1/notifications?token=" + Uri.EscapeDataString(sessionToken);
+                return WebSocketBase + "/ws/v1/notifications?token=" + Uri.EscapeDataString(sessionToken);
             }
+        }
+
+        /// <summary>WebSocket URL using a short-lived single-use ticket instead of the
+        /// session token, so nothing reusable is exposed in the URL (or logs).</summary>
+        public string WebSocketUrlForTicket(string ticket)
+        {
+            return WebSocketBase + "/ws/v1/notifications?ticket=" + Uri.EscapeDataString(ticket ?? "");
+        }
+
+        /// <summary>
+        /// Exchange the session token for a short-lived single-use WebSocket ticket
+        /// over normal authenticated HTTPS, then invoke onTicket with it (null on
+        /// failure, so the caller can fall back to the token URL on an old server).
+        /// </summary>
+        public IEnumerator GetWsTicket(Action<string> onTicket)
+        {
+            if (string.IsNullOrEmpty(sessionToken)) { onTicket(null); yield break; }
+            yield return Post("/api/v1/auth/ws-ticket", "{}", (ok, body, status) =>
+            {
+                string ticket = null;
+                if (ok && !string.IsNullOrEmpty(body))
+                {
+                    var data = MiniJSON.DeserializeDict(body);
+                    if (data != null) ticket = MiniJSON.GetString(data, "ticket");
+                }
+                onTicket(string.IsNullOrEmpty(ticket) ? null : ticket);
+            });
         }
 
         public ApiClient()

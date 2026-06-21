@@ -43,6 +43,16 @@ namespace GeneKerman
         public bool IsEnabled => enabled;
 
         /// <summary>
+        /// Optional: host-supplied way to obtain a short-lived WebSocket ticket
+        /// (it runs ApiClient.GetWsTicket on a coroutine and invokes the callback
+        /// with the ticket, or null on failure). When set, the socket authenticates
+        /// the handshake with a single-use ticket instead of the long-lived token —
+        /// keeping the token out of the WS URL and server logs. Falls back to the
+        /// token URL when unset or when the ticket request fails (old server).
+        /// </summary>
+        public Action<Action<string>> TicketProvider;
+
+        /// <summary>
         /// Returns true exactly once after each successful (re)connect. The caller
         /// uses this to run a catch-up notification poll: pushes the server sent
         /// while the socket was dead are lost (they hit a discarded connection), so
@@ -157,12 +167,40 @@ namespace GeneKerman
 
         private void OpenSocket()
         {
-            string url = api.NotificationsWebSocketUrl;
-            if (string.IsNullOrEmpty(url)) return;
-
+            // Mark connecting up front so Tick() doesn't fire a second attempt while
+            // the (possibly multi-frame) ticket request is in flight.
             connecting = true;
             sendDead = false;
             lastKeepalive = Time.realtimeSinceStartup;
+
+            if (TicketProvider != null)
+            {
+                // Get a short-lived single-use ticket first, so the long-lived token
+                // never appears in the WS URL. On failure (e.g. an old server) fall
+                // back to the deprecated token URL so the socket still connects.
+                TicketProvider(ticket =>
+                {
+                    string url = string.IsNullOrEmpty(ticket)
+                        ? api.NotificationsWebSocketUrl
+                        : api.WebSocketUrlForTicket(ticket);
+                    OpenSocketWithUrl(url);
+                });
+            }
+            else
+            {
+                OpenSocketWithUrl(api.NotificationsWebSocketUrl);
+            }
+        }
+
+        private void OpenSocketWithUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url))
+            {
+                // Nothing to connect to (e.g. unlinked) — release the guard and retry.
+                connecting = false;
+                ScheduleRetry();
+                return;
+            }
             try
             {
                 CloseSocket();

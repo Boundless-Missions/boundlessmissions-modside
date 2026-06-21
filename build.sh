@@ -95,7 +95,13 @@ for KSP_PATH in "${KSP_PATHS[@]}"; do
     GAMEDATA_DST="$KSP_PATH/GameData/GeneKerman"
     if [ -d "$KSP_PATH" ]; then
         mkdir -p "$GAMEDATA_DST"
+        # Preserve the install's own settings.cfg (server choice + toggles) — it's
+        # user data, not a build artifact, so a redeploy must never clobber it. Back
+        # it up, copy, then restore; installs without one still get the default.
+        DST_CFG="$GAMEDATA_DST/PluginData/settings.cfg"
+        if [ -f "$DST_CFG" ]; then cp "$DST_CFG" "$DST_CFG.deploybak"; fi
         cp -r "$GAMEDATA_SRC/"* "$GAMEDATA_DST/"
+        if [ -f "$DST_CFG.deploybak" ]; then mv -f "$DST_CFG.deploybak" "$DST_CFG"; fi
         echo "  → Deployed to $GAMEDATA_DST ($(du -h "$GAMEDATA_DST/Plugins/GeneKerman.dll" | cut -f1))"
         deployed=$((deployed + 1))
     else

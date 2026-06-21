@@ -1845,7 +1845,7 @@ namespace GeneKerman.UI
             GUILayout.BeginVertical(windowStyle);
             GUILayout.Label("🔌 Connection Settings", new GUIStyle(GUI.skin.label) { fontSize = 16, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter });
             GUILayout.Space(10);
-            GUILayout.Label("Choose the official UPoK server, or connect to a custom IP if you are running your own.", labelStyle);
+            GUILayout.Label("Choose the official BM server, or connect to a custom IP if you are running your own.", labelStyle);
             GUILayout.Space(12);
 
             // Connection mode switch: Official Server vs Custom IP

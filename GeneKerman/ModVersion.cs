@@ -52,5 +52,42 @@ namespace GeneKerman
                 return _hash;
             }
         }
+
+        /// <summary>
+        /// Challenge-response attestation digest: lowercase hex SHA256 of
+        /// (UTF8(nonce) ‖ thisDll[offset .. offset+length]). The server recomputes
+        /// the same over the pristine published DLL and compares; a mismatch means
+        /// this account's DLL differs from the official release. Empty string on error.
+        /// </summary>
+        public static string AttestDigest(string nonce, int offset, int length)
+        {
+            try
+            {
+                string path = Assembly.GetExecutingAssembly().Location;
+                byte[] all = File.ReadAllBytes(path);
+                if (offset < 0) offset = 0;
+                if (offset > all.Length) offset = all.Length;
+                if (length <= 0 || offset + length > all.Length)
+                    length = Math.Max(0, all.Length - offset);
+
+                byte[] nonceBytes = Encoding.UTF8.GetBytes(nonce ?? "");
+                byte[] buf = new byte[nonceBytes.Length + length];
+                Array.Copy(nonceBytes, 0, buf, 0, nonceBytes.Length);
+                Array.Copy(all, offset, buf, nonceBytes.Length, length);
+
+                using (var sha = SHA256.Create())
+                {
+                    byte[] digest = sha.ComputeHash(buf);
+                    var sb = new StringBuilder(digest.Length * 2);
+                    foreach (byte b in digest) sb.Append(b.ToString("x2"));
+                    return sb.ToString();
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Attestation digest failed: " + e.Message);
+                return "";
+            }
+        }
     }
 }

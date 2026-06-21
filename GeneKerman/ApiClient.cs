@@ -22,7 +22,7 @@ namespace GeneKerman
 {
     public class ApiClient
     {
-        /// <summary>Address of the official UPoK server, used when "Official Server" is selected.</summary>
+        /// <summary>Address of the official BM server, used when "Official Server" is selected.</summary>
         public const string OfficialServerUrl = "https://mainserver.boundlessmissions.com";
 
         private string serverUrl;
@@ -222,14 +222,19 @@ namespace GeneKerman
         private void ApplyHeaders(UnityWebRequest req)
         {
             req.SetRequestHeader("X-Device-Id", DeviceId.Current);
+            // Sent on every request so the server can hard-block outdated/modified
+            // DLLs (server-enforced version gate), not just the explicit version check.
+            req.SetRequestHeader("X-Mod-Hash", ModVersion.Sha256);
             if (IsLinked)
                 req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
         }
 
-        /// If a response is a device-binding block (403 device_unverified), kick off
-        /// the in-game "approve this device" flow. Returns true if it was that block.
+        /// Post-response gate hook. Handles both the server-enforced version block
+        /// (426 update_required) and the device-binding block (403 device_unverified).
+        /// Returns true if the response was one of those gates.
         private bool HandleDeviceGate(long status, string body)
         {
+            if (HandleVersionGate(status, body)) return true;
             if (status != 403 || string.IsNullOrEmpty(body)) return false;
             var data = MiniJSON.DeserializeDict(body);
             // FastAPI wraps the payload under "detail".
@@ -241,6 +246,26 @@ namespace GeneKerman
                 string challengeId = MiniJSON.GetString(detail, "challenge_id");
                 if (GeneKermanMod.Instance != null)
                     GeneKermanMod.Instance.OnDeviceGate(challengeId);
+                return true;
+            }
+            return false;
+        }
+
+        /// If a response is the server-enforced version block (426 update_required),
+        /// raise the in-game "update required" window. Returns true if it was.
+        private bool HandleVersionGate(long status, string body)
+        {
+            if (status != 426 || string.IsNullOrEmpty(body)) return false;
+            var data = MiniJSON.DeserializeDict(body);
+            object detailObj;
+            if (data != null && data.TryGetValue("detail", out detailObj)
+                && detailObj is Dictionary<string, object> detail
+                && MiniJSON.GetString(detail, "code") == "update_required")
+            {
+                if (GeneKermanMod.Instance != null)
+                    GeneKermanMod.Instance.OnVersionGate(
+                        MiniJSON.GetString(detail, "latest_version"),
+                        MiniJSON.GetString(detail, "download_url"));
                 return true;
             }
             return false;
@@ -505,7 +530,10 @@ namespace GeneKerman
         /// terminal outcome: approved, denied (with optional reportId), or expired.
         public delegate void DevicePollCallback(string state, string reportId);
 
-        public IEnumerator PollDeviceApproval(string challengeId, DevicePollCallback callback)
+        /// onPing fires (on the polling/blocked device) when the account owner pressed
+        /// "🔔 Ping this PC" in their Discord DM, so we can flash an "is this you?" alert.
+        public IEnumerator PollDeviceApproval(string challengeId, DevicePollCallback callback,
+            System.Action onPing = null)
         {
             string body = MiniJSON.Serialize(
                 new Dictionary<string, object> { { "challenge_id", challengeId } });
@@ -525,6 +553,8 @@ namespace GeneKerman
                     string state = MiniJSON.GetString(data, "status");
                     if (state == "pending")
                     {
+                        if (onPing != null && MiniJSON.GetBool(data, "ping"))
+                            onPing();
                         yield return new WaitForSeconds(3f);
                         continue;
                     }
@@ -624,6 +654,40 @@ namespace GeneKerman
                 else
                     callback(false, null, "version check failed");
             });
+        }
+
+        /// <summary>
+        /// Challenge-response attestation: fetch a nonce + DLL byte-window, hash our
+        /// on-disk DLL over it, and send the digest back. The server flags a mismatch
+        /// to moderators — there's nothing for the client to act on, so this is
+        /// best-effort and silent. No-op unless linked (the endpoint needs a token).
+        /// </summary>
+        public IEnumerator RunAttestation()
+        {
+            if (!IsLinked) yield break;
+
+            bool ok = false; string resp = null;
+            yield return Get("/api/v1/attest/challenge", (o, r, s) => { ok = o; resp = r; });
+            if (!ok || string.IsNullOrEmpty(resp)) yield break;
+
+            var data = MiniJSON.DeserializeDict(resp);
+            if (data == null || !MiniJSON.GetBool(data, "enabled")) yield break;  // not stored → skip
+
+            string attestId = MiniJSON.GetString(data, "attest_id");
+            string nonce = MiniJSON.GetString(data, "nonce");
+            int offset = MiniJSON.GetInt(data, "offset");
+            int length = MiniJSON.GetInt(data, "length");
+            if (string.IsNullOrEmpty(attestId) || string.IsNullOrEmpty(nonce)) yield break;
+
+            string digest = ModVersion.AttestDigest(nonce, offset, length);
+            if (string.IsNullOrEmpty(digest)) yield break;
+
+            string body = MiniJSON.Serialize(new Dictionary<string, object>
+            {
+                { "attest_id", attestId },
+                { "digest", digest },
+            });
+            yield return Post("/api/v1/attest/respond", body, (o, r, s) => { });
         }
 
         public IEnumerator GetProfile(ApiCallback<Dictionary<string, object>> callback)

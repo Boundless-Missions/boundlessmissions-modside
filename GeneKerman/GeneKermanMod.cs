@@ -139,6 +139,9 @@ namespace GeneKerman
             // Gate outdated clients: ask the server whether this DLL is the latest.
             StartCoroutine(CheckVersionRoutine());
 
+            // Periodic anti-tamper attestation (catches a DLL swapped mid-session).
+            StartCoroutine(AttestationLoop());
+
             // If already linked, do an initial data fetch and open the live socket
             if (Api.IsLinked)
             {
@@ -563,6 +566,22 @@ namespace GeneKerman
 
             // Check notifications
             yield return CheckNotifications();
+
+            // Anti-tamper attestation on (re)connect — best-effort; the server flags
+            // a failure to moderators, so there's nothing for the client to handle.
+            yield return Api.RunAttestation();
+        }
+
+        /// Re-attest periodically while linked so a DLL swapped after launch is still
+        /// caught. The first pass also runs from InitialFetch right after linking.
+        private IEnumerator AttestationLoop()
+        {
+            while (true)
+            {
+                yield return new WaitForSeconds(1800f);   // every 30 minutes
+                if (Api != null && Api.IsLinked)
+                    yield return Api.RunAttestation();
+            }
         }
 
         public IEnumerator CheckNotifications()
@@ -657,6 +676,22 @@ namespace GeneKerman
         /// "Re-check" button is pressed).
         public void RecheckVersion() => StartCoroutine(CheckVersionRoutine());
 
+        /// Called by ApiClient when ANY gated request is rejected with 426
+        /// update_required (the server-enforced version gate). Raises the same
+        /// blocking "update required" window the startup check uses, so a modified
+        /// DLL that skipped the startup check is still stopped on its first call.
+        public void OnVersionGate(string latestVersion, string downloadUrl)
+        {
+            LatestVersion = latestVersion ?? "";
+            UpdateDownloadUrl = downloadUrl ?? "";
+            if (UpdateRequired) return;   // window already up
+            UpdateRequired = true;
+            ShowMainWindow = false;
+            ShowLinkWindow = false;
+            updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
+            Debug.Log($"[GeneKerman] Update required (server-enforced): {ModVersion.Current} → {LatestVersion}");
+        }
+
         /// Called by ApiClient when the server blocks this device (device binding).
         /// Opens the "approve in Discord" prompt and polls until the user decides.
         public void OnDeviceGate(string challengeId)
@@ -674,6 +709,29 @@ namespace GeneKerman
             StartCoroutine(DeviceGateFlow(challengeId));
         }
 
+        /// Fired when the account owner presses "🔔 Ping this PC" in their Discord DM.
+        /// Makes a loud, unmistakable on-screen alert so whoever is sitting at THIS PC
+        /// knows the login attempt is theirs (and can press "Yes, it's me" in Discord).
+        private void ShowDevicePing()
+        {
+            const string msg = "🔔 GENE KERMAN: Is this you? Someone is verifying this PC's " +
+                               "login from Discord. If this is your PC, press \"✅ Yes, it's me\" " +
+                               "in your Discord DM.";
+            try
+            {
+                ScreenMessages.PostScreenMessage(msg, 12f, ScreenMessageStyle.UPPER_CENTER);
+            }
+            catch { /* ScreenMessages unavailable in this scene — popup still shows */ }
+            notificationPopup.Show("🔔 Is this you?",
+                "Someone is verifying this PC's login from Discord.\n" +
+                "If this is your PC, press \"✅ Yes, it's me\" in your Discord DM.");
+            deviceVerifyWindow.Show(
+                "🔔 PING RECEIVED — someone is checking whether this PC is yours.\n\n" +
+                "If you're the account owner and meant to log in here, go to your\n" +
+                "Discord DM and press \"✅ Yes, it's me\".\n\n" +
+                "Waiting for your response…");
+        }
+
         private System.Collections.IEnumerator DeviceGateFlow(string challengeId)
         {
             // Capture the poll outcome, then act on it in the coroutine body so the
@@ -684,7 +742,7 @@ namespace GeneKerman
             {
                 outcome = state;
                 reportId = rid;
-            });
+            }, onPing: ShowDevicePing);
 
             deviceGateActive = false;
             deviceGateChallenge = null;

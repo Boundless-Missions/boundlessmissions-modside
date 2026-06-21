@@ -208,7 +208,17 @@ namespace GeneKerman
             // so only a fetch recovers them — and re-syncs the contract list, which
             // otherwise wouldn't refresh until the player acts manually.
             if (notifSocket.ConsumeJustConnected())
+            {
                 StartCoroutine(CheckNotifications());
+                // Catch up on the version gate too: a new build may have been
+                // published while this client's socket was down.
+                RecheckVersion();
+            }
+
+            // A new mod version was just published (server poke) — re-check live so
+            // an outdated client gates itself without waiting for a restart.
+            if (notifSocket.ConsumeVersionPoke())
+                RecheckVersion();
 
             // Drain notifications pushed over the socket and surface new ones as toasts.
             while (notifSocket.TryDequeue(out var notif))

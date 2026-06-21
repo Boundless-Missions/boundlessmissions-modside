@@ -31,6 +31,7 @@ namespace GeneKerman
         private volatile bool pendingRetry; // set by OnClose (bg thread), consumed by Tick (main)
         private volatile bool sendDead;     // set by a failed keepalive (bg thread), consumed by Tick
         private volatile bool justConnected; // set by OnOpen (bg thread), consumed by ConsumeJustConnected
+        private volatile bool versionPoke;    // set by a "version" frame (bg thread), consumed by ConsumeVersionPoke
         private bool enabled;               // set by Connect()/Disconnect(), read on main thread
         private float nextRetryTime;
         private float lastKeepalive;        // main-thread keepalive timer
@@ -51,6 +52,17 @@ namespace GeneKerman
         {
             if (!justConnected) return false;
             justConnected = false;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns true once after the server broadcast a "version" frame (a new mod
+        /// version was published). The caller re-runs its version check in response.
+        /// </summary>
+        public bool ConsumeVersionPoke()
+        {
+            if (!versionPoke) return false;
+            versionPoke = false;
             return true;
         }
 
@@ -175,6 +187,14 @@ namespace GeneKerman
                     try
                     {
                         var msg = MiniJSON.DeserializeDict(e.Data);
+                        // A "version" poke means a new mod build was published — flag
+                        // it so the main thread re-runs the version check (and gates
+                        // this client if it's now outdated).
+                        if (MiniJSON.GetString(msg, "type") == "version")
+                        {
+                            versionPoke = true;
+                            return;
+                        }
                         var notif = MiniJSON.GetDict(msg, "notification");
                         if (notif != null) incoming.Enqueue(notif);
                     }

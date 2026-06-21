@@ -220,16 +220,16 @@ namespace GeneKerman
 
         protected override string GetTitle()
         {
-            return $"[GK] {missionDescription}";
+            return $"[BM] {missionDescription}";
         }
 
         protected override string GetDescription()
         {
-            return $"Gene Kerman Mission Manager assignment.\n\n" +
+            return $"Boundless Missions Mission Manager assignment.\n\n" +
                    $"Mission: {missionDescription}\n" +
                    $"Difficulty: {missionDifficulty}/10\n" +
                    $"Due: {missionDueDate}\n\n" +
-                   $"Submit your completion from the Gene Kerman mod panel (GK toolbar button).";
+                   $"Submit your completion from the Boundless Missions mod panel (Boundless Missions toolbar button).";
         }
 
         protected override string GetSynopsys()
@@ -239,7 +239,7 @@ namespace GeneKerman
 
         protected override string MessageCompleted()
         {
-            return $"Mission completed! Rewards distributed via Gene Kerman system.";
+            return $"Mission completed! Rewards distributed via Boundless Missions system.";
         }
 
         protected override void OnSave(ConfigNode node)

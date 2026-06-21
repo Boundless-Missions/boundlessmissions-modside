@@ -812,6 +812,42 @@ namespace GeneKerman
         }
 
         /// <summary>
+        /// Open a reverse (Dutch) auction. No contractor — it's posted to Discord
+        /// where anyone bids the price down; the lowest bid wins. start_value is
+        /// escrowed up front. modlist is the mods required / limited to (optional).
+        /// </summary>
+        public IEnumerator CreateAuction(string mission, int startValue, int fine,
+            string dueDate, int durationHours, string modlist, string contractType,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            var body = new Dictionary<string, object>
+            {
+                { "mission", mission },
+                { "start_value", startValue },
+                { "fine", fine },
+                { "due_date", dueDate },
+                { "duration_hours", durationHours },
+            };
+            if (!string.IsNullOrEmpty(modlist))
+                body.Add("modlist", modlist);
+            if (!string.IsNullOrEmpty(contractType))
+                body.Add("contract_type", contractType);
+
+            yield return Post("/api/v1/auctions/create", MiniJSON.Serialize(body), (ok, resp, status) =>
+            {
+                if (!string.IsNullOrEmpty(resp))
+                {
+                    var data = MiniJSON.DeserializeDict(resp);
+                    bool success = MiniJSON.GetBool(data, "success", false);
+                    string msg = MiniJSON.GetString(data, "message", ok ? "Success" : "Failed");
+                    callback(success, data, success ? null : msg);
+                }
+                else
+                    callback(false, null, "No response from server");
+            });
+        }
+
+        /// <summary>
         /// Create a rescue contract. Uploads the issuer's snapshotted vessel (the
         /// wreck, crew already renamed) as a gzipped ConfigNode alongside the target
         /// location and rename map. Multipart because of the file upload.

@@ -12,7 +12,7 @@ KSP_PATHS=(
     "/home/ayd/.local/share/Steam/steamapps/common/Kerbal Space Program"
     "/home/ayd/Documents/Fake Kerman KSP Clone"
 )
-GAMEDATA_SRC="$SCRIPT_DIR/GameData/GeneKerman"
+GAMEDATA_SRC="$SCRIPT_DIR/GameData/BoundlessMissions"
 
 echo "═══════════════════════════════════════════════════"
 echo "  Gene Kerman KSP Mod — Build Script"
@@ -92,7 +92,7 @@ echo "▶ Deploying to KSP instance(s)..."
 
 deployed=0
 for KSP_PATH in "${KSP_PATHS[@]}"; do
-    GAMEDATA_DST="$KSP_PATH/GameData/GeneKerman"
+    GAMEDATA_DST="$KSP_PATH/GameData/BoundlessMissions"
     if [ -d "$KSP_PATH" ]; then
         mkdir -p "$GAMEDATA_DST"
         # Preserve the install's own settings.cfg (server choice + toggles) — it's

@@ -111,7 +111,7 @@ namespace GeneKerman.UI
         }
 
         /// <summary>
-        /// Load a PNG icon from GameData/GeneKerman/Textures/{name}.png and
+        /// Load a PNG icon from GameData/BoundlessMissions/Textures/{name}.png and
         /// scale it to <paramref name="size"/> pixels (default 14).
         /// Cached and marked HideAndDontSave to survive scene changes.
         /// Returns null if the file doesn't exist.

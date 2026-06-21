@@ -41,7 +41,7 @@ namespace GeneKerman
         // Folders shipped with the game (or with this mod) — never a "missing" dependency.
         private static readonly HashSet<string> StockFolders =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            { "Squad", "SquadExpansion", "GeneKerman" };
+            { "Squad", "SquadExpansion", "BoundlessMissions" };
 
         private static string GameDataRoot =>
             Path.Combine(KSPUtil.ApplicationRootPath, "GameData");

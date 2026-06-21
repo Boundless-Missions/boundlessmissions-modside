@@ -45,7 +45,7 @@ namespace GeneKerman.UI
         private GUIStyle resizeGripStyle;
         private bool stylesReady;
 
-        // Icon textures loaded from Iconpack-1 (via GameData/GeneKerman/Textures/)
+        // Icon textures loaded from Iconpack-1 (via GameData/BoundlessMissions/Textures/)
         private Texture2D iconRefresh, iconCompose, iconInbox, iconTrash, iconCross;
         private Texture2D iconUnlink, iconSubmit, iconVesselInfo;
 
@@ -448,7 +448,7 @@ namespace GeneKerman.UI
 
             // Header
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Gene Kerman Mission Manager", headerStyle);
+            GUILayout.Label("Boundless Missions Mission Manager", headerStyle);
             GUILayout.FlexibleSpace();
             int unread = GeneKermanMod.Instance.UnreadNotifications;
             // The unread count IS the button — clicking the bell badge opens the
@@ -2630,7 +2630,7 @@ namespace GeneKerman.UI
             string flagUrl = MiniJSON.GetString(entry, "flag_url", null);
 
             // Flag-design payout: a delivered flag PNG. Install it into the flag picker
-            // (GameData/GeneKerman/Flags) — never a craft or live vessel.
+            // (GameData/BoundlessMissions/Flags) — never a craft or live vessel.
             if (source == "flag" && !string.IsNullOrEmpty(flagUrl))
             {
                 bool flagInstalled = false;

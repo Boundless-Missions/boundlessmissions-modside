@@ -17,7 +17,7 @@
  * any) they run.
  *
  * The module is added to every part prefab (dormant, gkLinear=1) by the ModuleManager
- * patch in GameData/GeneKerman/Patches. A dormant instance is a pure no-op; only a craft
+ * patch in GameData/BoundlessMissions/Patches. A dormant instance is a pure no-op; only a craft
  * that carried snapshot data (gkActive=true) does anything.
  *
  * RESOURCES are deliberately NOT handled here: resource maxAmount is a persistent field

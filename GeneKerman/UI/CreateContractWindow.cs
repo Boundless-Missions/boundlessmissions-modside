@@ -41,6 +41,9 @@ namespace GeneKerman.UI
 
         // Contract type: 0 Auto, 1 Craft Build, 2 Active Mission, 3 Rescue, 4 Flag Design
         private int contractType = 0;
+        private const int AUTO_TYPE_INDEX = 0;
+        private const int CRAFT_BUILD_INDEX = 1;
+        private const int ACTIVE_TYPE_INDEX = 2;
         private const int RESCUE_TYPE_INDEX = 3;
         private const int FLAG_TYPE_INDEX = 4;
         private static readonly string[] ContractTypeLabels = { "Auto", "Craft Build", "Active Mission", "Rescue", "Flag Design" };
@@ -52,6 +55,12 @@ namespace GeneKerman.UI
             "Recipient rescues your stranded kerbals.",
             "Recipient designs a flag (submitted & reviewed via Discord).",
         };
+
+        // Auction mode: post as an open reverse auction instead of a direct contract.
+        // Only valid for Craft Build / Active Mission. Runs durationText hours; the
+        // lowest bidder is bound to a contract that inherits the selected type.
+        private bool auctionMode = false;
+        private string durationText = "24";
 
         // Rescue setup state
         private int rescueMode = 0; // 0 = orbit (Ap/Pe), 1 = surface (Lat/Lon)
@@ -121,7 +130,8 @@ namespace GeneKerman.UI
             missionText = "";
             paymentText = "";
             fineText = "0";
-            contractType = 0;
+            contractType = CRAFT_BUILD_INDEX;  // Auto is server-only; default to a concrete type
+            auctionMode = false;
             ScanRescueContext();
 
             // Set default due date to 7 days from now
@@ -471,20 +481,48 @@ namespace GeneKerman.UI
             GUILayout.Space(2);
             for (int i = 0; i < ContractTypeLabels.Length; i++)
             {
+                // Auto-classification is reserved for server-issued missions; players
+                // must pick a concrete type so submissions are checked correctly.
+                bool disabled = (i == AUTO_TYPE_INDEX);
+                GUI.enabled = !disabled;
+
                 GUILayout.BeginHorizontal();
                 bool sel = GUILayout.Toggle(contractType == i, "", checkboxStyle, GUILayout.Width(18));
                 if (sel && contractType != i)
                 {
                     contractType = i;
                     if (i == RESCUE_TYPE_INDEX) ScanRescueContext();
+                    // Auctions only apply to build / active missions.
+                    if (i != CRAFT_BUILD_INDEX && i != ACTIVE_TYPE_INDEX) auctionMode = false;
                 }
-                GUILayout.Label(ContractTypeLabels[i], valueStyle, GUILayout.Width(120));
+                string typeLabel = ContractTypeLabels[i] + (disabled ? "  (server only)" : "");
+                GUILayout.Label(typeLabel, valueStyle, GUILayout.Width(140));
                 GUILayout.Label(ContractTypeDescs[i], labelStyle);
                 GUILayout.EndHorizontal();
+
+                GUI.enabled = true;
             }
             GUILayout.Space(8);
 
-            // ── Corp selector ──
+            // ── Auction toggle (build / active only) — turns the direct contract
+            //    into an open reverse auction, so there's no single recipient. ──
+            if (contractType == CRAFT_BUILD_INDEX || contractType == ACTIVE_TYPE_INDEX)
+            {
+                GUILayout.BeginHorizontal();
+                auctionMode = GUILayout.Toggle(auctionMode, "", checkboxStyle, GUILayout.Width(18));
+                GUILayout.Label("Auction (open bidding)", valueStyle, GUILayout.Width(160));
+                GUILayout.Label("Anyone bids the price down; lowest wins.", labelStyle);
+                GUILayout.EndHorizontal();
+                GUILayout.Space(6);
+            }
+
+            // ── Recipient selector (hidden in auction mode — open to everyone) ──
+            if (auctionMode)
+            {
+                GUILayout.Label("Open to everyone — the lowest bidder in Discord wins.", labelStyle);
+            }
+            else
+            {
             GUILayout.Label(contractType == RESCUE_TYPE_INDEX ? "Select Rescuer:" : "Select Corporation:", labelStyle);
 
             if (loadingCorps)
@@ -514,6 +552,7 @@ namespace GeneKerman.UI
 
                 GUILayout.EndScrollView();
             }
+            }  // end recipient selector (non-auction)
 
             GUILayout.Space(8);
 
@@ -523,14 +562,26 @@ namespace GeneKerman.UI
 
             GUILayout.Space(6);
 
-            // ── Payment ──
+            // ── Payment / auction starting price ──
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Payment:", labelStyle, GUILayout.Width(80));
+            GUILayout.Label(auctionMode ? "Start Price:" : "Payment:", labelStyle, GUILayout.Width(80));
             paymentText = GUILayout.TextField(paymentText, textFieldStyle, GUILayout.Width(120));
             GUILayout.Label("KCoins", labelStyle);
             GUILayout.EndHorizontal();
 
             GUILayout.Space(4);
+
+            // ── Auction duration ──
+            if (auctionMode)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Duration:", labelStyle, GUILayout.Width(80));
+                durationText = GUILayout.TextField(durationText, textFieldStyle, GUILayout.Width(120));
+                GUILayout.Label("hours", labelStyle);
+                GUILayout.EndHorizontal();
+
+                GUILayout.Space(4);
+            }
 
             // ── Fine ──
             GUILayout.BeginHorizontal();
@@ -598,7 +649,7 @@ namespace GeneKerman.UI
             GUILayout.BeginHorizontal();
 
             GUI.enabled = !isSending;
-            if (GUILayout.Button("Send Contract", sendBtnStyle, GUILayout.Height(36)))
+            if (GUILayout.Button(auctionMode ? "Post Auction" : "Send Contract", sendBtnStyle, GUILayout.Height(36)))
             {
                 TrySend();
             }
@@ -690,8 +741,8 @@ namespace GeneKerman.UI
 
         private void TrySend()
         {
-            // Validate
-            if (selectedCorpIndex < 0)
+            // Validate (auctions are open to everyone, so no recipient to pick)
+            if (!auctionMode && selectedCorpIndex < 0)
             {
                 statusMsg = "❌ Select a corporation first.";
                 isSuccess = false;
@@ -739,6 +790,12 @@ namespace GeneKerman.UI
                 return;
             }
 
+            if (auctionMode)
+            {
+                TrySendAuction(payment, fine);
+                return;
+            }
+
             // Flag-design has no in-game build step, so it never carries a part restriction.
             string modlist = contractType == FLAG_TYPE_INDEX ? null : BuildModlist();
 
@@ -774,6 +831,49 @@ namespace GeneKerman.UI
                         }
                     },
                     ContractTypeApi[contractType]));
+        }
+
+        private void TrySendAuction(int startValue, int fine)
+        {
+            int duration;
+            if (!int.TryParse(durationText, out duration) || duration < 1)
+            {
+                statusMsg = "❌ Enter a valid auction duration (hours).";
+                isSuccess = false;
+                return;
+            }
+
+            // Auctions support the same part restriction as a normal contract.
+            string modlist = BuildModlist();
+            if (modlistMode == 4 && string.IsNullOrEmpty(modlist))
+            {
+                statusMsg = "❌ Open the VAB or SPH to capture the Janitor's Closet filter.";
+                isSuccess = false;
+                return;
+            }
+
+            isSending = true;
+            statusMsg = "Posting auction...";
+
+            GeneKermanMod.Instance.StartCoroutine(
+                GeneKermanMod.Instance.Api.CreateAuction(
+                    missionText, startValue, fine, dueDateText, duration, modlist,
+                    ContractTypeApi[contractType],
+                    (ok, data, error) =>
+                    {
+                        isSending = false;
+                        if (ok)
+                        {
+                            isSuccess = true;
+                            statusMsg = "✅ Auction posted! Bidding happens in Discord.";
+                            currentBalance -= startValue;
+                        }
+                        else
+                        {
+                            isSuccess = false;
+                            statusMsg = $"❌ {error ?? "Failed to post auction."}";
+                        }
+                    }));
         }
 
         private void TrySendRescue(int payment, int fine)

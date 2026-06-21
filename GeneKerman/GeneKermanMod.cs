@@ -33,7 +33,7 @@ namespace GeneKerman
         public string LinkedUsername { get; private set; } = "";
 
         // Paths
-        public static string ModPath => Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "GeneKerman");
+        public static string ModPath => Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "BoundlessMissions");
         public static string PluginDataPath => Path.Combine(ModPath, "PluginData");
 
         // Internal

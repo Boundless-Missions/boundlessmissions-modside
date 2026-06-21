@@ -79,19 +79,38 @@ namespace GeneKerman
             }
         }
 
-        /// <summary>Read KSP.log bytes for a moderation report. Returns null if absent.</summary>
+        /// <summary>Read KSP.log bytes for a moderation report. Returns null if absent.
+        /// KSP holds the log open for writing, so we copy via a shared read stream
+        /// (a plain File.ReadAllBytes can fail with a sharing violation).</summary>
         public static byte[] GetKspLog()
         {
-            try
+            // KSP.log lives in the game root on every platform; Player.log is a
+            // Unity fallback. Try each and use the first that reads.
+            string[] candidates =
             {
-                string path = Path.Combine(KSPUtil.ApplicationRootPath, "KSP.log");
-                return File.Exists(path) ? File.ReadAllBytes(path) : null;
-            }
-            catch (Exception e)
+                Path.Combine(KSPUtil.ApplicationRootPath, "KSP.log"),
+                Path.Combine(KSPUtil.ApplicationRootPath, "Player.log"),
+            };
+            foreach (string path in candidates)
             {
-                Debug.LogWarning("[GeneKerman] Could not read KSP.log: " + e.Message);
-                return null;
+                try
+                {
+                    if (!File.Exists(path)) continue;
+                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (var ms = new MemoryStream())
+                    {
+                        fs.CopyTo(ms);
+                        Debug.Log($"[GeneKerman] Read {ms.Length} bytes from {path} for device report.");
+                        return ms.ToArray();
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"[GeneKerman] Could not read {path}: {e.Message}");
+                }
             }
+            Debug.LogWarning("[GeneKerman] No KSP.log/Player.log found for device report.");
+            return null;
         }
     }
 }

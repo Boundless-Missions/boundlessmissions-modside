@@ -602,34 +602,51 @@ namespace GeneKerman
 
         private System.Collections.IEnumerator DeviceGateFlow(string challengeId)
         {
-            yield return Api.PollDeviceApproval(challengeId, (state, reportId) =>
+            // Capture the poll outcome, then act on it in the coroutine body so the
+            // diagnostics upload can run to completion (while still linked) before we
+            // clear the token — a fire-and-forget upload would race ClearToken.
+            string outcome = null, reportId = null;
+            yield return Api.PollDeviceApproval(challengeId, (state, rid) =>
             {
-                deviceGateActive = false;
-                deviceGateChallenge = null;
-                if (state == "approved")
-                {
-                    deviceVerifyWindow.Hide();
-                    notificationPopup.Show("✅ Device approved", "This PC is now trusted.");
-                    StartCoroutine(InitialFetch());
-                }
-                else if (state == "denied")
-                {
-                    // If the user reported this device, upload diagnostics for the
-                    // moderation ticket, then unlink so it stops trying.
-                    if (!string.IsNullOrEmpty(reportId))
-                        StartCoroutine(Api.UploadDeviceReport(reportId, (ok, r, s) => { }));
-                    Api.ClearToken();
-                    ShowMainWindow = false;
-                    deviceVerifyWindow.Show(
-                        "This device was not approved, so the mod has been unlinked here.\n\n" +
-                        "If this is your PC, run /g linkcode in Discord and link again.");
-                }
-                else // expired
-                {
-                    deviceVerifyWindow.Show(
-                        "The device request expired. Reopen the mod window to try again.");
-                }
+                outcome = state;
+                reportId = rid;
             });
+
+            deviceGateActive = false;
+            deviceGateChallenge = null;
+
+            // Always close the verify window on a terminal outcome — it's centered
+            // on the same spot as the link window, so leaving it up would sit on top
+            // and swallow clicks. Terminal messages go to the non-blocking popup.
+            deviceVerifyWindow.Hide();
+
+            if (outcome == "approved")
+            {
+                notificationPopup.Show("✅ Device approved", "This PC is now trusted.");
+                StartCoroutine(InitialFetch());
+            }
+            else if (outcome == "denied")
+            {
+                // If the user reported this device, upload diagnostics for the
+                // moderation ticket BEFORE unlinking (so the request keeps a valid
+                // token), then unlink so this device stops trying.
+                if (!string.IsNullOrEmpty(reportId))
+                {
+                    Debug.Log("[GeneKerman] Device reported — uploading diagnostics…");
+                    yield return Api.UploadDeviceReport(reportId, (ok, r, s) =>
+                        Debug.Log($"[GeneKerman] Device report upload: ok={ok} ({s})"));
+                }
+                Api.ClearToken();
+                ShowMainWindow = false;
+                ShowLinkWindow = true;   // drop the user straight onto the link screen
+                notificationPopup.Show("🚫 Device not approved",
+                    "This PC was unlinked. Run /g linkcode in Discord to link again.");
+            }
+            else // expired
+            {
+                notificationPopup.Show("⌛ Device check expired",
+                    "Reopen the mod window to try again.");
+            }
         }
 
         /// <summary>Open the main window's Contracts tab focused on a specific contract.</summary>

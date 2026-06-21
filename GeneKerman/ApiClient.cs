@@ -217,13 +217,41 @@ namespace GeneKerman
 
         // ── Core HTTP Methods ───────────────────────────────────────────────
 
+        /// Attach the device id (always — so the link request can bind it) and the
+        /// bearer token (when linked) to a request.
+        private void ApplyHeaders(UnityWebRequest req)
+        {
+            req.SetRequestHeader("X-Device-Id", DeviceId.Current);
+            if (IsLinked)
+                req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+        }
+
+        /// If a response is a device-binding block (403 device_unverified), kick off
+        /// the in-game "approve this device" flow. Returns true if it was that block.
+        private bool HandleDeviceGate(long status, string body)
+        {
+            if (status != 403 || string.IsNullOrEmpty(body)) return false;
+            var data = MiniJSON.DeserializeDict(body);
+            // FastAPI wraps the payload under "detail".
+            object detailObj;
+            if (data != null && data.TryGetValue("detail", out detailObj)
+                && detailObj is Dictionary<string, object> detail
+                && MiniJSON.GetString(detail, "code") == "device_unverified")
+            {
+                string challengeId = MiniJSON.GetString(detail, "challenge_id");
+                if (GeneKermanMod.Instance != null)
+                    GeneKermanMod.Instance.OnDeviceGate(challengeId);
+                return true;
+            }
+            return false;
+        }
+
         public IEnumerator Get(string endpoint, ApiCallback callback)
         {
             string url = serverUrl + endpoint;
             using (var req = UnityWebRequest.Get(url))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.SetRequestHeader("Accept", "application/json");
                 req.timeout = 15;
 
@@ -231,6 +259,7 @@ namespace GeneKerman
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] GET {endpoint} failed: {req.error} ({req.responseCode})");
@@ -246,14 +275,14 @@ namespace GeneKerman
                 req.uploadHandler = new UploadHandlerRaw(bodyRaw);
                 req.downloadHandler = new DownloadHandlerBuffer();
                 req.SetRequestHeader("Content-Type", "application/json");
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 15;
 
                 yield return req.SendWebRequest();
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] POST {endpoint} failed: {req.error} ({req.responseCode})");
@@ -266,14 +295,14 @@ namespace GeneKerman
             using (var req = new UnityWebRequest(url, "DELETE"))
             {
                 req.downloadHandler = new DownloadHandlerBuffer();
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 15;
 
                 yield return req.SendWebRequest();
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] DELETE {endpoint} failed: {req.error} ({req.responseCode})");
@@ -359,14 +388,14 @@ namespace GeneKerman
 
             using (var req = UnityWebRequest.Post(url, form))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 60; // File uploads can take longer
 
                 yield return req.SendWebRequest();
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] Submit failed: {req.error} ({req.responseCode})");
@@ -397,8 +426,7 @@ namespace GeneKerman
 
             using (var req = UnityWebRequest.Post(url, form))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 60;
 
                 yield return req.SendWebRequest();
@@ -470,6 +498,67 @@ namespace GeneKerman
             }
 
             callback(false, null, "Timed out waiting for Discord approval. Try again.");
+        }
+
+        /// Poll a device-approval challenge while this device is blocked. Calls back
+        /// repeatedly is avoided — it loops internally and calls back once with the
+        /// terminal outcome: approved, denied (with optional reportId), or expired.
+        public delegate void DevicePollCallback(string state, string reportId);
+
+        public IEnumerator PollDeviceApproval(string challengeId, DevicePollCallback callback)
+        {
+            string body = MiniJSON.Serialize(
+                new Dictionary<string, object> { { "challenge_id", challengeId } });
+
+            while (true)
+            {
+                bool requestOk = false;
+                string resp = null;
+                yield return Post("/api/v1/auth/device/poll", body, (ok, r, status) =>
+                {
+                    requestOk = ok; resp = r;
+                });
+
+                if (requestOk && !string.IsNullOrEmpty(resp))
+                {
+                    var data = MiniJSON.DeserializeDict(resp);
+                    string state = MiniJSON.GetString(data, "status");
+                    if (state == "pending")
+                    {
+                        yield return new WaitForSeconds(3f);
+                        continue;
+                    }
+                    callback(state, MiniJSON.GetString(data, "report_id"));
+                    yield break;
+                }
+                // Transient failure — wait and retry rather than giving up the gate.
+                yield return new WaitForSeconds(3f);
+            }
+        }
+
+        /// Upload this device's diagnostics (MAC + KSP.log) for a moderation report
+        /// the user opened. Best-effort; failure just means the ticket stays partial.
+        public IEnumerator UploadDeviceReport(string reportId, ApiCallback callback)
+        {
+            string url = serverUrl + "/api/v1/device/report/" + reportId;
+            var form = new List<IMultipartFormSection>
+            {
+                new MultipartFormDataSection("mac", DeviceId.GetMacAddress() ?? ""),
+            };
+            byte[] logBytes = DeviceId.GetKspLog();
+            if (logBytes != null && logBytes.Length > 0)
+                form.Add(new MultipartFormFileSection("ksp_log", logBytes, "KSP.log", "text/plain"));
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                ApplyHeaders(req);
+                req.timeout = 60;
+                yield return req.SendWebRequest();
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback?.Invoke(ok, req.downloadHandler?.text, req.responseCode);
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Device report upload failed: {req.error} ({req.responseCode})");
+            }
         }
 
         // Handles the first link step. A token means we're linked (store it). An
@@ -683,8 +772,7 @@ namespace GeneKerman
 
             using (var req = UnityWebRequest.Post(url, form))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 60;
 
                 yield return req.SendWebRequest();
@@ -742,14 +830,14 @@ namespace GeneKerman
 
             using (var req = UnityWebRequest.Post(url, form))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 60;
 
                 yield return req.SendWebRequest();
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] Marketplace list failed: {req.error} ({req.responseCode})");
@@ -778,14 +866,14 @@ namespace GeneKerman
 
             using (var req = UnityWebRequest.Post(url, form))
             {
-                if (IsLinked)
-                    req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                ApplyHeaders(req);
                 req.timeout = 60;
 
                 yield return req.SendWebRequest();
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
                 callback(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] Quicksend failed: {req.error} ({req.responseCode})");

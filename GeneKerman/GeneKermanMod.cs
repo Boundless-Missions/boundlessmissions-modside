@@ -59,6 +59,11 @@ namespace GeneKerman
         private UI.CreateContractWindow createContractWindow;
         private UI.NotificationPopup notificationPopup;
         private UI.CheckpointPrompt checkpointPrompt;
+        private UI.DeviceVerifyWindow deviceVerifyWindow;
+
+        // Device binding: set while we're blocked on an unrecognized-device challenge.
+        private bool deviceGateActive;
+        private string deviceGateChallenge;
 
         // Milestone hero-shot capture (rendezvous / flyby / asteroid)
         private CheckpointDetector checkpointDetector;
@@ -101,6 +106,7 @@ namespace GeneKerman
             createContractWindow = new UI.CreateContractWindow();
             notificationPopup = new UI.NotificationPopup();
             checkpointPrompt = new UI.CheckpointPrompt();
+            deviceVerifyWindow = new UI.DeviceVerifyWindow();
             checkpointDetector = new CheckpointDetector(OnCheckpoint)
             {
                 IsCaptureEnabled = () => Api != null && Api.CheckpointPhotosEnabled,
@@ -424,6 +430,7 @@ namespace GeneKerman
                 createContractWindow.Draw();
                 notificationPopup.Draw();
                 checkpointPrompt.Draw();
+                deviceVerifyWindow.Draw();
             }
             finally
             {
@@ -574,6 +581,55 @@ namespace GeneKerman
         public void ShowNotification(string title, string message)
         {
             notificationPopup.Show(title, message);
+        }
+
+        /// Called by ApiClient when the server blocks this device (device binding).
+        /// Opens the "approve in Discord" prompt and polls until the user decides.
+        public void OnDeviceGate(string challengeId)
+        {
+            if (string.IsNullOrEmpty(challengeId)) return;
+            if (deviceGateActive && deviceGateChallenge == challengeId) return; // already handling
+            deviceGateActive = true;
+            deviceGateChallenge = challengeId;
+            deviceVerifyWindow.Show(
+                "A new device is using your account, so this PC is blocked for now.\n\n" +
+                "Check your Discord DMs:\n" +
+                "• Press \"✅ Yes, it's me\" if you switched PCs / reinstalled.\n" +
+                "• Press \"🚫 No — report\" only if it wasn't you.\n\n" +
+                "Waiting for your response…");
+            StartCoroutine(DeviceGateFlow(challengeId));
+        }
+
+        private System.Collections.IEnumerator DeviceGateFlow(string challengeId)
+        {
+            yield return Api.PollDeviceApproval(challengeId, (state, reportId) =>
+            {
+                deviceGateActive = false;
+                deviceGateChallenge = null;
+                if (state == "approved")
+                {
+                    deviceVerifyWindow.Hide();
+                    notificationPopup.Show("✅ Device approved", "This PC is now trusted.");
+                    StartCoroutine(InitialFetch());
+                }
+                else if (state == "denied")
+                {
+                    // If the user reported this device, upload diagnostics for the
+                    // moderation ticket, then unlink so it stops trying.
+                    if (!string.IsNullOrEmpty(reportId))
+                        StartCoroutine(Api.UploadDeviceReport(reportId, (ok, r, s) => { }));
+                    Api.ClearToken();
+                    ShowMainWindow = false;
+                    deviceVerifyWindow.Show(
+                        "This device was not approved, so the mod has been unlinked here.\n\n" +
+                        "If this is your PC, run /g linkcode in Discord and link again.");
+                }
+                else // expired
+                {
+                    deviceVerifyWindow.Show(
+                        "The device request expired. Reopen the mod window to try again.");
+                }
+            });
         }
 
         /// <summary>Open the main window's Contracts tab focused on a specific contract.</summary>

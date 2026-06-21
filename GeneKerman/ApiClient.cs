@@ -422,22 +422,59 @@ namespace GeneKerman
                 HandleLinkResponse(ok, resp, callback));
         }
 
-        /// Submit the code DM'd to the user (when 2FA is enabled) to finish linking.
-        public IEnumerator VerifyTwoFA(string challengeId, string code,
+        /// Poll the server until the user approves the login in their Discord DM.
+        /// The user pressed /g linkcode → entered the code here → the bot DM'd them
+        /// a Log-in button; this waits for that press. Calls back exactly once:
+        /// success with the linked data (token stored), or failure with a message.
+        public IEnumerator PollLoginApproval(string challengeId,
             ApiCallback<Dictionary<string, object>> callback)
         {
-            var body = new Dictionary<string, object>
+            string body = MiniJSON.Serialize(
+                new Dictionary<string, object> { { "challenge_id", challengeId } });
+            const int maxAttempts = 95;   // ~3 min at 2s spacing, matches server TTL
+
+            for (int i = 0; i < maxAttempts; i++)
             {
-                { "challenge_id", challengeId },
-                { "code", code },
-            };
-            yield return Post("/api/v1/auth/link/2fa", MiniJSON.Serialize(body), (ok, resp, status) =>
-                HandleLinkResponse(ok, resp, callback));
+                bool requestOk = false;
+                long code = 0;
+                string resp = null;
+                yield return Post("/api/v1/auth/link/poll", body, (ok, r, status) =>
+                {
+                    requestOk = ok; resp = r; code = status;
+                });
+
+                var data = !string.IsNullOrEmpty(resp) ? MiniJSON.DeserializeDict(resp) : null;
+
+                if (requestOk && data != null)
+                {
+                    string token = MiniJSON.GetString(data, "token");
+                    if (!string.IsNullOrEmpty(token))
+                    {
+                        SetToken(token);
+                        callback(true, data, null);
+                        yield break;
+                    }
+                    // status == "pending" → fall through and keep waiting.
+                }
+                else if (code >= 400 && code < 500)
+                {
+                    // Denied or expired — terminal. Surface the server's detail.
+                    string error = data != null
+                        ? MiniJSON.GetString(data, "detail", "Login was not approved.")
+                        : "Login was not approved.";
+                    callback(false, null, error);
+                    yield break;
+                }
+                // Pending, or a transient network/5xx blip → wait and retry.
+                yield return new WaitForSeconds(2f);
+            }
+
+            callback(false, null, "Timed out waiting for Discord approval. Try again.");
         }
 
-        // Shared handling for both link steps. A token in the response means we're
-        // linked (store it). A "2fa_required" status means the caller must collect
-        // the DM'd code and call VerifyTwoFA — the response carries challenge_id.
+        // Handles the first link step. A token means we're linked (store it). An
+        // "approval_required" status means the user must approve in Discord — the
+        // response carries challenge_id and the caller polls via PollLoginApproval.
         // Anything else is an error, surfacing the server's detail when present.
         private void HandleLinkResponse(bool ok, string resp,
             ApiCallback<Dictionary<string, object>> callback)
@@ -452,9 +489,9 @@ namespace GeneKerman
                     callback(true, data, null);
                     return;
                 }
-                if (MiniJSON.GetString(data, "status") == "2fa_required")
+                if (MiniJSON.GetString(data, "status") == "approval_required")
                 {
-                    callback(true, data, null);   // not linked yet — 2FA pending
+                    callback(true, data, null);   // not linked yet — awaiting approval
                     return;
                 }
             }

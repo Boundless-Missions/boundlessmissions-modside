@@ -17,10 +17,10 @@ namespace GeneKerman.UI
         private string statusMessage = "";
         private bool isLinking;
 
-        // Discord DM 2FA: set once /auth/link returns a "2fa_required" challenge.
-        private bool awaiting2FA;
-        private string twofaChallengeId = "";
-        private string twofaCode = "";
+        // Discord login approval: set once /auth/link returns "approval_required".
+        // The user presses a Log-in button in their Discord DM; we poll until then.
+        private bool awaitingApproval;
+        private string approvalChallengeId = "";
         private string serverUrlInput = "";
         private bool showSettings;
 
@@ -110,7 +110,7 @@ namespace GeneKerman.UI
             GUILayout.Label("🎮 Gene Kerman — Link KSP", titleStyle);
             GUILayout.Space(10);
 
-            if (!awaiting2FA)
+            if (!awaitingApproval)
             {
                 // Instructions
                 GUILayout.Label(
@@ -135,30 +135,18 @@ namespace GeneKerman.UI
             }
             else
             {
-                // Second factor: code delivered to the user's Discord DMs.
+                // Push approval: the user confirms in their own Discord DM. Nothing
+                // to type here — we just wait for their button press.
                 GUILayout.Label(
-                    "Check your Discord DMs for a verification code,\nthen enter it below.",
+                    "Check your Discord DMs and press \"✅ Log in\"\nto approve this sign-in.\n\nWaiting for approval…",
                     labelStyle
                 );
                 GUILayout.Space(15);
 
-                GUI.SetNextControlName("TwoFAField");
-                twofaCode = GUILayout.TextField(twofaCode, 6, codeFieldStyle);
-
-                GUILayout.Space(10);
-
-                GUI.enabled = !isLinking && twofaCode.Length == 6;
-                if (GUILayout.Button(isLinking ? "Verifying..." : "[Verify] Verify Code", buttonStyle))
+                if (GUILayout.Button("← Cancel", GUI.skin.label))
                 {
-                    DoVerify2FA();
-                }
-                GUI.enabled = true;
-
-                if (GUILayout.Button("← Back", GUI.skin.label))
-                {
-                    awaiting2FA = false;
-                    twofaCode = "";
-                    twofaChallengeId = "";
+                    awaitingApproval = false;
+                    approvalChallengeId = "";
                     statusMessage = "";
                 }
             }
@@ -246,13 +234,13 @@ namespace GeneKerman.UI
                 GeneKermanMod.Instance.Api.LinkAccount(linkCode, (ok, data, err) =>
                 {
                     isLinking = false;
-                    if (ok && MiniJSON.GetString(data, "status") == "2fa_required")
+                    if (ok && MiniJSON.GetString(data, "status") == "approval_required")
                     {
-                        // Server DM'd a code — switch to the verification step.
-                        twofaChallengeId = MiniJSON.GetString(data, "challenge_id");
-                        twofaCode = "";
-                        awaiting2FA = true;
-                        statusMessage = "(Ok) Code sent to your Discord DMs.";
+                        // Server DM'd a Log-in button — wait for the user to press it.
+                        approvalChallengeId = MiniJSON.GetString(data, "challenge_id");
+                        awaitingApproval = true;
+                        statusMessage = "(Ok) Approve the login in your Discord DMs.";
+                        StartApprovalPoll();
                     }
                     else if (ok)
                     {
@@ -267,24 +255,26 @@ namespace GeneKerman.UI
             );
         }
 
-        private void DoVerify2FA()
+        private void StartApprovalPoll()
         {
-            isLinking = true;
-            statusMessage = "Verifying...";
-
+            string challengeId = approvalChallengeId;
             GeneKermanMod.Instance.RunCoroutine(
-                GeneKermanMod.Instance.Api.VerifyTwoFA(twofaChallengeId, twofaCode, (ok, data, err) =>
+                GeneKermanMod.Instance.Api.PollLoginApproval(challengeId, (ok, data, err) =>
                 {
-                    isLinking = false;
+                    // Ignore a stale poll the user already cancelled / restarted.
+                    if (!awaitingApproval || approvalChallengeId != challengeId)
+                        return;
                     if (ok)
                     {
-                        awaiting2FA = false;
+                        awaitingApproval = false;
                         statusMessage = "(Ok) Linked as " + MiniJSON.GetString(data, "username") + "!";
                         GeneKermanMod.Instance.OnAccountLinked(data);
                     }
                     else
                     {
-                        statusMessage = "(No) " + (err ?? "Verification failed. Try again.");
+                        awaitingApproval = false;
+                        approvalChallengeId = "";
+                        statusMessage = "(No) " + (err ?? "Login was not approved.");
                     }
                 })
             );

@@ -1912,6 +1912,16 @@ namespace GeneKerman.UI
                 SetStatus(newNotifs ? "(Ok) Notifications enabled." : "(Ok) Notifications disabled.");
             }
 
+            GUILayout.Space(18);
+
+            // Version / build info
+            GUILayout.Label("ℹ️ Version", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
+            GUILayout.Space(4);
+            GUILayout.Label($"Mod version: {GeneKerman.ModVersion.Current}", labelStyle);
+            string buildHash = GeneKerman.ModVersion.Sha256;
+            if (!string.IsNullOrEmpty(buildHash))
+                GUILayout.Label($"Build: {buildHash.Substring(0, System.Math.Min(12, buildHash.Length))}", labelStyle);
+
             GUILayout.EndVertical();
         }
 

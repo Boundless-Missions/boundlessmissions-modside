@@ -33,6 +33,13 @@ fi
 
 echo "✅ Build successful."
 
+# Print the DLL's SHA256 — this is the hash to register with /admin publishversion
+# in Discord (or paste into its `sha256` field) so the update gate recognises this build.
+if command -v sha256sum >/dev/null 2>&1; then
+    DLL_HASH="$(sha256sum "$PROJECT_DIR/bin/GeneKerman.dll" | cut -d' ' -f1)"
+    echo "   GeneKerman.dll SHA256: $DLL_HASH"
+fi
+
 # ── Step 2: Prepare GameData ─────────────────────────────
 echo ""
 echo "▶ Preparing GameData structure..."

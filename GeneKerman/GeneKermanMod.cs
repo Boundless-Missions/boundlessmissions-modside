@@ -61,9 +61,17 @@ namespace GeneKerman
         private UI.CheckpointPrompt checkpointPrompt;
         private UI.DeviceVerifyWindow deviceVerifyWindow;
 
+        private UI.UpdateRequiredWindow updateWindow;
+
         // Device binding: set while we're blocked on an unrecognized-device challenge.
         private bool deviceGateActive;
         private string deviceGateChallenge;
+
+        // Version gate: set when the server reports this DLL is no longer the latest.
+        // While true, every mod window except the update prompt is suppressed.
+        public bool UpdateRequired { get; private set; }
+        public string LatestVersion { get; private set; } = "";
+        public string UpdateDownloadUrl { get; private set; } = "";
 
         // Milestone hero-shot capture (rendezvous / flyby / asteroid)
         private CheckpointDetector checkpointDetector;
@@ -107,6 +115,7 @@ namespace GeneKerman
             notificationPopup = new UI.NotificationPopup();
             checkpointPrompt = new UI.CheckpointPrompt();
             deviceVerifyWindow = new UI.DeviceVerifyWindow();
+            updateWindow = new UI.UpdateRequiredWindow();
             checkpointDetector = new CheckpointDetector(OnCheckpoint)
             {
                 IsCaptureEnabled = () => Api != null && Api.CheckpointPhotosEnabled,
@@ -126,6 +135,9 @@ namespace GeneKerman
             // Hide our IMGUI windows whenever the game UI is hidden (F2 or a capture).
             GameEvents.onHideUI.Add(OnHideUI);
             GameEvents.onShowUI.Add(OnShowUI);
+
+            // Gate outdated clients: ask the server whether this DLL is the latest.
+            StartCoroutine(CheckVersionRoutine());
 
             // If already linked, do an initial data fetch and open the live socket
             if (Api.IsLinked)
@@ -392,6 +404,13 @@ namespace GeneKerman
 
         private void OnToolbarClick()
         {
+            // Outdated client: the only thing the button does is re-show the gate.
+            if (UpdateRequired)
+            {
+                updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
+                return;
+            }
+
             if (Api.IsLinked)
             {
                 ShowMainWindow = !ShowMainWindow;
@@ -420,17 +439,25 @@ namespace GeneKerman
             GUI.skin = UI.GKSkin.GetSkin(prevSkin);
             try
             {
-                if (ShowMainWindow && Api.IsLinked)
-                    mainWindow.Draw();
+                // Outdated client: nothing but the update prompt is usable.
+                if (UpdateRequired)
+                {
+                    updateWindow.Draw();
+                }
+                else
+                {
+                    if (ShowMainWindow && Api.IsLinked)
+                        mainWindow.Draw();
 
-                if (ShowLinkWindow)
-                    linkWindow.Draw();
+                    if (ShowLinkWindow)
+                        linkWindow.Draw();
 
-                submitWindow.Draw();
-                createContractWindow.Draw();
-                notificationPopup.Draw();
-                checkpointPrompt.Draw();
-                deviceVerifyWindow.Draw();
+                    submitWindow.Draw();
+                    createContractWindow.Draw();
+                    notificationPopup.Draw();
+                    checkpointPrompt.Draw();
+                    deviceVerifyWindow.Draw();
+                }
             }
             finally
             {
@@ -582,6 +609,43 @@ namespace GeneKerman
         {
             notificationPopup.Show(title, message);
         }
+
+        /// Ask the server whether this DLL is the published latest. Fails open: a
+        /// failed/unreachable check, a disabled gate, or no published version all
+        /// leave the mod fully usable. An outdated client is hard-blocked until it
+        /// updates (or a re-check clears it).
+        public System.Collections.IEnumerator CheckVersionRoutine()
+        {
+            yield return Api.CheckVersion((ok, data, err) =>
+            {
+                if (!ok || data == null) return;   // fail open — never block on a bad check
+
+                bool enabled = MiniJSON.GetBool(data, "enabled", true);
+                bool upToDate = MiniJSON.GetBool(data, "up_to_date", true);
+
+                if (!enabled || upToDate)
+                {
+                    if (UpdateRequired)
+                    {
+                        UpdateRequired = false;
+                        updateWindow.Hide();
+                    }
+                    return;
+                }
+
+                LatestVersion = MiniJSON.GetString(data, "latest_version");
+                UpdateDownloadUrl = MiniJSON.GetString(data, "download_url");
+                UpdateRequired = true;
+                ShowMainWindow = false;
+                ShowLinkWindow = false;
+                updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
+                Debug.Log($"[GeneKerman] Update required: {ModVersion.Current} → {LatestVersion}");
+            });
+        }
+
+        /// Re-run the version check (e.g. after the player updated and the window's
+        /// "Re-check" button is pressed).
+        public void RecheckVersion() => StartCoroutine(CheckVersionRoutine());
 
         /// Called by ApiClient when the server blocks this device (device binding).
         /// Opens the "approve in Discord" prompt and polls until the user decides.

@@ -606,6 +606,26 @@ namespace GeneKerman
             });
         }
 
+        /// <summary>
+        /// Ask the server whether this client's DLL is the published latest. Sends
+        /// our SHA256 + version label (unauthenticated endpoint, works before linking).
+        /// On a failed request the callback's data is null — callers must fail open
+        /// (never block the player on a check that didn't reach the server).
+        /// </summary>
+        public IEnumerator CheckVersion(ApiCallback<Dictionary<string, object>> callback)
+        {
+            string endpoint = "/api/v1/version/check"
+                + "?hash=" + Uri.EscapeDataString(ModVersion.Sha256)
+                + "&version=" + Uri.EscapeDataString(ModVersion.Current);
+            yield return Get(endpoint, (ok, resp, status) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                    callback(true, MiniJSON.DeserializeDict(resp), null);
+                else
+                    callback(false, null, "version check failed");
+            });
+        }
+
         public IEnumerator GetProfile(ApiCallback<Dictionary<string, object>> callback)
         {
             yield return Get("/api/v1/user/profile", (ok, resp, status) =>

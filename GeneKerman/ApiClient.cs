@@ -23,7 +23,7 @@ namespace GeneKerman
     public class ApiClient
     {
         /// <summary>Address of the official UPoK server, used when "Official Server" is selected.</summary>
-        public const string OfficialServerUrl = "http://128.140.111.93:5022";
+        public const string OfficialServerUrl = "https://mainserver.boundlessmissions.com";
 
         private string serverUrl;
         private string customServerUrl = "http://localhost:5022"; // last custom URL, preserved when official is active

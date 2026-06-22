@@ -32,6 +32,7 @@ namespace GeneKerman
         private volatile bool sendDead;     // set by a failed keepalive (bg thread), consumed by Tick
         private volatile bool justConnected; // set by OnOpen (bg thread), consumed by ConsumeJustConnected
         private volatile bool versionPoke;    // set by a "version" frame (bg thread), consumed by ConsumeVersionPoke
+        private volatile bool policyPoke;     // set by a "policy" frame (bg thread), consumed by ConsumePolicyPoke
         private bool enabled;               // set by Connect()/Disconnect(), read on main thread
         private float nextRetryTime;
         private float lastKeepalive;        // main-thread keepalive timer
@@ -73,6 +74,18 @@ namespace GeneKerman
         {
             if (!versionPoke) return false;
             versionPoke = false;
+            return true;
+        }
+
+        /// <summary>
+        /// Returns true once after the server broadcast a "policy" frame (the Privacy
+        /// Policy / Terms version was bumped). The caller re-fetches the policy version
+        /// in response and raises the re-consent gate if the client is now behind.
+        /// </summary>
+        public bool ConsumePolicyPoke()
+        {
+            if (!policyPoke) return false;
+            policyPoke = false;
             return true;
         }
 
@@ -231,6 +244,14 @@ namespace GeneKerman
                         if (MiniJSON.GetString(msg, "type") == "version")
                         {
                             versionPoke = true;
+                            return;
+                        }
+                        // A "policy" poke means the Privacy/Terms version was bumped —
+                        // flag it so the main thread re-fetches the policy version and
+                        // re-prompts consent if this client accepted an older one.
+                        if (MiniJSON.GetString(msg, "type") == "policy")
+                        {
+                            policyPoke = true;
                             return;
                         }
                         var notif = MiniJSON.GetDict(msg, "notification");

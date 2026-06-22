@@ -225,7 +225,7 @@ namespace GeneKerman
 
         protected override string GetDescription()
         {
-            return $"Boundless Missions Mission Manager assignment.\n\n" +
+            return $"Boundless Missions assignment.\n\n" +
                    $"Mission: {missionDescription}\n" +
                    $"Difficulty: {missionDifficulty}/10\n" +
                    $"Due: {missionDueDate}\n\n" +

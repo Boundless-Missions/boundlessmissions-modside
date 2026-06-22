@@ -107,7 +107,7 @@ namespace GeneKerman.UI
             GUILayout.BeginVertical(boxStyle);
 
             // Title
-            GUILayout.Label("🎮 Boundless Missions — Link KSP", titleStyle);
+            GUILayout.Label("🎮 Boundless Missions · Link KSP", titleStyle);
             GUILayout.Space(10);
 
             if (!awaitingApproval)

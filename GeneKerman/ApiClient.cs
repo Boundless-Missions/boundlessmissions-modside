@@ -25,11 +25,19 @@ namespace GeneKerman
         /// <summary>Address of the official BM server, used when "Official Server" is selected.</summary>
         public const string OfficialServerUrl = "https://mainserver.boundlessmissions.com";
 
+        /// <summary>Public Privacy Policy / Terms of Service pages linked from the consent gate.</summary>
+        public const string PrivacyPolicyUrl = "https://boundlessmissions.com/pp";
+        public const string TermsOfServiceUrl = "https://boundlessmissions.com/tos";
+
         private string serverUrl;
         private string customServerUrl = "http://localhost:5022"; // last custom URL, preserved when official is active
         private bool useOfficialServer;
         private bool notificationsEnabled = true;
         private bool checkpointPhotosEnabled = true;
+        // Master data-sharing switch (KSP add-on rule 8.2). While false the user has
+        // opted out: every outbound request is short-circuited (see TransmissionBlocked)
+        // and the mod runs inert until they re-enable it. Defaults on once consent is given.
+        private bool dataGatheringEnabled = true;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -49,6 +57,32 @@ namespace GeneKerman
         public bool NotificationsEnabled => notificationsEnabled;
         /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) are enabled.</summary>
         public bool CheckpointPhotosEnabled => checkpointPhotosEnabled;
+        /// <summary>Master opt-in: whether the mod may collect and transmit any data at
+        /// all. False means the user opted out — the mod is inert and sends nothing.</summary>
+        public bool DataGatheringEnabled => dataGatheringEnabled;
+
+        /// <summary>True when no request may leave this PC — either because the user
+        /// has not yet given first-run consent (rule 8.1) or has opted out of data
+        /// sharing (rule 8.2). Logged once per suppressed call for diagnostics.</summary>
+        private bool TransmissionBlocked
+        {
+            get
+            {
+                // Hard precondition: nothing is transmitted until the user has accepted
+                // the privacy policy, terms, and data-collection consent.
+                if (!Consent.Accepted)
+                {
+                    Debug.Log("[GeneKerman] Outbound request suppressed — privacy consent not given.");
+                    return true;
+                }
+                if (!dataGatheringEnabled)
+                {
+                    Debug.Log("[GeneKerman] Outbound request suppressed — data sharing is off.");
+                    return true;
+                }
+                return false;
+            }
+        }
 
         /// <summary>ws/wss base derived from the configured http/https server URL.</summary>
         private string WebSocketBase
@@ -124,9 +158,13 @@ namespace GeneKerman
                     var gk = node.GetNode("GeneKerman");
                     if (gk != null)
                     {
-                        bool.TryParse(gk.GetValue("useOfficialServer") ?? "false", out useOfficialServer);
+                        // Default to the official server when the key is absent (a
+                        // shipped/legacy settings.cfg) — a custom IP is only used when
+                        // the user explicitly chose it (which writes the key as false).
+                        bool.TryParse(gk.GetValue("useOfficialServer") ?? "true", out useOfficialServer);
                         bool.TryParse(gk.GetValue("enableNotifications") ?? "true", out notificationsEnabled);
                         bool.TryParse(gk.GetValue("enableCheckpointPhotos") ?? "true", out checkpointPhotosEnabled);
+                        bool.TryParse(gk.GetValue("enableDataGathering") ?? "true", out dataGatheringEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -192,6 +230,14 @@ namespace GeneKerman
             SaveSettings();
         }
 
+        /// <summary>Master opt-out for all data sharing (KSP add-on rule 8.2). When set
+        /// false the mod transmits nothing and runs inert until re-enabled.</summary>
+        public void SetDataGatheringEnabled(bool enabled)
+        {
+            dataGatheringEnabled = enabled;
+            SaveSettings();
+        }
+
         private void SaveSettings()
         {
             // Persist the custom URL components (ConfigNode-safe), even when the
@@ -218,6 +264,7 @@ namespace GeneKerman
             gk.AddValue("useOfficialServer", useOfficialServer);
             gk.AddValue("enableNotifications", notificationsEnabled);
             gk.AddValue("enableCheckpointPhotos", checkpointPhotosEnabled);
+            gk.AddValue("enableDataGathering", dataGatheringEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -310,6 +357,8 @@ namespace GeneKerman
 
         public IEnumerator Get(string endpoint, ApiCallback callback)
         {
+            // Opt-out gate: while data sharing is off, no request leaves this PC.
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + endpoint;
             using (var req = UnityWebRequest.Get(url))
             {
@@ -330,6 +379,7 @@ namespace GeneKerman
 
         public IEnumerator Post(string endpoint, string jsonBody, ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + endpoint;
             using (var req = new UnityWebRequest(url, "POST"))
             {
@@ -353,6 +403,7 @@ namespace GeneKerman
 
         public IEnumerator Delete(string endpoint, ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + endpoint;
             using (var req = new UnityWebRequest(url, "DELETE"))
             {
@@ -386,6 +437,7 @@ namespace GeneKerman
             string deltaVVac,
             ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/contracts/" + contractId + "/submit";
 
             var form = new List<IMultipartFormSection>();
@@ -475,6 +527,7 @@ namespace GeneKerman
             byte[] pngData, string kind, string vesselName,
             string body, string targetName, ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/checkpoint-photo";
 
             var form = new List<IMultipartFormSection>
@@ -607,6 +660,7 @@ namespace GeneKerman
         /// the user opened. Best-effort; failure just means the ticket stays partial.
         public IEnumerator UploadDeviceReport(string reportId, ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/device/report/" + reportId;
             var form = new List<IMultipartFormSection>
             {
@@ -897,6 +951,7 @@ namespace GeneKerman
             string rescuePid, string kerbalsJson, string vesselNodeData,
             ApiCallback<Dictionary<string, object>> callback)
         {
+            if (TransmissionBlocked) { callback(false, null, "Data sharing is off."); yield break; }
             string url = serverUrl + "/api/v1/contracts/create_rescue";
             var inv = System.Globalization.CultureInfo.InvariantCulture;
 
@@ -965,6 +1020,7 @@ namespace GeneKerman
             byte[] blueprintData,
             ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/marketplace/list";
 
             var form = new List<IMultipartFormSection>();
@@ -1011,6 +1067,7 @@ namespace GeneKerman
             string recipientId, string kind, string craftName,
             byte[] fileData, string fileName, ApiCallback callback)
         {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/craft/send";
 
             var form = new List<IMultipartFormSection>();

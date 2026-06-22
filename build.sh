@@ -76,7 +76,10 @@ if [ ! -f "$GAMEDATA_SRC/PluginData/settings.cfg" ]; then
     cat > "$GAMEDATA_SRC/PluginData/settings.cfg" << 'EOF'
 GeneKerman
 {
-    serverUrl = http://localhost:5022
+    useOfficialServer = true
+    serverProtocol = http
+    serverHost = localhost
+    serverPort = 5022
     checkInterval = 600
     enableNotifications = true
     enableKVV = true

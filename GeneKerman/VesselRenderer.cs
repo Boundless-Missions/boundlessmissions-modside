@@ -282,12 +282,12 @@ namespace GeneKerman
             Bounds bounds = ComputeBounds(renderers);
             string name = ship.shipName ?? "Vessel";
             int partCount = ship.parts.Count;
-            float mass = 0, cost = 0;
+            float mass = 0;
             foreach (var p in ship.parts)
-            {
                 mass += p.mass + p.GetResourceMass();
-                cost += p.partInfo?.cost ?? 0f;
-            }
+            // Full funds cost (dry + module modifiers incl. TweakScale + fuel) — not the
+            // bare prefab cost. See VesselDataCollector.GetPartCost.
+            float cost = VesselDataCollector.GetVesselCost(ship.parts);
 
             // Editor: vessel is aligned to world axes
             return RenderBlueprint(renderers, bounds, Quaternion.identity,

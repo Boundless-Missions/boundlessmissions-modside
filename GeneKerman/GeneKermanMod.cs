@@ -29,6 +29,8 @@ namespace GeneKerman
         // State
         public bool ShowMainWindow { get; set; }
         public bool ShowLinkWindow { get; set; }
+        public bool ShowConsentWindow { get; set; }     // first-run privacy/terms opt-in gate
+        public bool ShowDataPausedWindow { get; set; }  // shown when data sharing is opted out
         public int UnreadNotifications { get; set; }
         public string LinkedUsername { get; private set; } = "";
 
@@ -42,6 +44,9 @@ namespace GeneKerman
         private float lastImportCheck;
         private const float ImportInterval = 30f; // craft-import queue poll cadence
         private bool initialized;
+        // Tracks Consent.Accepted across frames so a mid-session lapse (manual
+        // consent.cfg edit/delete, or a server policy bump) is caught on its edge.
+        private bool lastConsentOk = true;
 
         // Live notification push + de-dup of already-toasted notifications
         private NotificationSocket notifSocket;
@@ -55,6 +60,8 @@ namespace GeneKerman
         // UI Windows
         private UI.MainWindow mainWindow;
         private UI.LinkWindow linkWindow;
+        private UI.ConsentWindow consentWindow;
+        private UI.DataPausedWindow dataPausedWindow;
         private UI.SubmitWindow submitWindow;
         private UI.CreateContractWindow createContractWindow;
         private UI.NotificationPopup notificationPopup;
@@ -114,6 +121,8 @@ namespace GeneKerman
             // Initialize UI windows
             mainWindow = new UI.MainWindow();
             linkWindow = new UI.LinkWindow();
+            consentWindow = new UI.ConsentWindow();
+            dataPausedWindow = new UI.DataPausedWindow();
             submitWindow = new UI.SubmitWindow();
             createContractWindow = new UI.CreateContractWindow();
             notificationPopup = new UI.NotificationPopup();
@@ -141,13 +150,17 @@ namespace GeneKerman
             GameEvents.onShowUI.Add(OnShowUI);
 
             // Gate outdated clients: ask the server whether this DLL is the latest.
+            // Suppressed (sends nothing) until first-run consent is given; re-run from
+            // OnConsentGranted at that point.
             StartCoroutine(CheckVersionRoutine());
 
             // Periodic anti-tamper attestation (catches a DLL swapped mid-session).
             StartCoroutine(AttestationLoop());
 
-            // If already linked, do an initial data fetch and open the live socket
-            if (Api.IsLinked)
+            // If already linked, do an initial data fetch and open the live socket —
+            // unless the user has opted out of data sharing, in which case the mod
+            // stays inert until they re-enable it.
+            if (Api.IsLinked && Api.DataGatheringEnabled)
             {
                 StartCoroutine(InitialFetch());
                 if (Api.NotificationsEnabled)
@@ -173,6 +186,24 @@ namespace GeneKerman
         void Update()
         {
             if (!initialized || !Api.IsLinked) return;
+
+            // Data-sharing opt-out (rule 8.2): run inert — no polling, no checkpoint
+            // detection, no imports — and make sure the live socket is closed.
+            if (!Api.DataGatheringEnabled)
+            {
+                if (notifSocket.IsConnected)
+                    notifSocket.Disconnect();
+                return;
+            }
+
+            // Consent can lapse mid-session: consent.cfg edited/deleted (re-read live
+            // by Consent), or a server policy bump. Catch the true→false edge, go
+            // inert, and raise the re-accept gate. Stay inert until re-accepted.
+            bool consentOk = Consent.Accepted;
+            if (!consentOk && lastConsentOk)
+                OnConsentLapsed();
+            lastConsentOk = consentOk;
+            if (!consentOk) return;
 
             // Watch for flight milestones worth a hero shot. Independent of the
             // notifications toggle; gated by its own setting and paused while a prompt
@@ -225,6 +256,12 @@ namespace GeneKerman
             // A new mod version was just published (server poke) — re-check live so
             // an outdated client gates itself without waiting for a restart.
             if (notifSocket.ConsumeVersionPoke())
+                RecheckVersion();
+
+            // The Privacy/Terms version was bumped (server poke) — re-fetch it (same
+            // check carries policy_version) so this client raises the re-consent gate
+            // live instead of only on its next restart.
+            if (notifSocket.ConsumePolicyPoke())
                 RecheckVersion();
 
             // Drain notifications pushed over the socket and surface new ones as toasts.
@@ -428,6 +465,24 @@ namespace GeneKerman
                 return;
             }
 
+            // Data sharing opted out (rule 8.2): the mod is inert. The only window the
+            // button offers is the paused panel, which can re-enable sharing.
+            if (!Api.DataGatheringEnabled)
+            {
+                ShowDataPausedWindow = !ShowDataPausedWindow;
+                return;
+            }
+
+            // Privacy/terms opt-in not satisfied (rule 8.1): a fresh install, or a
+            // client whose consent lapsed (policy bump / edited consent.cfg). The only
+            // window the button offers is the opt-in gate; nothing else is reachable
+            // until it's accepted. ConsentWindow opens the link/main flow on accept.
+            if (!Consent.Accepted)
+            {
+                ShowConsentWindow = !ShowConsentWindow;
+                return;
+            }
+
             if (Api.IsLinked)
             {
                 ShowMainWindow = !ShowMainWindow;
@@ -461,12 +516,28 @@ namespace GeneKerman
                 {
                     updateWindow.Draw();
                 }
+                // Data sharing opted out: only the paused panel is drawn.
+                else if (!Api.DataGatheringEnabled)
+                {
+                    if (ShowDataPausedWindow)
+                        dataPausedWindow.Draw();
+                }
+                // Privacy/terms opt-in gate (rule 8.1) stands in front of everything:
+                // a fresh install, or a client whose consent lapsed (policy bump /
+                // edited consent.cfg). Nothing else — not even the main window of a
+                // linked client — is drawn until it's (re-)accepted.
+                else if (!Consent.Accepted)
+                {
+                    if (ShowConsentWindow)
+                        consentWindow.Draw();
+                }
                 else
                 {
                     if (ShowMainWindow && Api.IsLinked)
                         mainWindow.Draw();
 
-                    if (ShowLinkWindow)
+                    // Unlinked client past the opt-in gate: offer the link menu.
+                    if (!Api.IsLinked && (ShowLinkWindow || ShowConsentWindow))
                         linkWindow.Draw();
 
                     submitWindow.Draw();
@@ -643,6 +714,71 @@ namespace GeneKerman
             notificationPopup.Show(title, message);
         }
 
+        /// <summary>Called by the consent window once the user accepts the privacy
+        /// policy, terms, and data-collection opt-in. Until this point nothing is
+        /// transmitted (see ApiClient.TransmissionBlocked), so the version gate and any
+        /// resume work are kicked off here — not at startup.</summary>
+        public void OnConsentGranted()
+        {
+            ShowConsentWindow = false;
+            ShowLinkWindow = true;   // proceed to the link menu
+
+            // The startup version check was suppressed pre-consent; engage it now.
+            RecheckVersion();
+
+            // Re-consent on an already-linked client (e.g. a policy-version bump):
+            // resume fetching and notifications.
+            if (Api.IsLinked && Api.DataGatheringEnabled)
+            {
+                StartCoroutine(InitialFetch());
+                if (Api.NotificationsEnabled)
+                    notifSocket.Connect();
+            }
+        }
+
+        /// <summary>Consent no longer covers the required policy — the server bumped the
+        /// policy version, or consent.cfg was edited/deleted out from under us. Shut the
+        /// live UI and socket down and raise the re-accept gate; nothing transmits again
+        /// (TransmissionBlocked) until the player re-accepts via OnConsentGranted.</summary>
+        public void OnConsentLapsed()
+        {
+            notifSocket.Disconnect();
+            ShowMainWindow = false;
+            ShowLinkWindow = false;
+            ShowConsentWindow = true;   // surface the re-accept gate immediately
+            Debug.Log("[GeneKerman] Consent lapsed — re-accept required before any data is sent.");
+        }
+
+        /// <summary>Flip the master data-sharing opt-out (rule 8.2) and bring the mod's
+        /// live state in line: disabling closes the socket and every window and the
+        /// mod goes inert; enabling resumes fetching/notifications if linked.</summary>
+        public void SetDataGatheringEnabled(bool enabled)
+        {
+            if (Api.DataGatheringEnabled == enabled) return;
+            Api.SetDataGatheringEnabled(enabled);
+
+            if (!enabled)
+            {
+                // Opt-out: shut everything down so nothing is collected or sent.
+                notifSocket.Disconnect();
+                ShowMainWindow = false;
+                ShowLinkWindow = false;
+                ShowConsentWindow = false;
+                Debug.Log("[GeneKerman] Data sharing disabled — mod is now inert.");
+            }
+            else
+            {
+                ShowDataPausedWindow = false;
+                Debug.Log("[GeneKerman] Data sharing enabled — resuming.");
+                if (Api.IsLinked)
+                {
+                    StartCoroutine(InitialFetch());
+                    if (Api.NotificationsEnabled)
+                        notifSocket.Connect();
+                }
+            }
+        }
+
         /// Ask the server whether this DLL is the published latest. Fails open: a
         /// failed/unreachable check, a disabled gate, or no published version all
         /// leave the mod fully usable. An outdated client is hard-blocked until it
@@ -652,6 +788,16 @@ namespace GeneKerman
             yield return Api.CheckVersion((ok, data, err) =>
             {
                 if (!ok || data == null) return;   // fail open — never block on a bad check
+
+                // Privacy/Terms version gate (server-driven). Picked up on the same
+                // check the DLL gate uses. If the server now requires a newer policy
+                // than the player accepted, Consent.Accepted flips false → force the
+                // re-consent gate and stop transmitting until they re-accept.
+                int policyVersion = MiniJSON.GetInt(data, "policy_version", 0);
+                if (policyVersion > 0)
+                    Consent.SetRequiredVersion(policyVersion);
+                if (Api.IsLinked && !Consent.Accepted)
+                    OnConsentLapsed();
 
                 bool enabled = MiniJSON.GetBool(data, "enabled", true);
                 bool upToDate = MiniJSON.GetBool(data, "up_to_date", true);
@@ -708,7 +854,7 @@ namespace GeneKerman
                 "A new device is using your account, so this PC is blocked for now.\n\n" +
                 "Check your Discord DMs:\n" +
                 "• Press \"✅ Yes, it's me\" if you switched PCs / reinstalled.\n" +
-                "• Press \"🚫 No — report\" only if it wasn't you.\n\n" +
+                "• Press \"🚫 No, report it\" only if it wasn't you.\n\n" +
                 "Waiting for your response…");
             StartCoroutine(DeviceGateFlow(challengeId));
         }
@@ -730,7 +876,7 @@ namespace GeneKerman
                 "Someone is verifying this PC's login from Discord.\n" +
                 "If this is your PC, press \"✅ Yes, it's me\" in your Discord DM.");
             deviceVerifyWindow.Show(
-                "🔔 PING RECEIVED — someone is checking whether this PC is yours.\n\n" +
+                "🔔 PING RECEIVED. Someone is checking whether this PC is yours.\n\n" +
                 "If you're the account owner and meant to log in here, go to your\n" +
                 "Discord DM and press \"✅ Yes, it's me\".\n\n" +
                 "Waiting for your response…");

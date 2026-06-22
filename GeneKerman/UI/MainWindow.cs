@@ -448,7 +448,7 @@ namespace GeneKerman.UI
 
             // Header
             GUILayout.BeginHorizontal();
-            GUILayout.Label("Boundless Missions Mission Manager", headerStyle);
+            GUILayout.Label("Boundless Missions", headerStyle);
             GUILayout.FlexibleSpace();
             int unread = GeneKermanMod.Instance.UnreadNotifications;
             // The unread count IS the button — clicking the bell badge opens the
@@ -979,7 +979,7 @@ namespace GeneKerman.UI
 
                 if (string.IsNullOrEmpty(reqModlist) && limits.IsEmpty)
                 {
-                    GUILayout.Label("No part restriction — all parts allowed.", labelStyle);
+                    GUILayout.Label("No part restriction; all parts allowed.", labelStyle);
                 }
                 else
                 {
@@ -987,7 +987,7 @@ namespace GeneKerman.UI
                         GUILayout.Label(reqModlist, labelStyle);
                     // Mission part limits ("can't use the Thud", "nuclear only", ...).
                     if (!limits.IsEmpty)
-                        GUILayout.Label("⚠ Mission limits — " + limits.Describe(), labelStyle);
+                        GUILayout.Label("⚠ Mission limits: " + limits.Describe(), labelStyle);
                     GUILayout.Space(5);
 
                     bool currentlyEnforcing = EditorPartEnforcer.Instance != null &&
@@ -1038,7 +1038,7 @@ namespace GeneKerman.UI
                     string wreckUrl = MiniJSON.GetString(c, "rescue_vessel_node_url", null);
                     if (string.IsNullOrEmpty(wreckUrl))
                     {
-                        GUILayout.Label("Vessel data unavailable — Refresh contracts and retry.", labelStyle);
+                        GUILayout.Label("Vessel data unavailable. Refresh contracts and retry.", labelStyle);
                     }
                     else if (GUILayout.Button("🛟 Spawn stranded vessel", acceptBtnStyle, GUILayout.Height(30)))
                     {
@@ -1413,7 +1413,7 @@ namespace GeneKerman.UI
                 }
                 else
                 {
-                    SetStatus("(No) Could not log out all devices — try again.");
+                    SetStatus("(No) Could not log out all devices. Try again.");
                 }
             });
         }
@@ -1914,6 +1914,33 @@ namespace GeneKerman.UI
 
             GUILayout.Space(18);
 
+            // Privacy & data sharing (KSP add-on rule 8.2): a master opt-out reachable
+            // from the toolbar in every scene, incl. the Space Center. Turning it off
+            // makes the mod inert (it collects and sends nothing) until re-enabled.
+            GUILayout.Label("🔒 Privacy & Data", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
+            GUILayout.Space(4);
+            bool dataOn = api.DataGatheringEnabled;
+            bool newData = GUILayout.Toggle(dataOn, " Share data with the Boundless Missions servers");
+            if (newData != dataOn)
+            {
+                // Disabling closes this window, so confirm via the toolbar's paused panel.
+                GeneKermanMod.Instance.SetDataGatheringEnabled(newData);
+                SetStatus(newData ? "(Ok) Data sharing enabled." : "(Ok) Data sharing disabled — mod is now inactive.");
+            }
+            GUILayout.Label(
+                "When off, no information is collected or sent and the mod stops working " +
+                "until you turn it back on.",
+                labelStyle);
+            GUILayout.Space(4);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Privacy Policy ↗", tabStyle, GUILayout.Height(22)))
+                Application.OpenURL(ApiClient.PrivacyPolicyUrl);
+            if (GUILayout.Button("Terms of Service ↗", tabStyle, GUILayout.Height(22)))
+                Application.OpenURL(ApiClient.TermsOfServiceUrl);
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(18);
+
             // Version / build info
             GUILayout.Label("ℹ️ Version", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
             GUILayout.Space(4);
@@ -2078,7 +2105,7 @@ namespace GeneKerman.UI
             {
                 if (!ok || fileData == null)
                 {
-                    SetStatus("⚠ Could not download the stranded vessel — try again.");
+                    SetStatus("⚠ Could not download the stranded vessel. Try again.");
                     return;
                 }
                 string node = DecompressToString(fileData);
@@ -2097,11 +2124,11 @@ namespace GeneKerman.UI
                     // failure leaves the contract retryable instead of locked out.
                     GKContractScenario.Instance?.MarkVesselImported(contractId);
                     string dest = target != null ? target.body : "the target";
-                    SetStatus($"🛟 Stranded vessel '{name}' is adrift — find it and bring the crew to {dest}.");
+                    SetStatus($"🛟 Stranded vessel '{name}' is adrift. Find it and bring the crew to {dest}.");
                 }
                 else
                 {
-                    SetStatus("⚠ Could not spawn — enter Flight, Space Center, or Tracking Station and try again.");
+                    SetStatus("⚠ Could not spawn. Enter Flight, Space Center, or Tracking Station and try again.");
                 }
             });
             // Always clear the transient guard so a failed attempt can be retried.
@@ -2461,7 +2488,8 @@ namespace GeneKerman.UI
                     foreach (var part in ship.parts)
                     {
                         editorCraftMass += part.mass + part.GetResourceMass();
-                        editorCraftCost += part.partInfo?.cost ?? 0f;
+                        // Full funds cost (dry + module modifiers incl. TweakScale + fuel).
+                        editorCraftCost += VesselDataCollector.GetPartCost(part);
                     }
                 }
 
@@ -2952,7 +2980,7 @@ namespace GeneKerman.UI
                 ? $"🛰 Orbital Telemetry ({telemetryTextures.Count} craft)"
                 : (string.IsNullOrEmpty(blueprintVesselName)
                     ? "🛰 Orbital Telemetry"
-                    : $"🛰 {blueprintVesselName} — Telemetry");
+                    : $"🛰 {blueprintVesselName}: Telemetry");
             GUILayout.Label(title, headerStyle);
             GUILayout.FlexibleSpace();
             if (GUILayout.Button("－", tabStyle, GUILayout.Width(30), GUILayout.Height(26)))

@@ -91,7 +91,7 @@ namespace GeneKerman.UI
         private static readonly string[] ModlistLabels = { "None", "Stock Only", "Stock + DLC", "My Modlist", "Janitor's Closet" };
         private static readonly string[] ModlistDescs = {
             "No part restrictions.",
-            "Squad parts only — no Making History / Breaking Ground.",
+            "Squad parts only, no Making History / Breaking Ground.",
             "All Squad parts including official DLC expansions.",
             "All mods currently installed on your game.",
             "Only mods visible in your Janitor's Closet profile.",
@@ -519,7 +519,7 @@ namespace GeneKerman.UI
             // ── Recipient selector (hidden in auction mode — open to everyone) ──
             if (auctionMode)
             {
-                GUILayout.Label("Open to everyone — the lowest bidder in Discord wins.", labelStyle);
+                GUILayout.Label("Open to everyone; the lowest bidder in Discord wins.", labelStyle);
             }
             else
             {
@@ -709,7 +709,7 @@ namespace GeneKerman.UI
             }
             GUILayout.EndScrollView();
             if (bodyIndex >= 0 && bodyModded[bodyIndex])
-                GUILayout.Label("⚠ Modded planet — the rescuer is warned they need its planet pack.", labelStyle);
+                GUILayout.Label("⚠ Modded planet; the rescuer is warned they need its planet pack.", labelStyle);
 
             GUILayout.Space(6);
 

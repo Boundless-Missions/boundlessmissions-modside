@@ -96,14 +96,11 @@ namespace GeneKerman
             // Mass and cost
             if (vessel.parts != null)
             {
-                float mass = 0f, cost = 0f;
+                float mass = 0f;
                 foreach (var part in vessel.parts)
-                {
                     mass += part.mass + part.GetResourceMass();
-                    cost += part.partInfo?.cost ?? 0f;
-                }
                 snap.totalMass = mass;
-                snap.totalCost = cost;
+                snap.totalCost = GetVesselCost(vessel.parts);
             }
 
             // Orbital elements
@@ -122,6 +119,47 @@ namespace GeneKerman
             }
 
             return snap;
+        }
+
+        // ── Cost ────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Full KSP funds cost of a single part — the figure the game itself charges.
+        /// <para/>
+        /// <c>part.partInfo.cost</c> alone is only the PREFAB dry cost and is wrong for
+        /// most real crafts: it omits (1) fuel/resource cost, and (2) every
+        /// <c>IPartCostModifier</c> module — most importantly TweakScale, so a scaled-up
+        /// part would otherwise report its small unscaled price. We add the module cost
+        /// deltas (<c>GetModuleCosts</c>) and the loaded-resource cost to match KSP's own
+        /// total. Works on editor and flight parts alike.
+        /// </summary>
+        public static float GetPartCost(Part part)
+        {
+            if (part?.partInfo == null) return 0f;
+
+            float baseCost = part.partInfo.cost;
+            // Module modifiers (TweakScale, variants, fuel switches, …). Pass the base
+            // cost as KSP does so percentage-based modifiers resolve correctly.
+            float modules = 0f;
+            try { modules = part.GetModuleCosts(baseCost); } catch { /* prefab/compile — skip */ }
+
+            // Loaded resources (fuel, monoprop, ablator, …): amount × per-unit cost.
+            float resources = 0f;
+            if (part.Resources != null)
+                foreach (PartResource r in part.Resources)
+                    if (r?.info != null) resources += (float)(r.amount * r.info.unitCost);
+
+            return baseCost + modules + resources;
+        }
+
+        /// <summary>Full funds cost of an entire craft — sum of <see cref="GetPartCost"/>
+        /// over every part. Accepts any part list (flight vessel or editor ship).</summary>
+        public static float GetVesselCost(IList<Part> parts)
+        {
+            float total = 0f;
+            if (parts != null)
+                foreach (Part p in parts) total += GetPartCost(p);
+            return total;
         }
 
         // ── All Loaded Vessels ──────────────────────────────────────────────

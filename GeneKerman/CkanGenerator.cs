@@ -347,8 +347,8 @@ namespace GeneKerman
 
                 Post($"⚠ Missing {missing.Count} mod(s) for '{context}'",
                      $"Needs: {list}. A CKAN installer was saved to "
-                     + $"GeneKerman_MissingMods/{Path.GetFileName(outPath)} — "
-                     + "open it in CKAN (File ▸ Install from .ckan file).");
+                     + $"GeneKerman_MissingMods/{Path.GetFileName(outPath)}. "
+                     + "Open it in CKAN (File ▸ Install from .ckan file).");
             }
             catch (Exception ex)
             {

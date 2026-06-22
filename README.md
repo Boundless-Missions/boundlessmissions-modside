@@ -54,36 +54,36 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  KSP Game Process (Unity / Mono / .NET 4.7.2)                  │
+│  KSP Game Process (Unity / Mono / .NET 4.7.2)                   │
 │                                                                 │
 │  ┌─────────────────────┐    ┌────────────────────┐              │
-│  │  GeneKermanMod      │◄──►│  ApiClient         │──► HTTP/S   │
-│  │  (MonoBehaviour      │    │  (UnityWebRequest)  │    REST API │
-│  │   Singleton)         │    └────────────────────┘              │
-│  │                      │    ┌────────────────────┐              │
-│  │  • UI Windows        │◄──►│  NotificationSocket│──► WebSocket│
-│  │  • Lifecycle mgmt    │    │  (websocket-sharp)  │             │
-│  │  • Coroutine host    │    └────────────────────┘              │
-│  └──────────┬───────────┘                                       │
-│             │                                                    │
+│  │  GeneKermanMod      │◄──►│  ApiClient         │──► HTTP/S    │
+│  │  (MonoBehaviour     │    │  (UnityWebRequest) │    REST API  │
+│  │   Singleton)        │    └────────────────────┘              │
+│  │                     │    ┌────────────────────┐              │
+│  │  • UI Windows       │◄──►│  NotificationSocket│──► WebSocket │
+│  │  • Lifecycle mgmt   │    │  (websocket-sharp) │              │
+│  │  • Coroutine host   │    └────────────────────┘              │
+│  └──────────┬──────────┘                                        │
+│             │                                                   │
 │  ┌──────────▼───────────────────────────────────────────────┐   │
 │  │  Transfer Pipeline                                       │   │
 │  │  VesselTransfer ─► FlagTransfer ─► ScaleBridge           │   │
-│  │       ─► CkanGenerator ─► CraftThumb ─► CraftInstaller  │   │
+│  │       ─► CkanGenerator ─► CraftThumb ─► CraftInstaller   │   │
 │  └──────────────────────────────────────────────────────────┘   │
-│             │                                                    │
+│             │                                                   │
 │  ┌──────────▼───────────────────────────────────────────────┐   │
 │  │  Visual                                                  │   │
 │  │  VesselRenderer (orthographic blueprints, layer 30)      │   │
 │  │  CinematicCapture (in-game hero shots, flight camera)    │   │
 │  └──────────────────────────────────────────────────────────┘   │
-│             │                                                    │
+│             │                                                   │
 │  ┌──────────▼───────────────────────────────────────────────┐   │
 │  │  Contract System                                         │   │
 │  │  ContractIntegration ◄─► ContractConstraints             │   │
-│  │  EditorPartEnforcer ◄─► PartClassifier ◄─► CraftDeltaV  │   │
+│  │  EditorPartEnforcer ◄─► PartClassifier ◄─► CraftDeltaV   │   │
 │  └──────────────────────────────────────────────────────────┘   │
-│             │                                                    │
+│             │                                                   │
 │  ┌──────────▼───────────────────────────────────────────────┐   │
 │  │  Milestone Detection                                     │   │
 │  │  CheckpointDetector (proximity/SOI/event scanning)       │   │

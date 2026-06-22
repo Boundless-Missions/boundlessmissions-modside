@@ -145,14 +145,14 @@ namespace GeneKerman
 
             if (string.IsNullOrEmpty(localVer))
             {
-                Post("⚠ This craft uses TweakScale, which you don't have installed — "
-                     + "it may load mis-scaled or broken. Install TweakScale to use it correctly.");
+                Post("⚠ This craft uses TweakScale, which you don't have installed, "
+                     + "so it may load mis-scaled or broken. Install TweakScale to use it correctly.");
             }
             else if (!string.IsNullOrEmpty(senderVer) && senderVer != "unknown" &&
                      !string.Equals(senderVer, localVer, StringComparison.OrdinalIgnoreCase))
             {
                 Post($"⚠ This craft was built with TweakScale {senderVer} but you have {localVer}. "
-                     + "Different versions/forks can rescale parts differently — check the craft for misplaced parts.");
+                     + "Different versions/forks can rescale parts differently, so check the craft for misplaced parts.");
             }
         }
 

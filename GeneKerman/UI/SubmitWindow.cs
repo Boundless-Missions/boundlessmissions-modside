@@ -260,7 +260,7 @@ namespace GeneKerman.UI
                     if (dLat > margin || dLon > margin)
                     {
                         vesselValid = false;
-                        issues.Add($"❌ Off target: at {activeVessel.latitude:F2}°,{activeVessel.longitude:F2}° — " +
+                        issues.Add($"❌ Off target: at {activeVessel.latitude:F2}°,{activeVessel.longitude:F2}°, " +
                                    $"need {rescueTarget.lat:F2}°,{rescueTarget.lon:F2}° (±{margin:F2}°).");
                     }
                 }
@@ -281,7 +281,7 @@ namespace GeneKerman.UI
                     {
                         vesselValid = false;
                         issues.Add($"❌ Orbit off target: Ap {activeVessel.apoapsis / 1000:F0}km / " +
-                                   $"Pe {activeVessel.periapsis / 1000:F0}km — need " +
+                                   $"Pe {activeVessel.periapsis / 1000:F0}km, need " +
                                    $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
                     }
                 }
@@ -505,7 +505,8 @@ namespace GeneKerman.UI
                         foreach (var part in ship.parts)
                         {
                             editorCraftMass += part.mass + part.GetResourceMass();
-                            editorCraftCost += part.partInfo?.cost ?? 0f;
+                            // Full funds cost (dry + module modifiers incl. TweakScale + fuel).
+                            editorCraftCost += VesselDataCollector.GetPartCost(part);
                         }
 
                         // List every part that violates the contract's restriction.
@@ -696,7 +697,7 @@ namespace GeneKerman.UI
             GUILayout.Label("Active Vessel", headerStyle);
             GUILayout.BeginVertical(boxStyle);
             GUILayout.Label($"🚀 {activeVessel.vesselName}", valueStyle);
-            GUILayout.Label($"📍 {activeVessel.body} — {activeVessel.situation}", labelStyle);
+            GUILayout.Label($"📍 {activeVessel.body} · {activeVessel.situation}", labelStyle);
             GUILayout.Label($"Alt: {activeVessel.altitude:N0}m  ·  Parts: {activeVessel.partCount}  ·  Mass: {activeVessel.totalMass:F1}t", labelStyle);
             if (activeVessel.crewCount > 0)
                 GUILayout.Label($"👨‍🚀 Crew: {activeVessel.crewCount}", labelStyle);
@@ -728,7 +729,7 @@ namespace GeneKerman.UI
             GUILayout.BeginVertical(boxStyle);
 
             if (preDisabledByUs)
-                GUILayout.Label("ℹ️ Physics Range Extender paused — showing stock-range craft.", labelStyle);
+                GUILayout.Label("ℹ️ Physics Range Extender paused; showing stock-range craft.", labelStyle);
 
             if (nearbyEntries == null || nearbyEntries.Count == 0)
             {
@@ -741,7 +742,7 @@ namespace GeneKerman.UI
 
             int selCount = 0;
             foreach (var e in nearbyEntries) if (e.selected) selCount++;
-            GUILayout.Label($"{selCount}/{nearbyEntries.Count} selected — packed and sent with this submission.", labelStyle);
+            GUILayout.Label($"{selCount}/{nearbyEntries.Count} selected, packed and sent with this submission.", labelStyle);
 
             // Batch selectors
             GUILayout.BeginHorizontal();

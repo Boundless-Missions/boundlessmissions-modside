@@ -361,6 +361,11 @@ namespace GeneKerman.UI
                 fontSize = 11, fontStyle = FontStyle.Bold,
                 normal = { textColor = new Color(0.7f, 0.8f, 0.9f) },
                 alignment = TextAnchor.MiddleLeft,
+                // KSP's default label skin word-wraps; that pushes long sender
+                // names ("← Boundless Missions") onto a second line and overflows
+                // the fixed-height row. Keep it to a single clipped line instead.
+                wordWrap = false,
+                clipping = TextClipping.Clip,
             };
 
             mailSubjectStyle = new GUIStyle(GUI.skin.button)
@@ -824,7 +829,10 @@ namespace GeneKerman.UI
                     };
                     GUILayout.Label("●", dotStyle, GUILayout.Width(14));
 
-                    string dirLabel = isIncoming ? $"← {issuerName}" : $"→ {contractorName}";
+                    string sender = isIncoming ? issuerName : contractorName;
+                    if (!string.IsNullOrEmpty(sender) && sender.Length > 15)
+                        sender = sender.Substring(0, 14) + "…";
+                    string dirLabel = (isIncoming ? "← " : "→ ") + sender;
                     GUILayout.Label(dirLabel, mailSenderStyle, GUILayout.Width(110));
 
                     // [R] badge marks contracts that have a part restriction. The badge

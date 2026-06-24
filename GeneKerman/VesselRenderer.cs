@@ -22,11 +22,14 @@ namespace GeneKerman
     public static class VesselRenderer
     {
         // ── Image Layout ────────────────────────────────────────────────────
-        const int IMG_W = 2048;
-        const int IMG_H = 1100;
-        const int CELL  = 440;          // Each view cell size
-        const int RENDER_SIZE = 440;    // Individual render resolution
-        const int THUMB_SIZE = 256;     // Craft-thumbnail render resolution (KSP browser tile)
+        // SCALE multiplies every pixel dimension so the blueprint renders at higher
+        // resolution while keeping the layout proportions identical. SCALE = 2 → 2x quality.
+        const int SCALE = 2;
+        const int IMG_W = 2048 * SCALE;
+        const int IMG_H = 1100 * SCALE;
+        const int CELL  = 440 * SCALE;          // Each view cell size
+        const int RENDER_SIZE = 440 * SCALE;    // Individual render resolution
+        const int THUMB_SIZE = 256 * SCALE;     // Craft-thumbnail render resolution (KSP browser tile)
         const int ISOLATION_LAYER = 30;
         const float PADDING = 1.35f;
 
@@ -34,11 +37,11 @@ namespace GeneKerman
         static int _renderSeq;
 
         // Column X positions (4 columns)
-        static readonly int[] COL_X = { 64, 544, 1024, 1504 };
+        static readonly int[] COL_X = { 64 * SCALE, 544 * SCALE, 1024 * SCALE, 1504 * SCALE };
         // Row Y positions in screen coords (top-down, cell top edge)
-        static readonly int[] CELL_Y = { 90, 580 };
+        static readonly int[] CELL_Y = { 90 * SCALE, 580 * SCALE };
         // Label Y positions (above cells)
-        static readonly int[] LABEL_Y = { 70, 560 };
+        static readonly int[] LABEL_Y = { 70 * SCALE, 560 * SCALE };
 
         // ── Colors ──────────────────────────────────────────────────────────
         static readonly Color32 C_BG         = new Color32(13, 27, 42, 255);
@@ -259,6 +262,14 @@ namespace GeneKerman
                 return null;
             }
 
+            // Final alignment, in pixel space. The camera fit centres the *geometry*,
+            // but perspective foreshortening can still leave the rendered silhouette a
+            // few pixels off. Recentre on the actual opaque pixels — find their bounding
+            // box and shift it so its centre sits at the canvas centre — which is exact
+            // regardless of projection. The PADDING margin guarantees room to shift
+            // without clipping.
+            outPix = CenterOpaquePixels(outPix, THUMB_SIZE, THUMB_SIZE);
+
             var tex = new Texture2D(THUMB_SIZE, THUMB_SIZE, TextureFormat.ARGB32, false);
             tex.SetPixels32(outPix);
             tex.Apply();
@@ -266,6 +277,50 @@ namespace GeneKerman
             UnityEngine.Object.DestroyImmediate(tex);
             Debug.Log($"[GeneKerman] NW thumbnail rendered ({png.Length / 1024}KB).");
             return png;
+        }
+
+        /// <summary>Shift a square RGBA buffer so the bounding box of its opaque pixels
+        /// is centred on the canvas. Translation only (no scaling); exposed edges become
+        /// transparent. Returns the input unchanged if it's empty or already centred.</summary>
+        private static Color32[] CenterOpaquePixels(Color32[] pix, int w, int h, byte alphaThreshold = 3)
+        {
+            int minX = w, minY = h, maxX = -1, maxY = -1;
+            for (int y = 0; y < h; y++)
+            {
+                int row = y * w;
+                for (int x = 0; x < w; x++)
+                {
+                    if (pix[row + x].a > alphaThreshold)
+                    {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            if (maxX < 0) return pix; // fully transparent — nothing to centre
+
+            // Shift the content's bounding-box centre onto the canvas centre.
+            int dx = Mathf.RoundToInt((w - 1 - maxX - minX) * 0.5f);
+            int dy = Mathf.RoundToInt((h - 1 - maxY - minY) * 0.5f);
+            if (dx == 0 && dy == 0) return pix;
+
+            var outPix = new Color32[pix.Length]; // zero-init → transparent
+            for (int y = 0; y < h; y++)
+            {
+                int ny = y + dy;
+                if (ny < 0 || ny >= h) continue;
+                int srcRow = y * w;
+                int dstRow = ny * w;
+                for (int x = 0; x < w; x++)
+                {
+                    int nx = x + dx;
+                    if (nx < 0 || nx >= w) continue;
+                    outPix[dstRow + nx] = pix[srcRow + x];
+                }
+            }
+            return outPix;
         }
 
         // ── Scene Capture Entry Points ──────────────────────────────────────
@@ -402,6 +457,13 @@ namespace GeneKerman
                 whitePass[i] = readTex.GetPixels32();
 
                 RenderTexture.active = null;
+
+                // Pixel-space recentre for the perspective cells (NW/SE) — the same
+                // exact alignment used for the standalone NW thumbnail. Ortho cells are
+                // already centred by their projection, so they're left untouched (and a
+                // shift could clip their tighter framing).
+                if (VIEWS[i].perspective)
+                    CenterViewPasses(blackPass[i], whitePass[i], RENDER_SIZE);
             }
 
             // ── Cleanup render resources ──
@@ -441,14 +503,14 @@ namespace GeneKerman
                 int row = i / 4;
                 BlitView(blueprint, blackPass[i], whitePass[i], COL_X[col], CELL_Y[row]);
                 DrawCellBorder(blueprint, COL_X[col], CELL_Y[row]);
-                DrawString(blueprint, VIEWS[i].label, COL_X[col], LABEL_Y[row], 2, C_LABEL);
+                DrawString(blueprint, VIEWS[i].label, COL_X[col], LABEL_Y[row], 2 * SCALE, C_LABEL);
             }
 
             // Title and stats
-            DrawString(blueprint, vesselName.ToUpper(), 64, 18, 3, C_TITLE);
+            DrawString(blueprint, vesselName.ToUpper(), 64 * SCALE, 18 * SCALE, 3 * SCALE, C_TITLE);
             string stats = $"PARTS:{partCount}  MASS:{mass:F1}T";
             if (cost > 0) stats += $"  COST:{cost:N0}";
-            DrawString(blueprint, stats, 64, IMG_H - 28, 2, C_STATS);
+            DrawString(blueprint, stats, 64 * SCALE, IMG_H - 28 * SCALE, 2 * SCALE, C_STATS);
 
             // Outer frame
             DrawFrameBorder(blueprint);
@@ -499,20 +561,103 @@ namespace GeneKerman
             float depth = Mathf.Abs(ext.x * forward.x) + Mathf.Abs(ext.y * forward.y) + Mathf.Abs(ext.z * forward.z);
             float dist = Mathf.Max(viewSize, depth) * 4f;
 
-            cam.farClipPlane = dist * 3f;
-            cam.transform.position = center + view.direction * dist;
-            cam.transform.LookAt(center, view.up);
-
-            if (view.perspective)
+            if (!view.perspective)
             {
-                cam.orthographic = false;
-                cam.fieldOfView = 30f;
-            }
-            else
-            {
+                // Orthographic: the AABB centre projects exactly to the image centre
+                // and viewSize is the exact projected half-extent, so a single LookAt
+                // + orthographicSize frames it tight and centred.
                 cam.orthographic = true;
+                cam.farClipPlane = dist * 3f;
+                cam.transform.position = center + view.direction * dist;
+                cam.transform.LookAt(center, view.up);
                 cam.orthographicSize = viewSize * PADDING;
+                return;
             }
+
+            // Perspective (NW/SE): aiming at the AABB centre is *not* enough here —
+            // foreshortening shifts the silhouette's visual mass toward the parts
+            // nearest the camera, and a fixed-distance heuristic frames each craft
+            // differently, so long craft seen diagonally end up visibly off-centre
+            // with uneven margins. Instead, fit + centre in screen space: project the
+            // 8 AABB corners, then iteratively pan the look target so the projected
+            // box centres on (0.5, 0.5) and scale the distance so it fills the frame
+            // with the same PADDING margin as the ortho cells. A few passes converge.
+            cam.orthographic = false;
+            cam.fieldOfView = 30f;
+
+            Vector3[] corners = new Vector3[8];
+            for (int i = 0; i < 8; i++)
+                corners[i] = center + new Vector3(
+                    (i & 1) == 0 ? -ext.x : ext.x,
+                    (i & 2) == 0 ? -ext.y : ext.y,
+                    (i & 4) == 0 ? -ext.z : ext.z);
+
+            Vector3 pivot = center;
+            float tanHalfFov = Mathf.Tan(cam.fieldOfView * 0.5f * Mathf.Deg2Rad);
+
+            // Pass A — fit the distance (this also rough-centres as it goes). Angular
+            // size scales ~1/dist, so pushing the camera out by (span * PADDING) makes
+            // the projected box fill 1/PADDING of the frame. Converges in 2–3 passes.
+            for (int pass = 0; pass < 4; pass++)
+            {
+                cam.transform.position = pivot + view.direction * dist;
+                cam.transform.LookAt(pivot, view.up);
+
+                Vector4 box = ProjectedBox(cam, corners);
+                float span = Mathf.Max(box.z - box.x, box.w - box.y);
+                if (span < 0.0001f) break;
+
+                RecentrePivot(ref pivot, box, dist, tanHalfFov, right, up, cam.aspect);
+                dist *= span * PADDING;
+            }
+
+            // Pass B — centre at the *final* distance. The last resize in pass A nudges
+            // the perspective projection's centre back off (0.5, 0.5), so the centring
+            // has to come last, with the distance fixed. A single pan isn't exact
+            // (corners at different depths shift by different viewport amounts), so
+            // iterate a couple of times to converge.
+            for (int pass = 0; pass < 3; pass++)
+            {
+                cam.transform.position = pivot + view.direction * dist;
+                cam.transform.LookAt(pivot, view.up);
+                RecentrePivot(ref pivot, ProjectedBox(cam, corners), dist, tanHalfFov, right, up, cam.aspect);
+            }
+
+            cam.transform.position = pivot + view.direction * dist;
+            cam.transform.LookAt(pivot, view.up);
+            cam.farClipPlane = (dist + depth) * 3f;
+        }
+
+        /// <summary>Viewport-space bounding box (minX, minY, maxX, maxY) of the 8 world
+        /// corners as seen by the camera. ±Infinity sentinels so a silhouette that
+        /// temporarily spills outside [0,1] mid-iteration is still measured correctly.</summary>
+        private static Vector4 ProjectedBox(Camera cam, Vector3[] corners)
+        {
+            float minX = float.PositiveInfinity, minY = float.PositiveInfinity;
+            float maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
+            for (int i = 0; i < corners.Length; i++)
+            {
+                Vector3 vp = cam.WorldToViewportPoint(corners[i]);
+                if (vp.x < minX) minX = vp.x;
+                if (vp.x > maxX) maxX = vp.x;
+                if (vp.y < minY) minY = vp.y;
+                if (vp.y > maxY) maxY = vp.y;
+            }
+            return new Vector4(minX, minY, maxX, maxY);
+        }
+
+        /// <summary>Pan the look target so the projected box's centre moves toward the
+        /// image centre. The viewport offset is converted to a world shift using the
+        /// frustum size at the pivot's depth; panning +right moves the silhouette left,
+        /// hence the subtraction.</summary>
+        private static void RecentrePivot(ref Vector3 pivot, Vector4 box, float dist,
+            float tanHalfFov, Vector3 right, Vector3 up, float aspect)
+        {
+            float frustumH = 2f * dist * tanHalfFov;
+            float frustumW = frustumH * aspect;
+            float cx = (box.x + box.z) * 0.5f;
+            float cy = (box.y + box.w) * 0.5f;
+            pivot -= right * ((0.5f - cx) * frustumW) + up * ((0.5f - cy) * frustumH);
         }
 
         // ── Layer Isolation ─────────────────────────────────────────────────
@@ -613,13 +758,13 @@ namespace GeneKerman
             for (int ty = 0; ty < IMG_H; ty++)
             {
                 int sy = IMG_H - 1 - ty;  // screen Y
-                bool majorH = sy % 128 == 0;
-                bool minorH = sy % 20 == 0;
+                bool majorH = sy % (128 * SCALE) == 0;
+                bool minorH = sy % (20 * SCALE) == 0;
 
                 for (int x = 0; x < IMG_W; x++)
                 {
-                    bool majorV = x % 128 == 0;
-                    bool minorV = x % 20 == 0;
+                    bool majorV = x % (128 * SCALE) == 0;
+                    bool minorV = x % (20 * SCALE) == 0;
 
                     if (majorH || majorV)
                         px[ty * IMG_W + x] = C_GRID_MAJOR;
@@ -644,6 +789,63 @@ namespace GeneKerman
         /// Math: on black BG, pixel = vessel*a. On white BG, pixel = vessel*a + 255*(1-a).
         /// So (1-a) = avg(white - black) / 255, and final = black + blueprint*(1-a).
         /// </summary>
+        /// <summary>Recentre a perspective view's dual-pass renders in pixel space so the
+        /// silhouette sits centred in its cell. The camera fit centres the geometry, but
+        /// perspective foreshortening can still leave it a few pixels off. Finds the opaque
+        /// bounding box (from the two background passes) and shifts both passes by the same
+        /// amount, filling exposed edges with each pass's own background so alpha recovery
+        /// still reads them as empty. Translation only; no scaling.</summary>
+        private static void CenterViewPasses(Color32[] black, Color32[] white, int size)
+        {
+            int minX = size, minY = size, maxX = -1, maxY = -1;
+            for (int y = 0; y < size; y++)
+            {
+                int row = y * size;
+                for (int x = 0; x < size; x++)
+                {
+                    int i = row + x;
+                    Color32 bl = black[i], wh = white[i];
+                    // (1 - alpha): pure background ≈ 1, vessel pixel < 1. Same recovery
+                    // BlitView uses, so the bbox matches exactly what gets composited.
+                    float oma = ((wh.r - bl.r) + (wh.g - bl.g) + (wh.b - bl.b)) / (3f * 255f);
+                    if (oma < 0.99f)
+                    {
+                        if (x < minX) minX = x;
+                        if (x > maxX) maxX = x;
+                        if (y < minY) minY = y;
+                        if (y > maxY) maxY = y;
+                    }
+                }
+            }
+            if (maxX < 0) return; // empty cell — nothing to centre
+
+            int dx = Mathf.RoundToInt((size - 1 - maxX - minX) * 0.5f);
+            int dy = Mathf.RoundToInt((size - 1 - maxY - minY) * 0.5f);
+            if (dx == 0 && dy == 0) return;
+
+            ShiftPass(black, size, dx, dy, new Color32(0, 0, 0, 255));
+            ShiftPass(white, size, dx, dy, new Color32(255, 255, 255, 255));
+        }
+
+        /// <summary>Shift a square pixel buffer by (dx, dy), filling exposed edges with
+        /// <paramref name="fill"/> (each pass's background colour).</summary>
+        private static void ShiftPass(Color32[] pass, int size, int dx, int dy, Color32 fill)
+        {
+            var src = (Color32[])pass.Clone();
+            for (int y = 0; y < size; y++)
+            {
+                int dstRow = y * size;
+                int sy = y - dy;
+                for (int x = 0; x < size; x++)
+                {
+                    int sx = x - dx;
+                    pass[dstRow + x] = (sx >= 0 && sx < size && sy >= 0 && sy < size)
+                        ? src[sy * size + sx]
+                        : fill;
+                }
+            }
+        }
+
         private static void BlitView(Color32[] dst, Color32[] black, Color32[] white,
             int cellX, int cellScreenY)
         {
@@ -713,23 +915,26 @@ namespace GeneKerman
 
         private static void DrawCellBorder(Color32[] px, int sx, int sy)
         {
-            // 1px border around each cell
-            for (int x = sx - 1; x <= sx + CELL; x++)
+            // SCALE-px border around each cell (1px at base resolution)
+            for (int t = 0; t < SCALE; t++)
             {
-                SetPx(px, x, sy - 1, C_BORDER);
-                SetPx(px, x, sy + CELL, C_BORDER);
-            }
-            for (int y = sy - 1; y <= sy + CELL; y++)
-            {
-                SetPx(px, sx - 1, y, C_BORDER);
-                SetPx(px, sx + CELL, y, C_BORDER);
+                for (int x = sx - 1 - t; x <= sx + CELL + t; x++)
+                {
+                    SetPx(px, x, sy - 1 - t, C_BORDER);
+                    SetPx(px, x, sy + CELL + t, C_BORDER);
+                }
+                for (int y = sy - 1 - t; y <= sy + CELL + t; y++)
+                {
+                    SetPx(px, sx - 1 - t, y, C_BORDER);
+                    SetPx(px, sx + CELL + t, y, C_BORDER);
+                }
             }
         }
 
         private static void DrawFrameBorder(Color32[] px)
         {
-            // 2px frame around entire image
-            for (int t = 0; t < 2; t++)
+            // 2px frame around entire image, scaled with resolution
+            for (int t = 0; t < 2 * SCALE; t++)
             {
                 for (int x = 0; x < IMG_W; x++)
                 {
@@ -805,6 +1010,68 @@ namespace GeneKerman
                 }
                 cx += 6 * scale;  // 5px char + 1px spacing, scaled
             }
+        }
+
+        /// <summary>
+        /// Render a short text label centred on a square, opaque Texture2D using the
+        /// built-in 5×7 bitmap font. Shared by the editor View Cube (UI/ViewCube.cs) so it
+        /// can label cube faces without duplicating the font. Letters are scaled to fit the
+        /// requested size. Texture coords have y=0 at the bottom, so rows are flipped.
+        /// </summary>
+        public static Texture2D RenderLabelTexture(string text, int size, Color32 fg, Color32 bg)
+        {
+            text = (text ?? "").ToUpper();
+
+            var px = new Color32[size * size];
+            for (int i = 0; i < px.Length; i++) px[i] = bg;
+
+            // Choose a scale so the glyph string fits inside the texture with margin.
+            int glyphCount = Math.Max(1, text.Length);
+            int unscaledW = glyphCount * 6 - 1;   // 5px glyph + 1px spacing, minus trailing
+            const int unscaledH = 7;
+            int margin = Math.Max(1, size / 8);
+            int avail = size - 2 * margin;
+            int scale = Math.Max(1, Math.Min(avail / Math.Max(1, unscaledW), avail / unscaledH));
+
+            int textW = unscaledW * scale;
+            int textH = unscaledH * scale;
+            int ox = (size - textW) / 2;          // left edge of text block (screen coords)
+            int oyTop = (size - textH) / 2;        // top edge (screen coords, y down)
+
+            int cx = ox;
+            foreach (char ch in text)
+            {
+                if (ch == ' ') { cx += 4 * scale; continue; }
+                byte[] glyph;
+                if (_font.TryGetValue(ch, out glyph))
+                {
+                    for (int row = 0; row < 7; row++)
+                    {
+                        byte bits = glyph[row];
+                        for (int col = 0; col < 5; col++)
+                        {
+                            if ((bits & (0x10 >> col)) == 0) continue;
+                            for (int py = 0; py < scale; py++)
+                                for (int pxx = 0; pxx < scale; pxx++)
+                                {
+                                    int sx = cx + col * scale + pxx;
+                                    int sy = oyTop + row * scale + py;  // screen y (down)
+                                    int ty = size - 1 - sy;             // texture y (up)
+                                    if (sx >= 0 && sx < size && ty >= 0 && ty < size)
+                                        px[ty * size + sx] = fg;
+                                }
+                        }
+                    }
+                }
+                cx += 6 * scale;
+            }
+
+            var tex = new Texture2D(size, size, TextureFormat.ARGB32, false);
+            tex.SetPixels32(px);
+            tex.filterMode = FilterMode.Bilinear;
+            tex.wrapMode = TextureWrapMode.Clamp;
+            tex.Apply();
+            return tex;
         }
 
         // ── Font Data ───────────────────────────────────────────────────────

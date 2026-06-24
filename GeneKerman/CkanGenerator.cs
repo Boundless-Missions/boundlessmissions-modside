@@ -240,6 +240,65 @@ namespace GeneKerman
             }
         }
 
+        /// <summary>The distinct mods a .craft's parts come from, for tagging a marketplace
+        /// listing so the website can filter by mod. Unlike the CKAN-export path this surfaces
+        /// the stock DLCs (<c>SquadExpansion/MakingHistory</c> → "Making History",
+        /// <c>SquadExpansion/Serenity</c> → "Breaking Ground") as their own entries, while
+        /// still dropping base-game (Squad) and this mod's own parts. Empty for a stock,
+        /// no-DLC craft. Run on the ORIGINAL craft bytes (before GKMODS/flag/thumb embedding).</summary>
+        public static List<string> ModFoldersForCraft(byte[] craftBytes)
+        {
+            var folders = new List<string>();
+            if (craftBytes == null || craftBytes.Length == 0) return folders;
+            try
+            {
+                string text = Encoding.UTF8.GetString(craftBytes);
+                var names = new List<string>();
+                foreach (Match m in PartLineRx.Matches(text))
+                    names.Add(m.Groups[1].Value);
+                foreach (Match m in PartNameLineRx.Matches(text))
+                    names.Add(m.Groups[1].Value);
+                if (names.Count == 0) return folders;
+
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var raw in names)
+                {
+                    string name = InstanceSuffixRx.Replace(raw.Trim(), "");
+                    var ap = PartLoader.getPartInfoByName(name);
+                    if (ap == null) continue;
+                    string mod = MarketplaceModName(ap);
+                    if (!string.IsNullOrEmpty(mod) && seen.Add(mod))
+                        folders.Add(mod);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] CkanGenerator.ModFoldersForCraft failed: {ex.Message}");
+            }
+            return folders;
+        }
+
+        /// <summary>The marketplace mod label for a part: the stock DLCs as their own names,
+        /// null for base-game / this mod's parts, otherwise the part's GameData folder.</summary>
+        private static string MarketplaceModName(AvailablePart ap)
+        {
+            if (ap == null || string.IsNullOrEmpty(ap.partUrl)) return null;
+            string[] seg = ap.partUrl.Split('/');
+            string first = seg[0];
+            if (first.Equals("SquadExpansion", StringComparison.OrdinalIgnoreCase))
+            {
+                if (seg.Length > 1)
+                {
+                    if (seg[1].Equals("Serenity", StringComparison.OrdinalIgnoreCase)) return "Breaking Ground";
+                    if (seg[1].Equals("MakingHistory", StringComparison.OrdinalIgnoreCase)) return "Making History";
+                }
+                return null; // base SquadExpansion folder — treat as stock
+            }
+            // Squad / BoundlessMissions (this mod) are not "mods" for filtering purposes.
+            if (StockFolders.Contains(first)) return null;
+            return first;
+        }
+
         // ── Import: strip + act ──────────────────────────────────────────────
 
         /// <summary>Read + remove the GKMODS node carried by a VESSEL node and, for any

@@ -22,6 +22,7 @@ namespace GeneKerman.UI
         private string title;
         private string message;
         private float shownAt;
+        private float timeout = TIMEOUT;
         private Action onAccept;
         private Action onClose;
 
@@ -34,12 +35,14 @@ namespace GeneKerman.UI
 
         public bool IsVisible => visible;
 
-        public void Show(string title, string message, Action onAccept, Action onClose = null)
+        public void Show(string title, string message, Action onAccept, Action onClose = null,
+            float timeoutOverride = 0f)
         {
             this.title = title;
             this.message = message;
             this.onAccept = onAccept;
             this.onClose = onClose;
+            this.timeout = timeoutOverride > 0f ? timeoutOverride : TIMEOUT;
             shownAt = Time.realtimeSinceStartup;
             visible = true;
         }
@@ -61,7 +64,7 @@ namespace GeneKerman.UI
         {
             if (!visible) return;
 
-            if (Time.realtimeSinceStartup - shownAt > TIMEOUT)
+            if (Time.realtimeSinceStartup - shownAt > timeout)
             {
                 Dismiss(false);
                 return;

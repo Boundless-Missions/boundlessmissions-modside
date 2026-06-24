@@ -29,6 +29,11 @@ namespace GeneKerman.UI
         private bool missionsLocked;
         private List<object> contracts;
         private List<object> notifications;
+        // Client-raised notifications (photo shared, craft installed, device
+        // approved, …) have no server record, so they're kept here and re-merged
+        // into `notifications` on every refresh — a bare server fetch would wipe
+        // them. Session-local: not persisted, gone on restart.
+        private readonly List<object> localNotifications = new List<object>();
 
         // Loading states
         private bool loadingMissions, loadingContracts, loadingProfile, loadingNotifs;
@@ -69,8 +74,6 @@ namespace GeneKerman.UI
         private int editorPartCount;
         private float editorCraftMass, editorCraftCost;
         private string editorCraftPath = "";
-        private List<object> marketListings;
-        private bool loadingMarket;
         private bool selling;
 
         // Tools tab state
@@ -182,6 +185,26 @@ namespace GeneKerman.UI
                 if (d != null && MiniJSON.GetString(d, "id") == id) return; // already present
             }
             notifications.Insert(0, n); // newest first
+        }
+
+        /// <summary>
+        /// Add a client-originated notification (no server record) to the panel.
+        /// Kept in a separate backing list so RefreshNotifications can merge it back
+        /// after replacing `notifications` with the server's. The unread badge is
+        /// managed by the caller (GeneKermanMod.RaiseLocalNotification).
+        /// </summary>
+        public void AddLocalNotification(Dictionary<string, object> n)
+        {
+            if (n == null) return;
+            localNotifications.Insert(0, n);          // newest first
+            if (notifications == null) notifications = new List<object>();
+            notifications.Insert(0, n);               // show now, without a refresh
+        }
+
+        /// <summary>True for ids minted by RaiseLocalNotification (no server record).</summary>
+        private static bool IsLocalNotif(string id)
+        {
+            return id != null && id.StartsWith("local-");
         }
 
         /// <summary>Switch to the Contracts tab and open a specific contract's detail view.</summary>
@@ -450,6 +473,16 @@ namespace GeneKerman.UI
             GUILayout.BeginHorizontal();
             GUILayout.Label("Boundless Missions", headerStyle);
             GUILayout.FlexibleSpace();
+            // Capture Achievement Shot — line up a good angle in flight, then
+            // capture. The server verifies the shot and grants the matching KSP
+            // title role. Disabled (greyed) until you're flying a vessel.
+            bool canCapture = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
+            GUI.enabled = canCapture;
+            if (GUILayout.Button(new GUIContent("📷",
+                    canCapture ? "Capture Achievement Shot" : "Enter flight to capture an achievement shot"),
+                    tabStyle, GUILayout.Height(25), GUILayout.Width(34)))
+                GeneKermanMod.Instance.StartAchievementCapture();
+            GUI.enabled = true;
             int unread = GeneKermanMod.Instance.UnreadNotifications;
             // The unread count IS the button — clicking the bell badge opens the
             // notifications view (there is no Notifications tab anymore).
@@ -1533,6 +1566,13 @@ namespace GeneKerman.UI
         private void DoMarkNotificationRead(Dictionary<string, object> n, string id)
         {
             if (string.IsNullOrEmpty(id)) return;
+            // Local notifications have no server record — mark them read in place.
+            if (IsLocalNotif(id))
+            {
+                n["read"] = true;
+                RecountUnread();
+                return;
+            }
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationRead(id, (ok, resp, status) =>
             {
                 if (ok)
@@ -1546,6 +1586,24 @@ namespace GeneKerman.UI
         private void DoDismissNotification(string id)
         {
             if (string.IsNullOrEmpty(id)) return;
+            // Local notifications have no server record — drop them from both lists.
+            if (IsLocalNotif(id))
+            {
+                localNotifications.RemoveAll(o =>
+                {
+                    var d = o as Dictionary<string, object>;
+                    return d != null && MiniJSON.GetString(d, "id") == id;
+                });
+                if (notifications != null)
+                    notifications.RemoveAll(o =>
+                    {
+                        var d = o as Dictionary<string, object>;
+                        return d != null && MiniJSON.GetString(d, "id") == id;
+                    });
+                RecountUnread();
+                SetStatus("(Ok) Notification dismissed.");
+                return;
+            }
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.DismissNotification(id, (ok, resp, status) =>
             {
                 if (ok && notifications != null)
@@ -2013,8 +2071,17 @@ namespace GeneKerman.UI
                 loadingNotifs = false;
                 if (ok)
                 {
-                    notifications = MiniJSON.GetList(data, "notifications");
-                    GeneKermanMod.Instance.UnreadNotifications = MiniJSON.GetInt(data, "unread_count");
+                    notifications = MiniJSON.GetList(data, "notifications") ?? new List<object>();
+                    int unread = MiniJSON.GetInt(data, "unread_count");
+                    // Re-attach session-local notifications the server doesn't know
+                    // about (newest first), and fold their unread count into the badge.
+                    for (int i = localNotifications.Count - 1; i >= 0; i--)
+                    {
+                        notifications.Insert(0, localNotifications[i]);
+                        var d = localNotifications[i] as Dictionary<string, object>;
+                        if (d != null && !MiniJSON.GetBool(d, "read")) unread++;
+                    }
+                    GeneKermanMod.Instance.UnreadNotifications = unread;
                 }
             }));
         }
@@ -2427,43 +2494,15 @@ namespace GeneKerman.UI
                 GUILayout.Space(6);
             }
 
-            // Active listings.
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("Listings", valueStyle);
-            GUILayout.FlexibleSpace();
-            if (GUILayout.Button(gcRefresh, tabStyle, GUILayout.Height(24), GUILayout.Width(90)))
-                LoadMarketListings();
-            GUILayout.EndHorizontal();
-
-            if (loadingMarket)
-            {
-                GUILayout.Label("Loading...", labelStyle);
-                return;
-            }
-            if (marketListings == null || marketListings.Count == 0)
-            {
-                GUILayout.Label("No crafts for sale right now.", labelStyle);
-                return;
-            }
-
-            string myId = profile != null ? MiniJSON.GetString(profile, "user_id", "") : "";
-            foreach (var obj in marketListings)
-            {
-                var l = obj as Dictionary<string, object>;
-                if (l == null) continue;
-                GUILayout.BeginVertical(boxDarkStyle);
-                GUILayout.Label($"[*] {MiniJSON.GetString(l, "craft_name", "Craft")}", valueStyle);
-                GUILayout.Label($"{MiniJSON.GetInt(l, "price", 0):N0} KCoins . {MiniJSON.GetInt(l, "part_count", 0)} parts . by {MiniJSON.GetString(l, "seller_name", "?")}", labelStyle);
-                GUILayout.Label($"Sold: {MiniJSON.GetInt(l, "sales_count", 0)}  .  Buy from the Discord channel", labelStyle);
-                string sellerId = MiniJSON.GetString(l, "seller_id", "");
-                if (!string.IsNullOrEmpty(myId) && sellerId == myId)
-                {
-                    if (GUILayout.Button("[X] Delist", deleteBtnStyle, GUILayout.Height(24)))
-                        GeneKermanMod.Instance.RunCoroutine(DoDelistListing(MiniJSON.GetString(l, "listing_id", "")));
-                }
-                GUILayout.EndVertical();
-                GUILayout.Space(4);
-            }
+            // Browsing, buying and managing listings now lives on the website — link out
+            // to it rather than duplicating the storefront in-game.
+            GUILayout.BeginVertical(boxDarkStyle);
+            GUILayout.Label("Browse & Buy", valueStyle);
+            GUILayout.Label("The full marketplace — browsing, filtering and buying crafts, plus managing your uploads — is on the website.", labelStyle);
+            GUILayout.Space(4);
+            if (GUILayout.Button("[>] Open Marketplace Website", acceptBtnStyle, GUILayout.Height(30)))
+                Application.OpenURL(GeneKermanMod.Instance.Api.MarketplaceUrl);
+            GUILayout.EndVertical();
         }
 
         /// <summary>Reads the currently-loaded editor craft's metadata and resolves
@@ -2531,9 +2570,13 @@ namespace GeneKerman.UI
             }
 
             byte[] craftBytes;
+            string craftMods = "";
             try
             {
                 craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+                // Tag the listing with the craft's mods (from the ORIGINAL bytes, before
+                // any GKMODS/flag/thumb blocks are appended) so the website can filter by mod.
+                craftMods = string.Join(",", CkanGenerator.ModFoldersForCraft(craftBytes).ToArray());
                 // Carry the craft's custom mission flags so the buyer sees them.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
@@ -2562,12 +2605,24 @@ namespace GeneKerman.UI
                 Debug.LogWarning($"[GeneKerman] Blueprint render failed: {ex.Message}");
             }
 
+            // Square NW-view thumbnail — the website shows this on the listing card
+            // (the full blueprint is reserved for the detail view).
+            byte[] thumbnailBytes = null;
+            try
+            {
+                thumbnailBytes = VesselRenderer.CaptureNWThumbnail();
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Thumbnail render failed: {ex.Message}");
+            }
+
             SetStatus("Listing craft...");
             string fileName = editorCraftName + ".craft";
             yield return GeneKermanMod.Instance.Api.ListCraftForSale(
                 craftBytes, fileName, editorCraftName, editorCraftType,
                 editorPartCount, editorCraftMass, editorCraftCost, price,
-                blueprintBytes,
+                blueprintBytes, thumbnailBytes, craftMods,
                 (ok, resp, status) =>
                 {
                     selling = false;
@@ -2584,31 +2639,6 @@ namespace GeneKerman.UI
                         SetStatus("(No) Failed to list craft.");
                     }
                 });
-            LoadMarketListings();
-        }
-
-        private void LoadMarketListings()
-        {
-            loadingMarket = true;
-            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetMarketplaceListings((ok, data, err) =>
-            {
-                loadingMarket = false;
-                if (ok && data != null)
-                    marketListings = MiniJSON.GetList(data, "listings");
-                else
-                    SetStatus("(No) " + (err ?? "Failed to load listings."));
-            }));
-        }
-
-        private System.Collections.IEnumerator DoDelistListing(string listingId)
-        {
-            if (string.IsNullOrEmpty(listingId)) yield break;
-            SetStatus("Delisting...");
-            yield return GeneKermanMod.Instance.Api.DelistCraft(listingId, (ok, resp, status) =>
-            {
-                SetStatus(ok ? "(Ok) Craft delisted." : "(No) Failed to delist.");
-            });
-            LoadMarketListings();
         }
 
         // ── Craft Import Queue (auto-import) ─────────────────────────────────

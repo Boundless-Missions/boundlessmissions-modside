@@ -29,7 +29,12 @@ namespace GeneKerman
         public const string PrivacyPolicyUrl = "https://boundlessmissions.com/pp";
         public const string TermsOfServiceUrl = "https://boundlessmissions.com/tos";
 
+        /// <summary>Default marketplace website, opened from the Market tab. Overridable
+        /// via the <c>marketplaceUrl</c> key in settings.cfg.</summary>
+        public const string DefaultMarketplaceUrl = "https://boundlessmissions.com/marketplace";
+
         private string serverUrl;
+        private string marketplaceUrl = DefaultMarketplaceUrl; // marketplace website (settings.cfg overridable)
         private string customServerUrl = "http://localhost:5022"; // last custom URL, preserved when official is active
         private bool useOfficialServer;
         private bool notificationsEnabled = true;
@@ -53,6 +58,9 @@ namespace GeneKerman
         public bool UseOfficialServer => useOfficialServer;
         /// <summary>The last custom server URL entered by the user.</summary>
         public string CustomServerUrl => customServerUrl;
+        /// <summary>The marketplace website opened from the Market tab.</summary>
+        public string MarketplaceUrl =>
+            string.IsNullOrEmpty(marketplaceUrl) ? DefaultMarketplaceUrl : marketplaceUrl;
         /// <summary>Whether live notifications (toast popups + socket/poll) are enabled.</summary>
         public bool NotificationsEnabled => notificationsEnabled;
         /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) are enabled.</summary>
@@ -64,7 +72,7 @@ namespace GeneKerman
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
         /// sharing (rule 8.2). Logged once per suppressed call for diagnostics.</summary>
-        private bool TransmissionBlocked
+        public bool TransmissionBlocked
         {
             get
             {
@@ -173,6 +181,11 @@ namespace GeneKerman
                         string protocol = gk.GetValue("serverProtocol") ?? "http";
                         customServerUrl = $"{protocol}://{host}:{port}";
 
+                        // Marketplace website (Market tab "Open Marketplace"). Keep the
+                        // shipped default when the key is absent.
+                        string mkt = gk.GetValue("marketplaceUrl");
+                        marketplaceUrl = string.IsNullOrEmpty(mkt) ? DefaultMarketplaceUrl : mkt.Trim();
+
                         // When the official server is selected, ignore the stored custom
                         // host/port (kept so toggling back to custom restores it).
                         serverUrl = useOfficialServer ? OfficialServerUrl : customServerUrl;
@@ -268,6 +281,7 @@ namespace GeneKerman
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
+            gk.AddValue("marketplaceUrl", string.IsNullOrEmpty(marketplaceUrl) ? DefaultMarketplaceUrl : marketplaceUrl);
             node.Save(settingsPath);
             Debug.Log($"[GeneKerman] Settings saved — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
         }
@@ -551,6 +565,47 @@ namespace GeneKerman
 
                 if (!ok)
                     Debug.LogWarning($"[GeneKerman] Checkpoint photo upload failed: {req.error} ({req.responseCode})");
+            }
+        }
+
+        // ── Achievement Hero Shot Upload ────────────────────────────────────
+
+        /// <summary>
+        /// Upload a player-composed achievement shot (PNG) for server-side
+        /// verification. The server analyses it and grants the matching KSP title
+        /// role if it qualifies, returning a human-readable "message" for the
+        /// in-game notification.
+        /// </summary>
+        public IEnumerator UploadAchievementPhoto(
+            byte[] pngData, string vesselName, string body,
+            string vesselId, string situation, bool review, ApiCallback callback)
+        {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
+            string url = serverUrl + "/api/v1/achievement-photo";
+
+            var form = new List<IMultipartFormSection>
+            {
+                new MultipartFormFileSection("photo", pngData, "achievement.png", "image/png"),
+                new MultipartFormDataSection("vessel_name", vesselName ?? ""),
+                new MultipartFormDataSection("body", body ?? ""),
+                new MultipartFormDataSection("vessel_id", vesselId ?? ""),
+                new MultipartFormDataSection("situation", situation ?? ""),
+                // The server treats this string as a bool ("true"/"false").
+                new MultipartFormDataSection("review", review ? "true" : "false"),
+            };
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                ApplyHeaders(req);
+                req.timeout = 90;   // Gemini analysis can take a few seconds
+
+                yield return req.SendWebRequest();
+
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback?.Invoke(ok, req.downloadHandler?.text, req.responseCode);
+
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Achievement photo upload failed: {req.error} ({req.responseCode})");
             }
         }
 
@@ -1017,7 +1072,7 @@ namespace GeneKerman
             byte[] craftFileData, string craftFileName,
             string craftName, string craftType, int partCount,
             float mass, float cost, int price,
-            byte[] blueprintData,
+            byte[] blueprintData, byte[] thumbnailData, string mods,
             ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
@@ -1029,17 +1084,36 @@ namespace GeneKerman
             form.Add(new MultipartFormFileSection("craft_file", compressed,
                 craftFileName ?? "craft.craft", "application/gzip"));
 
-            // Rendered blueprint image — shown publicly on the Discord listing.
+            // Rendered blueprint image — shown publicly on the Discord listing and in
+            // the website's listing detail view.
             if (blueprintData != null && blueprintData.Length > 0)
                 form.Add(new MultipartFormFileSection("blueprint", blueprintData,
                     "blueprint.png", "image/png"));
 
-            form.Add(new MultipartFormDataSection("craft_name", craftName ?? "Untitled"));
-            form.Add(new MultipartFormDataSection("craft_type", craftType ?? "VAB"));
-            form.Add(new MultipartFormDataSection("part_count", partCount.ToString()));
-            form.Add(new MultipartFormDataSection("mass", mass.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-            form.Add(new MultipartFormDataSection("cost", cost.ToString(System.Globalization.CultureInfo.InvariantCulture)));
-            form.Add(new MultipartFormDataSection("price", price.ToString()));
+            // Square NW-view thumbnail — the website's listing-card image.
+            if (thumbnailData != null && thumbnailData.Length > 0)
+                form.Add(new MultipartFormFileSection("thumbnail", thumbnailData,
+                    "thumbnail.png", "image/png"));
+
+            // Unity's MultipartFormDataSection throws ArgumentException on an empty
+            // body, which would kill this coroutine before the upload (leaving the UI
+            // stuck on "listing…"). So skip empty text fields entirely — the server
+            // supplies defaults for the optional ones (craft_type="VAB", mods="").
+            void AddText(string name, string value)
+            {
+                if (!string.IsNullOrEmpty(value))
+                    form.Add(new MultipartFormDataSection(name, value));
+            }
+
+            AddText("craft_name", string.IsNullOrEmpty(craftName) ? "Untitled" : craftName);
+            AddText("craft_type", craftType);
+            AddText("part_count", partCount.ToString());
+            AddText("mass", mass.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddText("cost", cost.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            AddText("price", price.ToString());
+            // Distinct GameData mod folders the craft uses (comma-separated), so the
+            // website can filter listings by mod. Empty for stock-only crafts.
+            AddText("mods", mods);
 
             using (var req = UnityWebRequest.Post(url, form))
             {

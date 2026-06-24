@@ -84,6 +84,16 @@ namespace GeneKerman
         private CheckpointDetector checkpointDetector;
         private bool checkpointCapturing;
 
+        // Player-composed achievement hero-shot capture (manual, Tools tab)
+        private bool achievementCapturing;
+
+        // Vessel+position keys already submitted for achievement review, so the same
+        // craft isn't re-reviewed (or re-rewarded) at the same position. The position
+        // is part of the key, so a vessel CAN be captured/rewarded again after moving
+        // to a different body/situation. Persisted across sessions.
+        private HashSet<string> reviewedCaptures;
+        private string ReviewedCapturesPath => Path.Combine(PluginDataPath, "achievement_captures.txt");
+
         // True while the game UI is hidden (stock F2 toggle, or our own capture
         // firing onHideUI). Our windows are drawn in OnGUI, which UIMasterController
         // does NOT govern, so we must suppress them ourselves — otherwise the mod
@@ -611,11 +621,157 @@ namespace GeneKerman
                 (ok, resp, status) =>
                 {
                     if (ok)
-                        notificationPopup.Show("📡 Photo shared", "Posted to the community channel.");
+                        RaiseLocalNotification("📡 Photo shared", "Posted to the community channel.");
                     else
-                        notificationPopup.Show("⚠ Share failed",
+                        RaiseLocalNotification("⚠ Share failed",
                             "Saved locally in PluginData/renders.");
                 });
+        }
+
+        // ── Achievement Hero Shots (player-composed) ────────────────────────
+
+        /// <summary>
+        /// Begin the manual achievement-capture flow (Tools tab button). Shows a
+        /// bottom overlay telling the player to frame a good angle; pressing Capture
+        /// grabs the current view and submits it for server-side verification.
+        /// </summary>
+        public void StartAchievementCapture()
+        {
+            if (achievementCapturing) return;
+
+            if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
+            {
+                notificationPopup.Show("🏅 Achievement Shot", "Enter flight with an active vessel first.");
+                return;
+            }
+            if (Api == null || !Api.IsLinked || Api.TransmissionBlocked)
+            {
+                notificationPopup.Show("🏅 Achievement Shot", "Link your account and enable data sharing first.");
+                return;
+            }
+
+            // Reuse the bottom-centre prompt; give the player ample time to frame the
+            // shot before it self-dismisses.
+            checkpointPrompt.Show(
+                "🏅 Achievement Shot",
+                "Frame your best angle of the achievement, then press Capture to submit it for a title role.",
+                onAccept: () => StartCoroutine(RunAchievementCapture()),
+                timeoutOverride: 60f);
+        }
+
+        private IEnumerator RunAchievementCapture()
+        {
+            if (achievementCapturing) yield break;
+            achievementCapturing = true;
+
+            // Hide the HUD and our own windows for a clean grab (mirrors F2 / the
+            // cinematic capture). OnHideUI gates our IMGUI so the overlay won't show.
+            KSP.UI.UIMasterController.Instance?.HideUI();
+            GameEvents.onHideUI.Fire();
+
+            // Let the UI-hidden frame render, request the grab, then give it a frame
+            // to be captured before we restore the view (same ordering CinematicCapture
+            // relies on).
+            yield return new WaitForEndOfFrame();
+            string savedPath = VesselDataCollector.CaptureScreenshot();
+            yield return new WaitForEndOfFrame();
+            yield return null;
+
+            KSP.UI.UIMasterController.Instance?.ShowUI();
+            GameEvents.onShowUI.Fire();
+
+            // ScreenCapture writes asynchronously — wait for the file to flush.
+            yield return new WaitForSeconds(0.5f);
+
+            byte[] png = VesselDataCollector.ReadScreenshot(savedPath);
+            achievementCapturing = false;
+
+            if (png == null || png.Length == 0)
+            {
+                RaiseLocalNotification("⚠ Capture failed", "Couldn't read the screenshot. Try again.");
+                yield break;
+            }
+
+            var vessel = FlightGlobals.ActiveVessel;
+            string vesselName = vessel?.vesselName ?? "";
+            string body = vessel?.mainBody?.bodyName ?? "";
+            string situation = vessel?.situation.ToString() ?? "";
+
+            // Unique-per-vessel id; persists across save/load. Combined with the
+            // current body+situation it forms the dedup key, so the same craft can
+            // still be rewarded again after it reaches a different position.
+            string vesselId = vessel != null ? vessel.persistentId.ToString() : "";
+            string captureKey = vesselId + "|" + body + "|" + situation;
+
+            LoadReviewedCaptures();
+            bool review = !reviewedCaptures.Contains(captureKey);
+            if (!review)
+            {
+                notificationPopup.Show("📡 Sharing…",
+                    "You've already earned this vessel's achievement here — sharing the shot to Discord.");
+            }
+            else
+            {
+                notificationPopup.Show("📡 Submitting…", "Checking your shot for an achievement…");
+            }
+
+            yield return Api.UploadAchievementPhoto(
+                png, vesselName, body, vesselId, situation, review,
+                (ok, resp, status) =>
+                {
+                    string msg = ok
+                        ? "Submitted."
+                        : "Submission failed — check your connection and try again.";
+                    if (!string.IsNullOrEmpty(resp))
+                    {
+                        var data = MiniJSON.DeserializeDict(resp);
+                        if (data != null)
+                            msg = MiniJSON.GetString(data, "message", msg);
+                    }
+                    // Record the vessel+position once it's been reviewed, so the next
+                    // capture of the same craft here is share-only (no re-reward).
+                    if (ok && review)
+                    {
+                        reviewedCaptures.Add(captureKey);
+                        SaveReviewedCaptures();
+                    }
+                    RaiseLocalNotification(ok ? "🏅 Achievement Shot" : "⚠ Achievement Shot", msg);
+                });
+        }
+
+        /// Load the set of already-reviewed vessel+position keys from disk (once).
+        private void LoadReviewedCaptures()
+        {
+            if (reviewedCaptures != null) return;
+            reviewedCaptures = new HashSet<string>();
+            try
+            {
+                if (File.Exists(ReviewedCapturesPath))
+                {
+                    foreach (var line in File.ReadAllLines(ReviewedCapturesPath))
+                    {
+                        var key = line.Trim();
+                        if (key.Length > 0) reviewedCaptures.Add(key);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Could not read achievement capture log: " + e.Message);
+            }
+        }
+
+        private void SaveReviewedCaptures()
+        {
+            try
+            {
+                Directory.CreateDirectory(PluginDataPath);
+                File.WriteAllLines(ReviewedCapturesPath, new List<string>(reviewedCaptures).ToArray());
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Could not write achievement capture log: " + e.Message);
+            }
         }
 
         // ── Data Fetching ───────────────────────────────────────────────────
@@ -703,7 +859,7 @@ namespace GeneKerman
             notifSocket.Connect();
 
             LinkedUsername = MiniJSON.GetString(data, "username");
-            notificationPopup.Show(
+            RaiseLocalNotification(
                 "✅ Account Linked!",
                 "Welcome, " + LinkedUsername + "!"
             );
@@ -711,7 +867,38 @@ namespace GeneKerman
 
         public void ShowNotification(string title, string message)
         {
-            notificationPopup.Show(title, message);
+            RaiseLocalNotification(title, message);
+        }
+
+        /// <summary>
+        /// Raise a notification the client generates itself (photo shared, craft
+        /// installed, device approved, …): toast it AND record it in the panel so
+        /// it survives the 8-second toast fade. Unlike server notifications these
+        /// have no Firestore record — they're session-local (see
+        /// MainWindow.AddLocalNotification) and disappear on a game restart.
+        /// </summary>
+        public void RaiseLocalNotification(string title, string message, string contractId = null)
+        {
+            notificationPopup.Show(title, message, contractId);
+
+            if (mainWindow == null) return;
+
+            var data = new Dictionary<string, object>();
+            if (!string.IsNullOrEmpty(contractId)) data["contract_id"] = contractId;
+
+            var notif = new Dictionary<string, object>
+            {
+                { "id", "local-" + Guid.NewGuid().ToString("N").Substring(0, 12) },
+                { "type", "local" },
+                { "title", title },
+                { "message", message },
+                { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm 'UTC'") },
+                { "read", false },
+                { "data", data },
+            };
+
+            UnreadNotifications++;
+            mainWindow.AddLocalNotification(notif);
         }
 
         /// <summary>Called by the consent window once the user accepts the privacy
@@ -904,7 +1091,7 @@ namespace GeneKerman
 
             if (outcome == "approved")
             {
-                notificationPopup.Show("✅ Device approved", "This PC is now trusted.");
+                RaiseLocalNotification("✅ Device approved", "This PC is now trusted.");
                 StartCoroutine(InitialFetch());
             }
             else if (outcome == "denied")
@@ -921,12 +1108,14 @@ namespace GeneKerman
                 Api.ClearToken();
                 ShowMainWindow = false;
                 ShowLinkWindow = true;   // drop the user straight onto the link screen
+                // Terminal unlink — keep this a transient toast. Persisting it would
+                // make it resurface in the panel the next time the user re-links.
                 notificationPopup.Show("🚫 Device not approved",
                     "This PC was unlinked. Run /g linkcode in Discord to link again.");
             }
             else // expired
             {
-                notificationPopup.Show("⌛ Device check expired",
+                RaiseLocalNotification("⌛ Device check expired",
                     "Reopen the mod window to try again.");
             }
         }
@@ -984,7 +1173,7 @@ namespace GeneKerman
             // Still queued → we couldn't delete it yet (player is in flight). Warn them so
             // the craft doesn't silently vanish the next time they reach the Space Center.
             if (pendingRescueRemovals.ContainsKey(pid))
-                notificationPopup.Show("🛰️ Craft scheduled for removal",
+                RaiseLocalNotification("🛰️ Craft scheduled for removal",
                     $"\"{pendingRescueRemovals[pid]}\" will be deleted when you return to the Space Center.");
         }
 
@@ -1010,7 +1199,7 @@ namespace GeneKerman
             {
                 string name = pendingRescueRemovals[pid];
                 pendingRescueRemovals.Remove(pid);
-                notificationPopup.Show("🗑️ Craft removed",
+                RaiseLocalNotification("🗑️ Craft removed",
                     $"\"{name}\" was removed from your save.");
             }
         }

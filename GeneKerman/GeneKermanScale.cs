@@ -228,6 +228,51 @@ namespace GeneKerman
 
             if (part.srfAttachNode != null)
                 part.srfAttachNode.position = part.srfAttachNode.originalPosition * gkLinear;
+
+            LogNodeGeometryOnce();
+        }
+
+        // ── Diagnostics ──────────────────────────────────────────────────────────
+        //
+        // Temporary instrumentation for the "floating / hidden attach node on a heavily
+        // rescaled part" report. Fires once per part name so the log isn't spammed by the
+        // multi-frame re-apply. Dumps, per node: the prefab baseline we scale from
+        // (originalPosition), what we wrote (position), and whether the node is bound to a
+        // model transform (nodeTransform != null) — KSP recomputes those from the scaled
+        // model itself, so our manual multiply can double-apply (node flies out) or, if the
+        // transform sits outside "model", read ~1× (node buried inside the hull). Remove once
+        // the node-positioning fix lands.
+
+        private static readonly HashSet<string> _loggedNodes = new HashSet<string>(StringComparer.Ordinal);
+
+        private void LogNodeGeometryOnce()
+        {
+            try
+            {
+                string key = part?.partInfo?.name ?? "?";
+                if (!_loggedNodes.Add(key)) return;
+
+                Transform model = part.transform.Find("model");
+                Transform prefabModel = part.partInfo?.partPrefab?.transform?.Find("model");
+                var sb = new StringBuilder();
+                sb.Append($"[GeneKerman] node-geometry '{key}' gkLinear={gkLinear} ")
+                  .Append($"modelScale={(model != null ? model.localScale.ToString("F3") : "?")} ")
+                  .Append($"prefabModelScale={(prefabModel != null ? prefabModel.localScale.ToString("F3") : "?")}");
+
+                if (part.attachNodes != null)
+                    foreach (AttachNode n in part.attachNodes)
+                        if (n != null)
+                            sb.Append($"\n  node '{n.id}' orig={n.originalPosition.ToString("F3")} ")
+                              .Append($"pos={n.position.ToString("F3")} ")
+                              .Append($"xformBound={(n.nodeTransform != null)}");
+
+                if (part.srfAttachNode != null)
+                    sb.Append($"\n  srfNode orig={part.srfAttachNode.originalPosition.ToString("F3")} ")
+                      .Append($"pos={part.srfAttachNode.position.ToString("F3")}");
+
+                Debug.Log(sb.ToString());
+            }
+            catch { /* diagnostics must never break the apply */ }
         }
 
         private void ApplyStatFields()

@@ -220,16 +220,43 @@ namespace GeneKerman
 
         private void ScaleNodes()
         {
-            // Offset attach nodes from their ORIGINAL (prefab) position so the scaled
-            // model's faces and the connection points stay coincident.
+            // Offset attach nodes so the scaled model's faces and the connection points stay
+            // coincident. We must scale from the PREFAB node position, NOT the live instance's
+            // originalPosition: by the time we run, other handlers (B9PartSwitch, KSPCF, KSP's
+            // own craft load) have already re-baselined the live originalPosition to the SCALED
+            // value, so `originalPosition * gkLinear` double-applies — the node lands at
+            // prefab*gkLinear² and floats far off the model (and can compound across the
+            // multi-frame re-apply). The prefab is never scaled, so prefab*gkLinear is the
+            // correct single-scale target in every load path.
+            Part prefab = part.partInfo?.partPrefab;
+
             if (part.attachNodes != null)
                 foreach (AttachNode n in part.attachNodes)
-                    if (n != null) n.position = n.originalPosition * gkLinear;
+                {
+                    if (n == null) continue;
+                    AttachNode pn = FindPrefabNode(prefab, n.id);
+                    n.position = (pn != null ? pn.originalPosition : n.originalPosition) * gkLinear;
+                }
 
             if (part.srfAttachNode != null)
-                part.srfAttachNode.position = part.srfAttachNode.originalPosition * gkLinear;
+            {
+                Vector3 baseSrf = prefab?.srfAttachNode != null
+                    ? prefab.srfAttachNode.originalPosition
+                    : part.srfAttachNode.originalPosition;
+                part.srfAttachNode.position = baseSrf * gkLinear;
+            }
 
             LogNodeGeometryOnce();
+        }
+
+        /// <summary>The prefab's attach node with the given id (the immutable, never-scaled
+        /// baseline), or null if the prefab/node can't be found.</summary>
+        private static AttachNode FindPrefabNode(Part prefab, string id)
+        {
+            if (prefab?.attachNodes == null || string.IsNullOrEmpty(id)) return null;
+            foreach (AttachNode pn in prefab.attachNodes)
+                if (pn != null && pn.id == id) return pn;
+            return null;
         }
 
         // ── Diagnostics ──────────────────────────────────────────────────────────
@@ -259,12 +286,17 @@ namespace GeneKerman
                   .Append($"modelScale={(model != null ? model.localScale.ToString("F3") : "?")} ")
                   .Append($"prefabModelScale={(prefabModel != null ? prefabModel.localScale.ToString("F3") : "?")}");
 
+                Part prefab = part.partInfo?.partPrefab;
                 if (part.attachNodes != null)
                     foreach (AttachNode n in part.attachNodes)
                         if (n != null)
-                            sb.Append($"\n  node '{n.id}' orig={n.originalPosition.ToString("F3")} ")
+                        {
+                            AttachNode pn = FindPrefabNode(prefab, n.id);
+                            sb.Append($"\n  node '{n.id}' prefab={(pn != null ? pn.originalPosition.ToString("F3") : "?")} ")
+                              .Append($"liveOrig={n.originalPosition.ToString("F3")} ")
                               .Append($"pos={n.position.ToString("F3")} ")
                               .Append($"xformBound={(n.nodeTransform != null)}");
+                        }
 
                 if (part.srfAttachNode != null)
                     sb.Append($"\n  srfNode orig={part.srfAttachNode.originalPosition.ToString("F3")} ")

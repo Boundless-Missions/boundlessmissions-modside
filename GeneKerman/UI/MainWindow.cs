@@ -53,6 +53,7 @@ namespace GeneKerman.UI
         // Icon textures loaded from Iconpack-1 (via GameData/BoundlessMissions/Textures/)
         private Texture2D iconRefresh, iconCompose, iconInbox, iconTrash, iconCross;
         private Texture2D iconUnlink, iconSubmit, iconVesselInfo;
+        private Texture2D iconBell, iconCamera;
 
         // Pre-built GUIContent for icon+text buttons
         private GUIContent gcRefresh, gcRefreshMissions, gcRefreshOnly;
@@ -407,6 +408,8 @@ namespace GeneKerman.UI
             iconUnlink  = GKSkin.LoadIcon("Unlink");
             iconSubmit  = GKSkin.LoadIcon("Submit");
             iconVesselInfo = GKSkin.LoadIcon("aVesselInfo", 18);
+            iconBell    = GKSkin.LoadIcon("notificationbell", 18);
+            iconCamera  = GKSkin.LoadIcon("cam", 18);
 
             // Build GUIContent objects — icon + label text. If an icon failed to
             // load (file missing), fall back to the old text-only labels.
@@ -477,17 +480,25 @@ namespace GeneKerman.UI
             // capture. The server verifies the shot and grants the matching KSP
             // title role. Disabled (greyed) until you're flying a vessel.
             bool canCapture = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
+            string camTip = canCapture ? "Capture Achievement Shot" : "Enter flight to capture an achievement shot";
             GUI.enabled = canCapture;
-            if (GUILayout.Button(new GUIContent("📷",
-                    canCapture ? "Capture Achievement Shot" : "Enter flight to capture an achievement shot"),
-                    tabStyle, GUILayout.Height(25), GUILayout.Width(34)))
+            GUIContent camContent = iconCamera != null
+                ? new GUIContent(iconCamera, camTip)
+                : new GUIContent("📷", camTip);
+            if (GUILayout.Button(camContent, tabStyle, GUILayout.Height(25), GUILayout.Width(34)))
                 GeneKermanMod.Instance.StartAchievementCapture();
             GUI.enabled = true;
             int unread = GeneKermanMod.Instance.UnreadNotifications;
-            // The unread count IS the button — clicking the bell badge opens the
-            // notifications view (there is no Notifications tab anymore).
-            string badge = unread > 0 ? $"🔔 {unread}" : "🔔";
-            if (GUILayout.Button(badge, unread > 0 ? notifBadgeStyle : tabStyle,
+            // The bell IS the button — clicking it opens the notifications view
+            // (there is no Notifications tab anymore). The bell icon always shows,
+            // even at zero unread, so the header never reads as blank; the unread
+            // count is appended next to it only when there's something to read.
+            GUIContent bellContent;
+            if (iconBell != null)
+                bellContent = unread > 0 ? new GUIContent(" " + unread, iconBell) : new GUIContent(iconBell);
+            else
+                bellContent = new GUIContent(unread > 0 ? $"🔔 {unread}" : "🔔");
+            if (GUILayout.Button(bellContent, unread > 0 ? notifBadgeStyle : tabStyle,
                     GUILayout.Height(25), GUILayout.MinWidth(34)))
             {
                 selectedTab = NotifTab;

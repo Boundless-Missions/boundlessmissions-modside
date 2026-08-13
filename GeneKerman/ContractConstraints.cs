@@ -34,17 +34,26 @@ namespace GeneKerman
         public List<string> RequiredPartCategories = new List<string>();
         public int MaxParts = -1;  // -1 == no limit
         public int MinParts = -1;
+        // Crew-aboard limits (-1 == no limit). Whole-craft metric like Δv: can't be
+        // enforced by hiding parts, so it's only checked at submit time.
+        public int MaxCrew = -1;
+        public int MinCrew = -1;
         // Vacuum delta-v limits in m/s (-1 == no limit). Whole-craft metric: can't
         // be enforced by hiding parts, so it's only checked at submit time.
         public double MaxDeltaV = -1;
         public double MinDeltaV = -1;
+        // Orbit-type ("orbital regime") requirement parsed from the mission text by
+        // the bot (polar/equatorial/keostationary/…). A flight state, not a part
+        // choice, so it's gated at submit time only — see OrbitConstraint.cs.
+        public OrbitConstraint Orbit = new OrbitConstraint();
 
         public bool IsEmpty =>
             ForbiddenParts.Count == 0 && RequiredParts.Count == 0 &&
             ForbiddenPropellants.Count == 0 && RequiredPropellants.Count == 0 &&
             ForbiddenEngineCategories.Count == 0 && RequiredEngineCategories.Count == 0 &&
             ForbiddenPartCategories.Count == 0 && RequiredPartCategories.Count == 0 &&
-            MaxParts <= 0 && MinParts <= 0 && MaxDeltaV <= 0 && MinDeltaV <= 0;
+            MaxParts <= 0 && MinParts <= 0 && MaxDeltaV <= 0 && MinDeltaV <= 0 &&
+            MaxCrew <= 0 && MinCrew <= 0 && (Orbit == null || Orbit.IsEmpty);
 
         public bool HasForbidRules =>
             ForbiddenParts.Count > 0 || ForbiddenPartNames.Count > 0 ||
@@ -75,6 +84,9 @@ namespace GeneKerman
             c.MinParts = dict.ContainsKey("min_parts") ? MiniJSON.GetInt(dict, "min_parts", -1) : -1;
             c.MaxDeltaV = dict.ContainsKey("max_dv") ? MiniJSON.GetDouble(dict, "max_dv", -1) : -1;
             c.MinDeltaV = dict.ContainsKey("min_dv") ? MiniJSON.GetDouble(dict, "min_dv", -1) : -1;
+            c.MaxCrew = dict.ContainsKey("max_crew") ? MiniJSON.GetInt(dict, "max_crew", -1) : -1;
+            c.MinCrew = dict.ContainsKey("min_crew") ? MiniJSON.GetInt(dict, "min_crew", -1) : -1;
+            c.Orbit = OrbitConstraint.Parse(MiniJSON.GetDict(dict, "orbit"));
             return c;
         }
 
@@ -101,10 +113,20 @@ namespace GeneKerman
         /// -1 when it couldn't be read, and the Δv limit is skipped rather than
         /// failed (the server skips a missing value too).
         /// </summary>
-        public List<string> CheckCraft(IEnumerable<Part> parts, double deltaVVac = -1)
+        public List<string> CheckCraft(IEnumerable<Part> parts, double deltaVVac = -1, int crewCount = -1)
         {
             var violations = new List<string>();
             if (IsEmpty || parts == null) return violations;
+
+            // Crew aboard (-1 == unavailable, so skip rather than fail — like Δv). The
+            // server re-checks authoritatively from the submitted telemetry crew count.
+            if (crewCount >= 0)
+            {
+                if (MaxCrew > 0 && crewCount > MaxCrew)
+                    violations.Add($"Too many crew aboard: {crewCount} (max {MaxCrew}).");
+                if (MinCrew > 0 && crewCount < MinCrew)
+                    violations.Add($"Too few crew aboard: {crewCount} (min {MinCrew}).");
+            }
 
             var summaries = parts.Where(p => p != null)
                                  .Select(PartClassifier.Classify)
@@ -200,6 +222,9 @@ namespace GeneKerman
             if (MinParts > 0) bits.Add($"≥{MinParts} parts");
             if (MaxDeltaV > 0) bits.Add($"≤{MaxDeltaV:F0} m/s Δv");
             if (MinDeltaV > 0) bits.Add($"≥{MinDeltaV:F0} m/s Δv");
+            if (MaxCrew > 0) bits.Add($"≤{MaxCrew} crew");
+            if (MinCrew > 0) bits.Add($"≥{MinCrew} crew");
+            if (Orbit != null && !Orbit.IsEmpty) bits.Add(Orbit.Describe());
             return string.Join(" | ", bits.ToArray());
         }
 

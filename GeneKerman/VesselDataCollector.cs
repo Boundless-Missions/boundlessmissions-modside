@@ -36,6 +36,7 @@ namespace GeneKerman
             public double periapsis;    // altitude above the body's surface (m)
             public double period;       // orbital period (s)
             public double bodyRadius;   // main body equatorial radius (m)
+            public double rotationPeriod; // main body sidereal rotation period (s)
             // Craft metadata
             public int partCount;
             public float totalMass;
@@ -60,6 +61,7 @@ namespace GeneKerman
                     { "periapsis", periapsis },
                     { "period", period },
                     { "body_radius", bodyRadius },
+                    { "rotation_period", rotationPeriod },
                     { "part_count", partCount },
                     { "total_mass", (double)totalMass },
                     { "total_cost", (double)totalCost },
@@ -116,6 +118,7 @@ namespace GeneKerman
             if (vessel.mainBody != null)
             {
                 snap.bodyRadius = vessel.mainBody.Radius;
+                snap.rotationPeriod = vessel.mainBody.rotationPeriod;
             }
 
             return snap;

@@ -198,6 +198,18 @@ namespace GeneKerman.UI
                 }
             }
 
+            // Orbit-type requirement (polar/equatorial/keostationary/…): the craft must
+            // be in the specific orbit the mission names. The server re-checks this
+            // authoritatively from the submitted telemetry.
+            if (partLimits?.Orbit != null && !partLimits.Orbit.IsEmpty)
+            {
+                foreach (var v in partLimits.Orbit.CheckOrbit(activeVessel))
+                {
+                    vesselValid = false;
+                    issues.Add(v);
+                }
+            }
+
             // Rescue: all stranded kerbals aboard + correct orbit/surface within margins.
             if (IsRescue)
                 ValidateRescue(issues);
@@ -889,7 +901,11 @@ namespace GeneKerman.UI
             // but failing here is instant and explains exactly what's wrong.
             if (partLimits != null && !partLimits.IsEmpty)
             {
-                var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac);
+                // Crew aboard for the crew-count limit (flight only; -1 elsewhere so it's
+                // skipped, matching the server which reads crew from submitted telemetry).
+                int crewAboard = (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null)
+                    ? FlightGlobals.ActiveVessel.GetCrewCount() : -1;
+                var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac, crewAboard);
                 if (violations.Count > 0)
                 {
                     isSubmitting = false;
@@ -1047,10 +1063,15 @@ namespace GeneKerman.UI
             if (craftData != null)
                 craftData = CraftThumb.EmbedThumbForCurrentCraft(craftData);
 
+            // Life-support flag of the submitted craft (which LS mod, per-kerbal
+            // endurance, crew capacity) — shown on the contract's review embed.
+            LifeSupportInfo ls = LifeSupportScan.Scan(new List<Part>(GetSubmissionParts()));
+
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist, usedParts,
                 deltaVField,
+                ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
                 (ok, resp, status) =>
                 {
                     isSubmitting = false;

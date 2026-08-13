@@ -71,14 +71,6 @@ namespace GeneKerman.UI
         private string apText = "100", peText = "100", marginAltText = "10";
         private string latText = "0", lonText = "0", marginPosText = "1";
         private readonly List<string> rescueCrew = new List<string>();
-        private const double MIN_MARGIN_ORBIT_KM = 5.0;
-        private const double MIN_MARGIN_SURFACE_DEG = 0.5;
-
-        private static readonly HashSet<string> STOCK_BODIES = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "Kerbol", "Sun", "Moho", "Eve", "Gilly", "Kerbin", "Mun", "Minmus", "Duna", "Ike",
-            "Dres", "Jool", "Laythe", "Vall", "Tylo", "Bop", "Pol", "Eeloo",
-        };
 
         // Status
         private string statusMsg = "";
@@ -96,7 +88,12 @@ namespace GeneKerman.UI
             "All mods currently installed on your game.",
             "Only mods visible in your Janitor's Closet profile.",
         };
-        private bool? _jcAvailable; // null = not yet checked
+        // Index → the mode name ContractCreation understands. Same order as ModlistLabels.
+        private static readonly string[] ModlistModes = {
+            ContractCreation.ModlistNone, ContractCreation.ModlistStock,
+            ContractCreation.ModlistStockDlc, ContractCreation.ModlistMine,
+            ContractCreation.ModlistJanitor,
+        };
 
         // Scroll
         private Vector2 corpScrollPos;
@@ -149,25 +146,13 @@ namespace GeneKerman.UI
 
         // ── Modlist Helpers ─────────────────────────────────────────────────
 
-        private bool IsJanitorsClosetAvailable()
-        {
-            if (_jcAvailable.HasValue) return _jcAvailable.Value;
-            foreach (var asm in AssemblyLoader.loadedAssemblies)
-            {
-                if (asm.name.IndexOf("JanitorsCloset", StringComparison.OrdinalIgnoreCase) >= 0)
-                {
-                    _jcAvailable = true;
-                    return true;
-                }
-            }
-            _jcAvailable = false;
-            return false;
-        }
+        private bool IsJanitorsClosetAvailable() => ContractCreation.IsJanitorsClosetAvailable();
 
         // ── Rescue Helpers ──────────────────────────────────────────────────
 
-        /// <summary>Scan the live celestial bodies (flagging modded ones) and the
-        /// active vessel's crew, so the rescue panel reflects the current game.</summary>
+        /// <summary>Pull the live celestial bodies and active-vessel crew into this
+        /// window's list state. The scan itself is shared with the browser UI; only the
+        /// selection bookkeeping below is this window's.</summary>
         private void ScanRescueContext()
         {
             // Remember the player's current pick so a re-scan (e.g. the refresh right
@@ -176,44 +161,28 @@ namespace GeneKerman.UI
             string previouslySelected = (bodyIndex >= 0 && bodyIndex < bodyNames.Count)
                 ? bodyNames[bodyIndex] : null;
 
+            var ctx = ContractCreation.ScanRescueContext();
+
             bodyNames.Clear();
             bodyModded.Clear();
             bodyIndex = -1;
-            if (FlightGlobals.Bodies != null)
+            foreach (var b in ctx.Bodies)
             {
-                foreach (var b in FlightGlobals.Bodies)
-                {
-                    if (b == null) continue;
-                    bodyNames.Add(b.bodyName);
-                    bodyModded.Add(!STOCK_BODIES.Contains(b.bodyName));
-                }
+                bodyNames.Add(b.Name);
+                bodyModded.Add(b.Modded);
             }
 
             rescueCrew.Clear();
-            if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null)
+            rescueCrew.AddRange(ctx.Crew);
+
+            if (ctx.Crew.Count > 0)
             {
                 // Restore the player's previous pick if they made one; otherwise default
                 // the body to wherever the player currently is.
-                string desired = previouslySelected
-                    ?? (FlightGlobals.ActiveVessel.mainBody != null
-                        ? FlightGlobals.ActiveVessel.mainBody.bodyName : null);
+                string desired = previouslySelected ?? ctx.Body;
                 for (int i = 0; i < bodyNames.Count; i++)
                     if (bodyNames[i] == desired) { bodyIndex = i; break; }
-
-                foreach (var pcm in FlightGlobals.ActiveVessel.GetVesselCrew())
-                    if (pcm != null) rescueCrew.Add(pcm.name);
             }
-        }
-
-        /// <summary>The player's active installed mod folders (auto part restriction
-        /// for rescue) — same derivation as the "My Modlist" option.</summary>
-        private string BuildActiveModlist()
-        {
-            var folders = new HashSet<string>();
-            foreach (var p in PartLoader.LoadedPartsList)
-                if (p != null && !string.IsNullOrEmpty(p.partUrl))
-                    folders.Add(p.partUrl.Split('/')[0]);
-            return string.Join(",", folders.ToArray());
         }
 
         private void DrawNumberRow(string label, ref string val)
@@ -230,81 +199,14 @@ namespace GeneKerman.UI
                 System.Globalization.CultureInfo.InvariantCulture, out v);
         }
 
-        private string BuildModlist()
+        /// <summary>This window's index-based mode, resolved by the shared derivation.</summary>
+        private string BuildModlist() => BuildModlist(out _);
+
+        private string BuildModlist(out string error)
         {
-            switch (modlistMode)
-            {
-                case 0: return null;
-                case 1: return "Squad";                  // Stock only — DLC lives under the separate "SquadExpansion" folder, so it's excluded automatically
-                case 2: return "Squad,SquadExpansion";   // Stock + DLC (MakingHistory/Serenity both sit under SquadExpansion)
-                case 3:
-                {
-                    var folders = new HashSet<string>();
-                    foreach (var p in PartLoader.LoadedPartsList)
-                        if (!string.IsNullOrEmpty(p.partUrl))
-                            folders.Add(p.partUrl.Split('/')[0]);
-                    return string.Join(",", folders.ToArray());
-                }
-                case 4:
-                    return ReadJanitorsClosetModlist();
-                default:
-                    return null;
-            }
-        }
-
-        // Reads the set of mod folders currently visible under Janitor's Closet's mod
-        // filter. JC registers its mod-level filter into KSP's own
-        // EditorPartList.ExcludeFilters under the id "Mod Filter", so we read it through
-        // KSP's core API rather than reflecting into JC internals (whose layout varies
-        // by version). The filter's FilterCriteria(part) returns true when the part is
-        // kept/visible, so hiding a mod (e.g. Squad expansion) drops its folder here too.
-        //
-        // NOTE: ExcludeFilters only exists while in the VAB/SPH editor — returns null
-        // otherwise so the caller can surface that this must be set from the editor.
-        private string ReadJanitorsClosetModlist()
-        {
-            try
-            {
-                var editorList = KSP.UI.Screens.EditorPartList.Instance;
-                if (editorList == null || editorList.ExcludeFilters == null)
-                {
-                    Debug.LogWarning("[GeneKerman] EditorPartList not available — open the VAB/SPH to read the JC mod filter.");
-                    return null;
-                }
-
-                EditorPartListFilter<AvailablePart> modFilter = editorList.ExcludeFilters["Mod Filter"];
-                if (modFilter == null || modFilter.FilterCriteria == null)
-                {
-                    Debug.LogWarning("[GeneKerman] JC 'Mod Filter' not registered in EditorPartList.ExcludeFilters.");
-                    return null;
-                }
-
-                var criteria = modFilter.FilterCriteria; // true == part kept (mod allowed)
-                var visibleFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var part in PartLoader.LoadedPartsList)
-                {
-                    if (part == null || string.IsNullOrEmpty(part.partUrl)) continue;
-                    bool visible;
-                    try { visible = criteria(part); }
-                    catch { continue; }
-                    if (visible)
-                        visibleFolders.Add(part.partUrl.Split('/')[0]);
-                }
-
-                if (visibleFolders.Count > 0)
-                {
-                    Debug.Log($"[GeneKerman] JC modlist via 'Mod Filter' criteria: {visibleFolders.Count} visible folders");
-                    return string.Join(",", visibleFolders.ToArray());
-                }
-
-                Debug.LogWarning("[GeneKerman] JC 'Mod Filter' matched no visible parts.");
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[GeneKerman] JC modlist read failed: {ex.Message}\n{ex.StackTrace}");
-            }
-
-            return null;
+            string mode = (modlistMode >= 0 && modlistMode < ModlistModes.Length)
+                ? ModlistModes[modlistMode] : ContractCreation.ModlistNone;
+            return ContractCreation.BuildModlist(mode, out error);
         }
 
         private void LoadCorps()
@@ -725,13 +627,13 @@ namespace GeneKerman.UI
             {
                 DrawNumberRow("Apoapsis (km):", ref apText);
                 DrawNumberRow("Periapsis (km):", ref peText);
-                DrawNumberRow($"Margin (km, min {MIN_MARGIN_ORBIT_KM}):", ref marginAltText);
+                DrawNumberRow($"Margin (km, min {ContractCreation.MinMarginOrbitKm}):", ref marginAltText);
             }
             else
             {
                 DrawNumberRow("Latitude (°):", ref latText);
                 DrawNumberRow("Longitude (°):", ref lonText);
-                DrawNumberRow($"Margin (°, min {MIN_MARGIN_SURFACE_DEG}):", ref marginPosText);
+                DrawNumberRow($"Margin (°, min {ContractCreation.MinMarginSurfaceDeg}):", ref marginPosText);
             }
 
             GUILayout.Space(4);
@@ -739,240 +641,95 @@ namespace GeneKerman.UI
             GUILayout.Space(6);
         }
 
+        /// <summary>
+        /// Collects the form into a ContractCreation.Request and hands it over. The
+        /// validation, the modlist derivation and the send itself are shared with the
+        /// browser UI; what stays here is parsing the text boxes and the status line.
+        /// </summary>
         private void TrySend()
         {
-            // Validate (auctions are open to everyone, so no recipient to pick)
-            if (!auctionMode && selectedCorpIndex < 0)
-            {
-                statusMsg = "❌ Select a corporation first.";
-                isSuccess = false;
-                return;
-            }
+            bool isRescue = contractType == RESCUE_TYPE_INDEX;
 
-            if (string.IsNullOrEmpty(missionText) || missionText.Length < 3)
-            {
-                statusMsg = "❌ Mission description is too short.";
-                isSuccess = false;
-                return;
-            }
+            // Auctions are open to everyone, so there is no recipient to pick.
+            if (!auctionMode && selectedCorpIndex < 0) { Fail("Select a corporation first."); return; }
 
             int payment;
             if (!int.TryParse(paymentText, out payment) || payment <= 0)
-            {
-                statusMsg = "❌ Enter a valid payment amount.";
-                isSuccess = false;
-                return;
-            }
+            { Fail("Enter a valid payment amount."); return; }
 
+            // Checked here rather than in ContractCreation because only this window
+            // already knows the balance; the server re-checks it at escrow time.
             if (payment > currentBalance)
-            {
-                statusMsg = $"❌ Insufficient balance ({payment} needed, you have {currentBalance}).";
-                isSuccess = false;
-                return;
-            }
+            { Fail($"Insufficient balance ({payment} needed, you have {currentBalance})."); return; }
 
             int fine;
-            if (!int.TryParse(fineText, out fine) || fine < 0)
-            {
-                fine = 0;
-            }
+            if (!int.TryParse(fineText, out fine) || fine < 0) fine = 0;
 
-            if (string.IsNullOrEmpty(dueDateText))
-            {
-                statusMsg = "❌ Enter a due date.";
-                isSuccess = false;
-                return;
-            }
+            var corp = (!auctionMode && selectedCorpIndex >= 0) ? corps[selectedCorpIndex] : default(CorpEntry);
 
-            if (contractType == RESCUE_TYPE_INDEX)
+            var req = new ContractCreation.Request
             {
-                TrySendRescue(payment, fine);
-                return;
-            }
+                Kind = isRescue ? "rescue" : (auctionMode ? "auction" : "contract"),
+                ContractorId = corp.ownerId ?? "",
+                ContractorName = corp.ownerName ?? "",
+                Mission = missionText,
+                Payment = payment,
+                Fine = fine,
+                DueDate = dueDateText,
+                ContractType = ContractTypeApi[contractType],
+                ModlistMode = ModlistModes[
+                    (modlistMode >= 0 && modlistMode < ModlistModes.Length) ? modlistMode : 0],
+            };
 
             if (auctionMode)
             {
-                TrySendAuction(payment, fine);
-                return;
+                int duration;
+                if (!int.TryParse(durationText, out duration) || duration < 1)
+                { Fail("Enter a valid auction duration (hours)."); return; }
+                req.DurationHours = duration;
             }
 
-            // Flag-design has no in-game build step, so it never carries a part restriction.
-            string modlist = contractType == FLAG_TYPE_INDEX ? null : BuildModlist();
-
-            // Janitor's Closet mode needs the editor's part filter, which only exists in
-            // the VAB/SPH. Don't silently send an unrestricted contract if we couldn't read it.
-            if (contractType != FLAG_TYPE_INDEX && modlistMode == 4 && string.IsNullOrEmpty(modlist))
+            if (isRescue)
             {
-                statusMsg = "❌ Open the VAB or SPH to capture the Janitor's Closet filter.";
-                isSuccess = false;
-                return;
+                if (bodyIndex < 0 || bodyIndex >= bodyNames.Count) { Fail("Pick a target body."); return; }
+                req.RescueBody = bodyNames[bodyIndex];
+                req.RescueMode = rescueMode == 0 ? "orbit" : "surface";
+
+                if (rescueMode == 0)
+                {
+                    double ap, pe, margin;
+                    if (!TryParseInv(apText, out ap) || !TryParseInv(peText, out pe) || ap < 0 || pe < 0)
+                    { Fail("Enter valid Apoapsis/Periapsis (km)."); return; }
+                    if (!TryParseInv(marginAltText, out margin)) margin = 0;
+                    req.ApKm = ap; req.PeKm = pe; req.MarginAltKm = margin;
+                }
+                else
+                {
+                    double lat, lon, margin;
+                    if (!TryParseInv(latText, out lat) || !TryParseInv(lonText, out lon) || lat < -90 || lat > 90)
+                    { Fail("Enter a valid Latitude (-90..90) and Longitude."); return; }
+                    if (!TryParseInv(marginPosText, out margin)) margin = 0;
+                    req.Lat = lat; req.Lon = lon; req.MarginPosDeg = margin;
+                }
             }
 
-            var corp = corps[selectedCorpIndex];
             isSending = true;
-            statusMsg = "Sending contract...";
+            statusMsg = isRescue ? "Sending rescue contract..."
+                      : auctionMode ? "Posting auction..." : "Sending contract...";
 
-            GeneKermanMod.Instance.StartCoroutine(
-                GeneKermanMod.Instance.Api.CreateContract(
-                    corp.ownerId, missionText, payment, fine, dueDateText, modlist,
-                    (ok, data, error) =>
-                    {
-                        isSending = false;
-                        if (ok)
-                        {
-                            isSuccess = true;
-                            statusMsg = $"✅ Contract sent to {corp.ownerName}!";
-                            currentBalance -= payment;
-                        }
-                        else
-                        {
-                            isSuccess = false;
-                            statusMsg = $"❌ {error ?? "Failed to create contract."}";
-                        }
-                    },
-                    ContractTypeApi[contractType]));
+            GeneKermanMod.Instance.StartCoroutine(ContractCreation.Create(req, (ok, message) =>
+            {
+                isSending = false;
+                isSuccess = ok;
+                statusMsg = (ok ? "✅ " : "❌ ") + message;
+                if (ok) currentBalance -= payment;
+            }));
         }
 
-        private void TrySendAuction(int startValue, int fine)
+        private void Fail(string message)
         {
-            int duration;
-            if (!int.TryParse(durationText, out duration) || duration < 1)
-            {
-                statusMsg = "❌ Enter a valid auction duration (hours).";
-                isSuccess = false;
-                return;
-            }
-
-            // Auctions support the same part restriction as a normal contract.
-            string modlist = BuildModlist();
-            if (modlistMode == 4 && string.IsNullOrEmpty(modlist))
-            {
-                statusMsg = "❌ Open the VAB or SPH to capture the Janitor's Closet filter.";
-                isSuccess = false;
-                return;
-            }
-
-            isSending = true;
-            statusMsg = "Posting auction...";
-
-            GeneKermanMod.Instance.StartCoroutine(
-                GeneKermanMod.Instance.Api.CreateAuction(
-                    missionText, startValue, fine, dueDateText, duration, modlist,
-                    ContractTypeApi[contractType],
-                    (ok, data, error) =>
-                    {
-                        isSending = false;
-                        if (ok)
-                        {
-                            isSuccess = true;
-                            statusMsg = "✅ Auction posted! Bidding happens in Discord.";
-                            currentBalance -= startValue;
-                        }
-                        else
-                        {
-                            isSuccess = false;
-                            statusMsg = $"❌ {error ?? "Failed to post auction."}";
-                        }
-                    }));
-        }
-
-        private void TrySendRescue(int payment, int fine)
-        {
-            if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
-            {
-                statusMsg = "❌ You must be in flight on the crewed vessel.";
-                isSuccess = false;
-                return;
-            }
-            ScanRescueContext(); // refresh crew/bodies right before sending
-            if (rescueCrew.Count == 0)
-            {
-                statusMsg = "❌ No crew aboard to rescue.";
-                isSuccess = false;
-                return;
-            }
-            if (bodyIndex < 0 || bodyIndex >= bodyNames.Count)
-            {
-                statusMsg = "❌ Pick a target body.";
-                isSuccess = false;
-                return;
-            }
-
-            string body = bodyNames[bodyIndex];
-            bool isModded = bodyModded[bodyIndex];
-            string mode = rescueMode == 0 ? "orbit" : "surface";
-            double ap = 0, pe = 0, lat = 0, lon = 0, marginAlt = 0, marginPos = 0;
-
-            if (rescueMode == 0)
-            {
-                if (!TryParseInv(apText, out ap) || !TryParseInv(peText, out pe) || ap < 0 || pe < 0)
-                {
-                    statusMsg = "❌ Enter valid Apoapsis/Periapsis (km).";
-                    isSuccess = false;
-                    return;
-                }
-                double mk;
-                if (!TryParseInv(marginAltText, out mk) || mk < MIN_MARGIN_ORBIT_KM) mk = MIN_MARGIN_ORBIT_KM;
-                ap *= 1000.0; pe *= 1000.0; marginAlt = mk * 1000.0; // km → m
-            }
-            else
-            {
-                if (!TryParseInv(latText, out lat) || !TryParseInv(lonText, out lon) || lat < -90 || lat > 90)
-                {
-                    statusMsg = "❌ Enter a valid Latitude (-90..90) and Longitude.";
-                    isSuccess = false;
-                    return;
-                }
-                double md;
-                if (!TryParseInv(marginPosText, out md) || md < MIN_MARGIN_SURFACE_DEG) md = MIN_MARGIN_SURFACE_DEG;
-                marginPos = md;
-            }
-
-            // Snapshot the active vessel (crew roster embedded so attributes survive the
-            // transfer). Crew are NOT renamed here — they're tagged "{me}'s {kerbal}" when
-            // the rescuer imports the wreck, and stripped when they're returned to me.
-            string node = VesselTransfer.ExportActiveVessel(true);
-            if (string.IsNullOrEmpty(node))
-            {
-                statusMsg = "❌ Could not snapshot your vessel.";
-                isSuccess = false;
-                return;
-            }
-            string pid = FlightGlobals.ActiveVessel.id.ToString();
-            string vesselName = FlightGlobals.ActiveVessel.vesselName;
-
-            // The names the rescuer will see (and must recover) = "{me}'s {kerbal}".
-            var taggedKerbals = new List<object>();
-            foreach (var k in rescueCrew) taggedKerbals.Add(VesselTransfer.TagName(currentUserName, k));
-            string kerbalsJson = MiniJSON.Serialize(taggedKerbals);
-
-            string modlist = BuildActiveModlist();
-            var corp = corps[selectedCorpIndex];
-            isSending = true;
-            statusMsg = "Sending rescue contract...";
-
-            GeneKermanMod.Instance.StartCoroutine(
-                GeneKermanMod.Instance.Api.CreateRescueContract(
-                    corp.ownerId, missionText, payment, fine, dueDateText, modlist,
-                    body, mode, ap, pe, lat, lon, marginAlt, marginPos, isModded,
-                    pid, kerbalsJson, node,
-                    (ok, data, error) =>
-                    {
-                        isSending = false;
-                        if (ok)
-                        {
-                            isSuccess = true;
-                            statusMsg = $"✅ Rescue sent to {corp.ownerName}! Your vessel will be removed.";
-                            currentBalance -= payment;
-                            // Can't Die() the active vessel mid-flight — queue removal for a safe scene.
-                            GeneKermanMod.Instance.QueueRescueVesselRemoval(pid, vesselName);
-                        }
-                        else
-                        {
-                            isSuccess = false;
-                            statusMsg = $"❌ {error ?? "Failed to create rescue contract."}";
-                        }
-                    }));
+            statusMsg = "❌ " + message;
+            isSuccess = false;
         }
     }
 }

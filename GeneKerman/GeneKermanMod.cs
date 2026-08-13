@@ -70,15 +70,45 @@ namespace GeneKerman
 
         private UI.UpdateRequiredWindow updateWindow;
 
+        // Loopback web bridge, live only while the browser UI is in use (enableWebUi
+        // in settings.cfg). Binds 127.0.0.1 on an ephemeral port. See Web/LocalServer.cs.
+        private Web.LocalServer webServer;
+        private UI.WebUiWindow webUiWindow;
+
         // Device binding: set while we're blocked on an unrecognized-device challenge.
         private bool deviceGateActive;
         private string deviceGateChallenge;
 
         // Version gate: set when the server reports this DLL is no longer the latest.
-        // While true, every mod window except the update prompt is suppressed.
+        // While true, every server-backed feature is suppressed.
         public bool UpdateRequired { get; private set; }
         public string LatestVersion { get; private set; } = "";
         public string UpdateDownloadUrl { get; private set; } = "";
+
+        /// <summary>
+        /// The player dismissed the update prompt with "Continue anyway". The gate is
+        /// still on — every server call keeps failing 426 and the server keeps refusing
+        /// this DLL — but the purely local parts of the mod (flag import, flag-encoded
+        /// craft export) and the Settings tab become reachable again. That last part is
+        /// the point: without it a client rejected by the official server has no way to
+        /// switch to a server that would accept it, which is a dead end you can only
+        /// escape by editing settings.cfg by hand.
+        ///
+        /// Session-only, deliberately: it is never written to settings.cfg, so every
+        /// launch re-shows the prompt and the nag cannot be permanently silenced.
+        /// </summary>
+        public bool UpdateAcknowledged { get; private set; }
+
+        /// <summary>Dismiss the update gate for this session and open the limited UI.</summary>
+        public void AcknowledgeUpdate()
+        {
+            if (!UpdateRequired) return;
+            UpdateAcknowledged = true;
+            updateWindow.Hide();
+            ShowMainWindow = true;
+            mainWindow.OnOpen();
+            Debug.Log("[GeneKerman] Update gate acknowledged — limited (offline) features enabled.");
+        }
 
         // Milestone hero-shot capture (rendezvous / flyby / asteroid)
         private CheckpointDetector checkpointDetector;
@@ -139,11 +169,16 @@ namespace GeneKerman
             checkpointPrompt = new UI.CheckpointPrompt();
             deviceVerifyWindow = new UI.DeviceVerifyWindow();
             updateWindow = new UI.UpdateRequiredWindow();
+            webUiWindow = new UI.WebUiWindow();
             checkpointDetector = new CheckpointDetector(OnCheckpoint)
             {
                 IsCaptureEnabled = () => Api != null && Api.CheckpointPhotosEnabled,
             };
             checkpointDetector.Register();
+
+            // Detect installed life-support / DeepFreeze mods once (drives rescue-kerbal
+            // immunity and the Kerbalism rescue gate). Reflection-only; safe if none present.
+            LifeSupportRegistry.LogDetected();
 
             // Load toolbar icon
             LoadToolbarIcon();
@@ -181,6 +216,62 @@ namespace GeneKerman
             lastNotificationCheck = Time.realtimeSinceStartup;
         }
 
+        // ── Web UI bridge ───────────────────────────────────────────────────
+
+        /// <summary>Bridge origin (no nonce) — safe to display and to log.</summary>
+        public string WebBridgeUrl => webServer?.Url;
+
+        /// <summary>True when the player has chosen the browser UI over the classic windows.</summary>
+        public bool WebUiMode => Api != null && Api.WebUiEnabled;
+
+        /// <summary>
+        /// Starts the bridge if needed and opens (or re-opens) the UI in the browser.
+        /// Returns false if the bridge could not start, in which case the caller must
+        /// fall back to the classic UI rather than leave the player with nothing.
+        /// </summary>
+        private bool OpenWebUi()
+        {
+            if (webServer == null) webServer = new Web.LocalServer();
+
+            string launchUrl = webServer.IsRunning ? webServer.NewLaunchUrl() : webServer.Start();
+            if (launchUrl == null)
+            {
+                webServer = null;
+                return false;
+            }
+
+            // launchUrl carries a single-use nonce — never log it. Players upload
+            // KSP.log to Discord routinely, and DeviceId.GetKspLog() does it automatically.
+            Application.OpenURL(launchUrl);
+
+            // Always raise the in-game panel too: if OpenURL silently did nothing
+            // (Flatpak/Proton without xdg-open, Steam overlay), this is the only way the
+            // player learns where the UI actually is.
+            webUiWindow.Visible = true;
+            return true;
+        }
+
+        /// <summary>"Reopen in browser" from WebUiWindow.</summary>
+        public void ReopenWebUi()
+        {
+            if (!OpenWebUi())
+                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable — using classic UI.",
+                    5f, ScreenMessageStyle.UPPER_CENTER);
+        }
+
+        /// <summary>Switch UI mode at runtime and persist it.</summary>
+        public void SetUiMode(bool web)
+        {
+            Api.SetWebUiEnabled(web);
+            if (web) return;
+
+            // Leaving web mode: tear the bridge down rather than leave a listening
+            // socket open for a UI nobody is using.
+            webUiWindow.Visible = false;
+            webServer?.Stop();
+            webServer = null;
+        }
+
         private void OnHideUI() => uiHidden = true;
         private void OnShowUI() => uiHidden = false;
 
@@ -195,7 +286,18 @@ namespace GeneKerman
 
         void Update()
         {
+            // Hoisted above every early return below. The bridge must keep draining its
+            // job queue even when the player is unlinked or data-sharing is paused —
+            // otherwise a request thread blocks for the full 30s timeout, and the page
+            // cannot even ask *why* it is unavailable.
+            webServer?.Pump();
+
             if (!initialized || !Api.IsLinked) return;
+
+            // Hold rescue-kerbal life-support immunity and perform handoff on contact.
+            // Purely local (no network), so it runs even when data-sharing is opted out —
+            // a stranded crew must not start starving just because telemetry is paused.
+            RescueImmunityGuardian.Tick();
 
             // Data-sharing opt-out (rule 8.2): run inert — no polling, no checkpoint
             // detection, no imports — and make sure the live socket is closed.
@@ -314,18 +416,21 @@ namespace GeneKerman
             // Rescue: when the issuer approves, the rescue craft is delivered to them
             // and removed from the rescuer's save. Queue removal of the craft this
             // client submitted for that contract.
-            if (MiniJSON.GetString(notif, "type") == "rescue_craft_removed" && !string.IsNullOrEmpty(contractId))
-            {
-                string pid;
-                if (rescueSubmittedPids.TryGetValue(contractId, out pid))
-                {
-                    QueueRescueVesselRemoval(pid);
-                    rescueSubmittedPids.Remove(contractId);
-                }
-            }
+            MaybeHandleRescueRemoval(notif);
 
             // Keep the panel in sync so the item is already there when opened.
             mainWindow.AddNotification(notif);
+
+            // Tee to the browser UI — deliberately in addition to the toast above, not
+            // instead of it. A player in web mode may be flying with the browser behind
+            // the game window; the in-game toast is the only thing they will actually
+            // see, so it must keep firing regardless of UI mode.
+            webServer?.Broadcast("notification", MiniJSON.Serialize(notif));
+
+            // Same reasoning as RefreshContracts() below: tell the page its lists are
+            // stale so it can refetch, rather than making it poll.
+            if (IsContractEvent(MiniJSON.GetString(notif, "type")))
+                webServer?.Broadcast("contracts_changed", "{}");
 
             // Anything that changes a contract's state (a new offer, an acceptance,
             // a submission, an approval/refusal, a cancellation) refreshes the
@@ -368,6 +473,7 @@ namespace GeneKerman
             GameEvents.onShowUI.Remove(OnShowUI);
             checkpointDetector?.Unregister();
             notifSocket?.Disconnect();
+            webServer?.Stop();
             RemoveToolbarButton();
         }
 
@@ -468,8 +574,9 @@ namespace GeneKerman
 
         private void OnToolbarClick()
         {
-            // Outdated client: the only thing the button does is re-show the gate.
-            if (UpdateRequired)
+            // Outdated client, prompt not yet dismissed: the only thing the button
+            // does is re-show the gate.
+            if (UpdateRequired && !UpdateAcknowledged)
             {
                 updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
                 return;
@@ -491,6 +598,37 @@ namespace GeneKerman
             {
                 ShowConsentWindow = !ShowConsentWindow;
                 return;
+            }
+
+            // Acknowledged update gate: the main window is the only thing on offer, and
+            // it comes up in limited mode. Linking is a server call that would just 426,
+            // so an unlinked client goes here too rather than to the link window.
+            if (UpdateRequired)
+            {
+                ShowMainWindow = !ShowMainWindow;
+                if (ShowMainWindow)
+                    mainWindow.OnOpen();
+                return;
+            }
+
+            // Browser UI mode. Every gate above is deliberately still IMGUI: they are
+            // either time-critical, a gate, or the recovery path, and none of them may
+            // depend on a browser that might not open.
+            if (Api.IsLinked && WebUiMode)
+            {
+                if (webUiWindow.Visible && webServer != null && webServer.IsRunning)
+                {
+                    webUiWindow.Visible = false; // second click closes the panel
+                    return;
+                }
+                if (OpenWebUi()) return;
+
+                // Bridge could not start (missing or mismatched WebUI bundle, port
+                // trouble). Fall through to the classic window rather than strand the
+                // player on a button that does nothing.
+                Debug.LogWarning("[GeneKerman] Web UI unavailable — falling back to the classic window.");
+                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable — using classic UI.",
+                    5f, ScreenMessageStyle.UPPER_CENTER);
             }
 
             if (Api.IsLinked)
@@ -521,8 +659,10 @@ namespace GeneKerman
             GUI.skin = UI.GKSkin.GetSkin(prevSkin);
             try
             {
-                // Outdated client: nothing but the update prompt is usable.
-                if (UpdateRequired)
+                // Outdated client: nothing but the update prompt is usable, until the
+                // player dismisses it with "Continue anyway" (see UpdateAcknowledged),
+                // which drops them into the limited main window below.
+                if (UpdateRequired && !UpdateAcknowledged)
                 {
                     updateWindow.Draw();
                 }
@@ -541,6 +681,15 @@ namespace GeneKerman
                     if (ShowConsentWindow)
                         consentWindow.Draw();
                 }
+                // Acknowledged update gate: only the main window, and MainWindow itself
+                // narrows to the tabs that work without the server (Tools, Settings).
+                // Nothing that transmits is drawn — no submit/create/notification popups,
+                // no link window.
+                else if (UpdateRequired)
+                {
+                    if (ShowMainWindow)
+                        mainWindow.Draw();
+                }
                 else
                 {
                     if (ShowMainWindow && Api.IsLinked)
@@ -550,8 +699,17 @@ namespace GeneKerman
                     if (!Api.IsLinked && (ShowLinkWindow || ShowConsentWindow))
                         linkWindow.Draw();
 
+                    // Where the UI is running, plus the escape hatches back to it and
+                    // to the classic windows. Drawn in web mode only.
+                    webUiWindow.Draw();
+
                     submitWindow.Draw();
                     createContractWindow.Draw();
+
+                    // These four stay IMGUI permanently, in every mode. Toasts and the
+                    // checkpoint prompt are time-critical and must appear over the game
+                    // while the player is flying — a browser is alt-tabbed or on another
+                    // monitor. The device prompt is a security question about this PC.
                     notificationPopup.Draw();
                     checkpointPrompt.Draw();
                     deviceVerifyWindow.Draw();
@@ -834,7 +992,18 @@ namespace GeneKerman
                     if (seeding)
                     {
                         // First poll after launch: items already live in the panel —
-                        // record them as seen so we never toast the backlog.
+                        // record them as seen so we never toast the backlog. But an
+                        // approval that landed while we were offline arrives here too, and
+                        // its rescue-craft removal must still fire — so act on it now. If
+                        // the save (scenario) isn't loaded yet we can't resolve the craft,
+                        // so leave it unseen and let a later poll retry it once a save is in.
+                        bool isRescueRemoval =
+                            MiniJSON.GetString(notif, "type") == "rescue_craft_removed";
+                        if (isRescueRemoval && GKContractScenario.Instance == null)
+                            continue; // retry on a later poll; don't mark seen
+
+                        if (isRescueRemoval) MaybeHandleRescueRemoval(notif);
+
                         string id = MiniJSON.GetString(notif, "id");
                         if (!string.IsNullOrEmpty(id)) seenNotifIds.Add(id);
                     }
@@ -993,8 +1162,31 @@ namespace GeneKerman
                 {
                     if (UpdateRequired)
                     {
+                        // Cleared — e.g. the player switched to a server that accepts this
+                        // build. Drop the acknowledgement too so the full UI comes back and
+                        // a later gate gets a fresh prompt rather than silently inheriting
+                        // this session's dismissal.
+                        bool wasLimited = UpdateAcknowledged;
                         UpdateRequired = false;
+                        UpdateAcknowledged = false;
                         updateWindow.Hide();
+
+                        // Hand the player back a usable window. Coming out of limited mode
+                        // the main window is open but holds no data (nothing was fetched
+                        // while gated), and for an unlinked client OnGUI would stop drawing
+                        // it entirely — leaving the screen blank with no obvious next step.
+                        if (wasLimited && ShowMainWindow)
+                        {
+                            if (Api.IsLinked)
+                            {
+                                mainWindow.OnOpen();     // now a real refresh
+                            }
+                            else
+                            {
+                                ShowMainWindow = false;
+                                ShowLinkWindow = true;   // this server accepts us — offer linking
+                            }
+                        }
                     }
                     return;
                 }
@@ -1002,6 +1194,12 @@ namespace GeneKerman
                 LatestVersion = MiniJSON.GetString(data, "latest_version");
                 UpdateDownloadUrl = MiniJSON.GetString(data, "download_url");
                 UpdateRequired = true;
+
+                // Already dismissed this session (e.g. this is the re-check fired by a
+                // server switch, and the new server rejects us too): leave the player in
+                // the limited UI instead of yanking the window back over it.
+                if (UpdateAcknowledged) return;
+
                 ShowMainWindow = false;
                 ShowLinkWindow = false;
                 updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
@@ -1012,6 +1210,29 @@ namespace GeneKerman
         /// Re-run the version check (e.g. after the player updated and the window's
         /// "Re-check" button is pressed).
         public void RecheckVersion() => StartCoroutine(CheckVersionRoutine());
+
+        /// <summary>
+        /// The player pointed the mod at a different server. Everything live is still
+        /// aimed at the old one, so bring it in line: the notification socket is holding
+        /// an open connection to the previous host, the new server has its own version
+        /// gate (which is the escape hatch out of limited mode — a server that accepts
+        /// this build clears it without a restart), and it has its own idea of whether
+        /// we are linked at all.
+        ///
+        /// Called by both front ends, so the two cannot drift apart.
+        /// </summary>
+        public void OnServerChanged()
+        {
+            notifSocket.Disconnect();   // Update() re-opens it against the new host
+
+            // No token for this server. Linking needs a 6-digit code typed in KSP and a
+            // Discord approval, so the in-game window is the only place it can happen —
+            // including in browser mode, where this is what the player sees next.
+            if (!Api.IsLinked)
+                ShowLinkWindow = true;
+
+            RecheckVersion();
+        }
 
         /// Called by ApiClient when ANY gated request is rejected with 426
         /// update_required (the server-enforced version gate). Raises the same
@@ -1150,13 +1371,29 @@ namespace GeneKerman
         //
         // A vessel can only be safely removed when it isn't the focused flight
         // vessel, so removals are queued and run at the Space Center / Tracking
-        // Station. rescueSubmittedPids remembers which craft the rescuer handed
-        // over per contract, so we know what to remove when the issuer approves.
+        // Station. The submitted-craft map and the removal queue both live in
+        // GKContractScenario so they're persisted with the save: a rescue is
+        // submitted, then approved possibly days (and several restarts) later, and
+        // the craft must still be found and deleted across that gap.
 
-        // pid → friendly vessel name, captured at queue time so the removal notice can
-        // still name the craft after it's destroyed.
-        private readonly Dictionary<string, string> pendingRescueRemovals = new Dictionary<string, string>();
-        private readonly Dictionary<string, string> rescueSubmittedPids = new Dictionary<string, string>();
+        /// <summary>On a "rescue_craft_removed" notification, find the craft this client
+        /// submitted for that contract and queue it for removal.</summary>
+        private void MaybeHandleRescueRemoval(Dictionary<string, object> notif)
+        {
+            if (notif == null) return;
+            if (MiniJSON.GetString(notif, "type") != "rescue_craft_removed") return;
+
+            var data = MiniJSON.GetDict(notif, "data");
+            string contractId = data != null ? MiniJSON.GetString(data, "contract_id") : "";
+            if (string.IsNullOrEmpty(contractId)) return;
+
+            var scenario = GKContractScenario.Instance;
+            if (scenario == null) return; // no save loaded — handled later via seeding retry
+
+            string pid;
+            if (scenario.TakeRescueSubmission(contractId, out pid))
+                QueueRescueVesselRemoval(pid);
+        }
 
         /// <summary>Queue a vessel (by pid) for removal at the next safe scene. Pass a
         /// vesselName when the caller already knows it (e.g. the active vessel); otherwise
@@ -1164,44 +1401,60 @@ namespace GeneKerman
         public void QueueRescueVesselRemoval(string pid, string vesselName = null)
         {
             if (string.IsNullOrEmpty(pid)) return;
-            if (!pendingRescueRemovals.ContainsKey(pid))
-                pendingRescueRemovals[pid] = string.IsNullOrEmpty(vesselName)
+            var pending = GKContractScenario.Instance?.PendingRescueRemovals;
+            if (pending == null) return; // no save loaded — nothing to queue against
+
+            if (!pending.ContainsKey(pid))
+                pending[pid] = string.IsNullOrEmpty(vesselName)
                     ? VesselTransfer.GetVesselName(pid) : vesselName;
 
             ProcessPendingRescueRemovals(); // run now if we're already somewhere safe
 
             // Still queued → we couldn't delete it yet (player is in flight). Warn them so
             // the craft doesn't silently vanish the next time they reach the Space Center.
-            if (pendingRescueRemovals.ContainsKey(pid))
+            if (pending.ContainsKey(pid))
                 RaiseLocalNotification("🛰️ Craft scheduled for removal",
-                    $"\"{pendingRescueRemovals[pid]}\" will be deleted when you return to the Space Center.");
+                    $"\"{pending[pid]}\" will be deleted when you return to the Space Center.");
         }
 
         /// <summary>Record the craft a rescuer submitted, so it can be removed once
         /// the issuer approves and it's delivered to them.</summary>
         public void RecordRescueSubmission(string contractId, string pid)
         {
-            if (!string.IsNullOrEmpty(contractId) && !string.IsNullOrEmpty(pid))
-                rescueSubmittedPids[contractId] = pid;
+            GKContractScenario.Instance?.RecordRescueSubmission(contractId, pid);
         }
 
         private void ProcessPendingRescueRemovals()
         {
-            if (pendingRescueRemovals.Count == 0) return;
+            var pending = GKContractScenario.Instance?.PendingRescueRemovals;
+            if (pending == null || pending.Count == 0) return;
             if (HighLogic.LoadedScene != GameScenes.SPACECENTER &&
                 HighLogic.LoadedScene != GameScenes.TRACKSTATION)
                 return; // can't safely Die() the focused flight vessel — wait
 
-            var done = new List<string>();
-            foreach (var kv in pendingRescueRemovals)
-                if (VesselTransfer.RemoveVesselFromSave(kv.Key)) done.Add(kv.Key);
-            foreach (var pid in done)
+            // Removed = we deleted it (announce); NotFound = already gone (dequeue
+            // silently). Both are terminal — dropping them stops the per-frame retry
+            // that otherwise floods the log when a queued pid isn't in this save.
+            // Deferred/Failed stay queued for a later safe-scene pass.
+            var removed = new List<string>();
+            var gone = new List<string>();
+            foreach (var kv in pending)
             {
-                string name = pendingRescueRemovals[pid];
-                pendingRescueRemovals.Remove(pid);
+                switch (VesselTransfer.RemoveVesselFromSave(kv.Key))
+                {
+                    case VesselTransfer.RemovalResult.Removed: removed.Add(kv.Key); break;
+                    case VesselTransfer.RemovalResult.NotFound: gone.Add(kv.Key); break;
+                }
+            }
+            foreach (var pid in removed)
+            {
+                string name = pending[pid];
+                pending.Remove(pid);
                 RaiseLocalNotification("🗑️ Craft removed",
                     $"\"{name}\" was removed from your save.");
             }
+            foreach (var pid in gone)
+                pending.Remove(pid);
         }
 
         public void RefreshContracts()

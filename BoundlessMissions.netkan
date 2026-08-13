@@ -1,0 +1,44 @@
+{
+    "spec_version": "v1.18",
+    "identifier": "BoundlessMissions",
+    "name": "Boundless Missions",
+    "abstract": "Connects your game to the Boundless Missions Discord community: player-issued contracts, reverse auctions, rescue missions, craft transfers and an in-game economy, all without leaving KSP.",
+    "description": "Links a KSP install to a Discord account with a 6-digit code, then delivers contracts, missions, notifications and craft transfers in game. Includes an optional browser interface served from a loopback-only HTTP listener on 127.0.0.1 (off by default; see the Interface section of the in-game Settings tab).",
+
+    "author": [ "gk-ksp" ],
+    "license": "GPL-3.0",
+
+    "$kref": "#/ckan/github/gk-ksp/GeneKerman",
+    "$vref": "#/ckan/ksp-avc",
+
+    "resources": {
+        "homepage": "https://boundlessmissions.com",
+        "repository": "https://github.com/gk-ksp/GeneKerman",
+        "bugtracker": "https://github.com/gk-ksp/GeneKerman/issues"
+    },
+
+    "ksp_version_min": "1.12.0",
+    "ksp_version_max": "1.12.5",
+
+    "depends": [
+        { "name": "ModuleManager" }
+    ],
+
+    "recommends": [
+        { "name": "ClickThroughBlocker" }
+    ],
+
+    "suggests": [
+        { "name": "KronalVesselViewer" }
+    ],
+
+    "install": [
+        {
+            "find": "BoundlessMissions",
+            "install_to": "GameData",
+            "filter": [
+                "settings.cfg"
+            ]
+        }
+    ]
+}

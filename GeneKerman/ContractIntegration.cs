@@ -36,6 +36,20 @@ namespace GeneKerman
         // List of contract_ids whose vessels have already been imported into this save
         private HashSet<string> importedVessels = new HashSet<string>();
 
+        // Rescue kerbals currently held immune from life support (one record per spawned
+        // wreck). Persisted so immunity survives restarts while a wreck waits to be reached.
+        private List<RescueImmunityRecord> immunities = new List<RescueImmunityRecord>();
+
+        // Rescue craft this client handed over, keyed by contract_id → vessel pid. Recorded
+        // at submission and persisted, so we still know which craft to delete when the issuer
+        // approves — even if the player quit and relaunched in between (the common case).
+        private Dictionary<string, string> rescueSubmittedPids = new Dictionary<string, string>();
+
+        // Rescue craft queued for removal (pid → friendly name), persisted so a removal that
+        // couldn't run yet (player was in flight) survives a restart and fires at the next
+        // Space Center / Tracking Station visit.
+        private Dictionary<string, string> pendingRescueRemovals = new Dictionary<string, string>();
+
         public override void OnAwake()
         {
             Instance = this;
@@ -48,8 +62,14 @@ namespace GeneKerman
             // our persisted state. Guard the node and collections defensively.
             if (activeContracts == null) activeContracts = new Dictionary<string, string>();
             if (importedVessels == null) importedVessels = new HashSet<string>();
+            if (immunities == null) immunities = new List<RescueImmunityRecord>();
+            if (rescueSubmittedPids == null) rescueSubmittedPids = new Dictionary<string, string>();
+            if (pendingRescueRemovals == null) pendingRescueRemovals = new Dictionary<string, string>();
             activeContracts.Clear();
             importedVessels.Clear();
+            immunities.Clear();
+            rescueSubmittedPids.Clear();
+            pendingRescueRemovals.Clear();
 
             if (node == null) return;
 
@@ -67,6 +87,39 @@ namespace GeneKerman
                 {
                     foreach (ConfigNode.Value val in imports.values)
                         importedVessels.Add(val.value);
+                }
+
+                var imm = node.GetNode("RESCUE_IMMUNITY");
+                if (imm != null)
+                {
+                    foreach (ConfigNode rec in imm.GetNodes("RECORD"))
+                    {
+                        var r = RescueImmunityRecord.FromNode(rec);
+                        if (r != null) immunities.Add(r);
+                    }
+                }
+
+                var subs = node.GetNode("RESCUE_SUBMISSIONS");
+                if (subs != null)
+                {
+                    foreach (ConfigNode rec in subs.GetNodes("RECORD"))
+                    {
+                        string cid = rec.GetValue("cid");
+                        string pid = rec.GetValue("pid");
+                        if (!string.IsNullOrEmpty(cid) && !string.IsNullOrEmpty(pid))
+                            rescueSubmittedPids[cid] = pid;
+                    }
+                }
+
+                var pend = node.GetNode("RESCUE_PENDING_REMOVALS");
+                if (pend != null)
+                {
+                    foreach (ConfigNode rec in pend.GetNodes("RECORD"))
+                    {
+                        string pid = rec.GetValue("pid");
+                        if (!string.IsNullOrEmpty(pid))
+                            pendingRescueRemovals[pid] = rec.GetValue("name") ?? pid;
+                    }
                 }
             }
             catch (Exception ex)
@@ -87,6 +140,26 @@ namespace GeneKerman
                 var imports = node.AddNode("IMPORTED_VESSELS");
                 foreach (var cid in (importedVessels ?? new HashSet<string>()))
                     imports.AddValue("contract_id", cid);
+
+                var imm = node.AddNode("RESCUE_IMMUNITY");
+                foreach (var r in (immunities ?? new List<RescueImmunityRecord>()))
+                    r.Save(imm.AddNode("RECORD"));
+
+                var subs = node.AddNode("RESCUE_SUBMISSIONS");
+                foreach (var kvp in (rescueSubmittedPids ?? new Dictionary<string, string>()))
+                {
+                    var rec = subs.AddNode("RECORD");
+                    rec.AddValue("cid", kvp.Key);
+                    rec.AddValue("pid", kvp.Value);
+                }
+
+                var pend = node.AddNode("RESCUE_PENDING_REMOVALS");
+                foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, string>()))
+                {
+                    var rec = pend.AddNode("RECORD");
+                    rec.AddValue("pid", kvp.Key);
+                    rec.AddValue("name", kvp.Value);
+                }
             }
             catch (Exception ex)
             {
@@ -103,6 +176,48 @@ namespace GeneKerman
         {
             importedVessels.Add(contractId);
         }
+
+        // ── Rescue-kerbal life-support immunity ──────────────────────────────
+
+        /// <summary>Live list of immunity records (the guardian reads/mutates this).</summary>
+        public IList<RescueImmunityRecord> Immunities => immunities;
+
+        /// <summary>Register a new immunity record (replacing any for the same contract).</summary>
+        public void AddImmunity(RescueImmunityRecord record)
+        {
+            if (record == null) return;
+            immunities.RemoveAll(r => r.ContractId == record.ContractId);
+            immunities.Add(record);
+        }
+
+        /// <summary>Drop the immunity record for a contract (after handoff).</summary>
+        public void RemoveImmunity(string contractId)
+        {
+            immunities.RemoveAll(r => r.ContractId == contractId);
+        }
+
+        // ── Rescue craft hand-over bookkeeping (persisted) ───────────────────
+
+        /// <summary>Remember the craft a rescuer submitted for a contract, so it can be
+        /// removed once the issuer approves — survives a relaunch in between.</summary>
+        public void RecordRescueSubmission(string contractId, string pid)
+        {
+            if (!string.IsNullOrEmpty(contractId) && !string.IsNullOrEmpty(pid))
+                rescueSubmittedPids[contractId] = pid;
+        }
+
+        /// <summary>Look up (and forget) the submitted rescue craft pid for a contract.</summary>
+        public bool TakeRescueSubmission(string contractId, out string pid)
+        {
+            pid = null;
+            if (string.IsNullOrEmpty(contractId)) return false;
+            if (!rescueSubmittedPids.TryGetValue(contractId, out pid)) return false;
+            rescueSubmittedPids.Remove(contractId);
+            return true;
+        }
+
+        /// <summary>Live map of craft (pid → friendly name) queued for removal.</summary>
+        public IDictionary<string, string> PendingRescueRemovals => pendingRescueRemovals;
 
         /// <summary>
         /// Inject a mission from our API as a stock contract.

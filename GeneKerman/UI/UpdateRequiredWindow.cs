@@ -1,9 +1,14 @@
 /*
- * UI/UpdateRequiredWindow.cs – Blocking "update required" prompt.
+ * UI/UpdateRequiredWindow.cs – "update required" prompt.
  *
  * Shown when the server reports this client's DLL is no longer the published
- * latest. While it's up, GeneKermanMod suppresses every other window, so the mod
- * is unusable until the player updates (or a re-check clears it).
+ * latest. While it's up, GeneKermanMod suppresses every other window.
+ *
+ * "Continue anyway" dismisses it for the session (GeneKermanMod.AcknowledgeUpdate)
+ * and drops the player into the limited main window: flag import/export and the
+ * Settings tab, which is the only way to point the mod at a different server
+ * without hand-editing settings.cfg. Everything server-backed stays blocked —
+ * the gate is enforced server-side with 426 regardless of what this window does.
  */
 
 using UnityEngine;
@@ -12,7 +17,7 @@ namespace GeneKerman.UI
 {
     public class UpdateRequiredWindow
     {
-        private Rect windowRect = new Rect(Screen.width / 2 - 220, Screen.height / 2 - 150, 440, 300);
+        private Rect windowRect = new Rect(Screen.width / 2 - 220, Screen.height / 2 - 190, 440, 380);
         private readonly int windowId = "GKUpdateRequired".GetHashCode();
 
         public bool Visible { get; private set; }
@@ -24,6 +29,7 @@ namespace GeneKerman.UI
         private GUIStyle boxStyle;
         private GUIStyle bodyStyle;
         private GUIStyle urlStyle;
+        private GUIStyle noteStyle;
         private bool stylesReady;
 
         public void Show(string current, string latest, string url)
@@ -41,7 +47,7 @@ namespace GeneKerman.UI
             if (!Visible) return;
             if (GKSkin.NeedsRebuild()) stylesReady = false;
             windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
-                GUIStyle.none, GUILayout.Width(440), GUILayout.Height(300));
+                GUIStyle.none, GUILayout.Width(440), GUILayout.Height(380));
         }
 
         private void InitStyles()
@@ -67,6 +73,11 @@ namespace GeneKerman.UI
             {
                 fontSize = 11, alignment = TextAnchor.MiddleCenter, wordWrap = true,
                 normal = { textColor = new Color(0.55f, 0.7f, 0.95f) }
+            };
+            noteStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 11, alignment = TextAnchor.MiddleCenter, wordWrap = true,
+                normal = { textColor = new Color(0.62f, 0.62f, 0.66f) }
             };
             stylesReady = true;
         }
@@ -97,6 +108,19 @@ namespace GeneKerman.UI
                 if (GeneKermanMod.Instance != null)
                     GeneKermanMod.Instance.RecheckVersion();
             }
+
+            GUILayout.Space(10);
+            if (GUILayout.Button("Continue anyway (limited)", GUILayout.Height(26)))
+            {
+                if (GeneKermanMod.Instance != null)
+                    GeneKermanMod.Instance.AcknowledgeUpdate();
+            }
+            GUILayout.Space(2);
+            GUILayout.Label(
+                "Keeps flag import/export and the Settings tab — including switching to " +
+                "another server. Missions, contracts and the marketplace stay unavailable " +
+                "until you update.",
+                noteStyle);
             GUILayout.EndVertical();
             GUI.DragWindow();
         }

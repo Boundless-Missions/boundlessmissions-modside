@@ -43,8 +43,29 @@ namespace GeneKerman
         // opted out: every outbound request is short-circuited (see TransmissionBlocked)
         // and the mod runs inert until they re-enable it. Defaults on once consent is given.
         private bool dataGatheringEnabled = true;
+        // UI mode. False = the classic in-game IMGUI windows; true = the browser UI
+        // served by the loopback bridge. Classic is the default and stays a permanent,
+        // fully functional fallback — single-monitor and Steam Deck players are better
+        // served by it, and it is the only UI available if the bridge cannot start.
+        private bool webUiEnabled;
         private string sessionToken;
         private readonly string tokenPath;
+
+        // Session tokens, keyed by the server that issued them.
+        //
+        // A token only means anything to the server that minted it, so switching servers
+        // must not carry the active one across: it would 401 anyway, and on the way it
+        // would hand this account's bearer token to whatever host was just typed in.
+        // Remembering the old one is what lets a self-hoster (or a developer) flip
+        // between the official server and a local bot without re-linking each time —
+        // linking costs a 6-digit code and a Discord approval every round trip.
+        //
+        // Same exposure as session.token, which sits beside it: plaintext on disk, N
+        // tokens instead of one. Anyone who can read this directory could already read
+        // that file, so this widens the blast radius but not the threat model.
+        private readonly Dictionary<string, string> tokensByServer =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly string sessionsPath;
 
         // Callbacks for async operations
         public delegate void ApiCallback(bool success, string responseBody, long statusCode);
@@ -68,6 +89,8 @@ namespace GeneKerman
         /// <summary>Master opt-in: whether the mod may collect and transmit any data at
         /// all. False means the user opted out — the mod is inert and sends nothing.</summary>
         public bool DataGatheringEnabled => dataGatheringEnabled;
+        /// <summary>Whether the UI opens in a browser (true) or as classic in-game windows (false).</summary>
+        public bool WebUiEnabled => webUiEnabled;
 
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
@@ -149,7 +172,9 @@ namespace GeneKerman
         public ApiClient()
         {
             tokenPath = Path.Combine(GeneKermanMod.PluginDataPath, "session.token");
-            LoadSettings();
+            sessionsPath = Path.Combine(GeneKermanMod.PluginDataPath, "sessions.cfg");
+            LoadSettings();   // establishes serverUrl, which keys everything below
+            LoadSessions();
             LoadToken();
         }
 
@@ -173,6 +198,9 @@ namespace GeneKerman
                         bool.TryParse(gk.GetValue("enableNotifications") ?? "true", out notificationsEnabled);
                         bool.TryParse(gk.GetValue("enableCheckpointPhotos") ?? "true", out checkpointPhotosEnabled);
                         bool.TryParse(gk.GetValue("enableDataGathering") ?? "true", out dataGatheringEnabled);
+                        // Absent means classic: an existing install must never be moved
+                        // to a different UI by a mod update.
+                        bool.TryParse(gk.GetValue("enableWebUi") ?? "false", out webUiEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -204,30 +232,95 @@ namespace GeneKerman
             Debug.Log($"[GeneKerman] First setup — defaulting to official server: {serverUrl}");
         }
 
-        /// <summary>Switch to the official server and persist the choice.</summary>
-        public void SetOfficialServer()
-        {
-            useOfficialServer = true;
-            serverUrl = OfficialServerUrl;
-            SaveSettings();
-        }
+        /// <summary>Switch to the official server and persist the choice.
+        /// Returns true when this actually changed the server.</summary>
+        public bool SetOfficialServer() => SwitchServer(true, null);
 
-        /// <summary>Switch to a custom server URL and persist it.</summary>
-        public void SetCustomServer(string url)
+        /// <summary>Switch to a custom server URL and persist it. The address is
+        /// canonicalized by <see cref="NormalizeServerUrl"/>; an unusable one is
+        /// refused outright and the current server is left alone.
+        /// Returns true when this actually changed the server.</summary>
+        public bool SetCustomServer(string url)
         {
-            url = (url ?? "").Trim().TrimEnd('/');
-            if (!url.StartsWith("http://") && !url.StartsWith("https://"))
+            string normalized = NormalizeServerUrl(url, out string error);
+            if (normalized == null)
             {
-                url = "http://" + url;
+                Debug.LogWarning("[GeneKerman] Refused server address: " + error);
+                return false;
             }
-            useOfficialServer = false;
-            customServerUrl = url;
-            serverUrl = url;
-            SaveSettings();
+            return SwitchServer(false, normalized);
         }
 
         // Backwards-compatible alias: treat a manual URL set as a custom server.
         public void SetServerUrl(string url) => SetCustomServer(url);
+
+        /// <summary>
+        /// Canonicalizes a user-typed server address to exactly scheme://host[:port],
+        /// or returns null and sets <paramref name="error"/> to a sentence worth showing.
+        ///
+        /// Anything past the authority — a path, a query string, embedded credentials —
+        /// is refused rather than trimmed away. This string is the base of every upstream
+        /// request the mod makes, so a stray path segment would silently prefix all of
+        /// them, and a user:pass@ would put credentials into KSP.log, which players post
+        /// to Discord routinely.
+        /// </summary>
+        public static string NormalizeServerUrl(string input, out string error)
+        {
+            error = null;
+            string s = (input ?? "").Trim().TrimEnd('/');
+
+            if (s.Length == 0) { error = "Enter a server address."; return null; }
+            if (s.Length > 200) { error = "That address is too long."; return null; }
+            // Bare "localhost:5022" is what people actually type.
+            if (s.IndexOf("://", StringComparison.Ordinal) < 0) s = "http://" + s;
+
+            if (!Uri.TryCreate(s, UriKind.Absolute, out Uri uri))
+            { error = "That is not a valid address."; return null; }
+
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps)
+            { error = "Only http:// and https:// addresses are supported."; return null; }
+
+            if (!string.IsNullOrEmpty(uri.UserInfo))
+            { error = "Remove the username and password from the address."; return null; }
+
+            if (string.IsNullOrEmpty(uri.Host))
+            { error = "That address has no host name."; return null; }
+
+            if (uri.AbsolutePath != "/" || !string.IsNullOrEmpty(uri.Query) ||
+                !string.IsNullOrEmpty(uri.Fragment))
+            { error = "Use just the host and port, with no path after it."; return null; }
+
+            // GetLeftPart rather than reassembling by hand: it brackets IPv6 literals
+            // and drops the port only when it is the scheme's default.
+            return uri.GetLeftPart(UriPartial.Authority);
+        }
+
+        /// <summary>
+        /// Points the mod at a different server and moves the session token with it.
+        /// Returns true when the address actually changed — callers use that to decide
+        /// whether to tear down live state (see GeneKermanMod.OnServerChanged).
+        /// </summary>
+        private bool SwitchServer(bool official, string url)
+        {
+            string target = official ? OfficialServerUrl : url;
+            bool changed = !string.Equals(target, serverUrl, StringComparison.OrdinalIgnoreCase);
+
+            useOfficialServer = official;
+            if (!official) customServerUrl = url;
+            serverUrl = target;
+            SaveSettings();
+
+            if (!changed) return false;
+
+            // The active token belongs to the server we just left. It is already parked
+            // in tokensByServer (SetToken keeps that in step), so this only has to pick
+            // up whatever the new server issued us — usually nothing, which correctly
+            // leaves the mod unlinked and sends no Authorization header at all.
+            sessionToken = tokensByServer.TryGetValue(serverUrl, out string t) ? t : null;
+            WriteActiveToken();
+            Debug.Log($"[GeneKerman] Server changed to {serverUrl} (linked={IsLinked}).");
+            return true;
+        }
 
         /// <summary>Enable or disable live notifications and persist the choice.</summary>
         public void SetNotificationsEnabled(bool enabled)
@@ -248,6 +341,13 @@ namespace GeneKerman
         public void SetDataGatheringEnabled(bool enabled)
         {
             dataGatheringEnabled = enabled;
+            SaveSettings();
+        }
+
+        /// <summary>Switch between the browser UI and the classic in-game windows, and persist it.</summary>
+        public void SetWebUiEnabled(bool enabled)
+        {
+            webUiEnabled = enabled;
             SaveSettings();
         }
 
@@ -278,6 +378,7 @@ namespace GeneKerman
             gk.AddValue("enableNotifications", notificationsEnabled);
             gk.AddValue("enableCheckpointPhotos", checkpointPhotosEnabled);
             gk.AddValue("enableDataGathering", dataGatheringEnabled);
+            gk.AddValue("enableWebUi", webUiEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -295,22 +396,109 @@ namespace GeneKerman
                 sessionToken = File.ReadAllText(tokenPath).Trim();
                 Debug.Log("[GeneKerman] Session token loaded.");
             }
+
+            // An install that predates sessions.cfg has a token but no record of which
+            // server issued it. It was necessarily the one in settings.cfg, so file it
+            // there — otherwise the first server switch would throw it away.
+            if (IsLinked && !tokensByServer.ContainsKey(serverUrl))
+            {
+                tokensByServer[serverUrl] = sessionToken;
+                SaveSessions();
+            }
         }
 
         public void SetToken(string token)
         {
             sessionToken = token;
-            Directory.CreateDirectory(Path.GetDirectoryName(tokenPath));
-            File.WriteAllText(tokenPath, token);
+            tokensByServer[serverUrl] = token;
+            WriteActiveToken();
+            SaveSessions();
             Debug.Log("[GeneKerman] Session token saved.");
         }
 
         public void ClearToken()
         {
             sessionToken = null;
-            if (File.Exists(tokenPath))
-                File.Delete(tokenPath);
+            tokensByServer.Remove(serverUrl);
+            WriteActiveToken();
+            SaveSessions();
             Debug.Log("[GeneKerman] Session token cleared.");
+        }
+
+        /// <summary>Mirrors the in-memory token to session.token, which stays the single
+        /// file holding the *active* session — sessions.cfg is only the parked ones.</summary>
+        private void WriteActiveToken()
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(sessionToken))
+                {
+                    if (File.Exists(tokenPath)) File.Delete(tokenPath);
+                }
+                else
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(tokenPath));
+                    File.WriteAllText(tokenPath, sessionToken);
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Could not write session.token: " + e.Message);
+            }
+        }
+
+        private void LoadSessions()
+        {
+            tokensByServer.Clear();
+            if (!File.Exists(sessionsPath)) return;
+
+            try
+            {
+                var root = ConfigNode.Load(sessionsPath)?.GetNode("GeneKermanSessions");
+                if (root == null) return;
+
+                foreach (var s in root.GetNodes("session"))
+                {
+                    // Scheme and authority are stored apart because ConfigNode treats //
+                    // as a comment delimiter and would eat the rest of a whole URL — the
+                    // same reason settings.cfg splits serverHost from serverProtocol.
+                    string protocol = s.GetValue("protocol");
+                    string address = s.GetValue("address");
+                    string token = s.GetValue("token");
+                    if (string.IsNullOrEmpty(protocol) || string.IsNullOrEmpty(address) ||
+                        string.IsNullOrEmpty(token)) continue;
+
+                    tokensByServer[protocol + "://" + address] = token;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Could not read sessions.cfg: " + e.Message);
+            }
+        }
+
+        private void SaveSessions()
+        {
+            try
+            {
+                var node = new ConfigNode();
+                var root = node.AddNode("GeneKermanSessions");
+                foreach (var kv in tokensByServer)
+                {
+                    int sep = kv.Key.IndexOf("://", StringComparison.Ordinal);
+                    if (sep < 0 || string.IsNullOrEmpty(kv.Value)) continue;
+                    var s = root.AddNode("session");
+                    s.AddValue("protocol", kv.Key.Substring(0, sep));
+                    s.AddValue("address", kv.Key.Substring(sep + 3));
+                    s.AddValue("token", kv.Value);
+                }
+                Directory.CreateDirectory(Path.GetDirectoryName(sessionsPath));
+                node.Save(sessionsPath);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[GeneKerman] Could not save sessions.cfg: " + e.Message);
+            }
         }
 
         // ── Core HTTP Methods ───────────────────────────────────────────────
@@ -436,6 +624,68 @@ namespace GeneKerman
             }
         }
 
+        // ── Web bridge relay ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Forwards one browser request to the API and hands back the raw upstream
+        /// status, content type and body, untouched.
+        ///
+        /// This exists so the loopback bridge (Web/ApiProxy.cs) can serve the in-game
+        /// web UI *without the session token ever entering JavaScript* — the page calls
+        /// same-origin /api/..., and the token is attached here, in C#.
+        ///
+        /// It deliberately routes through the same ApplyHeaders / TransmissionBlocked /
+        /// HandleDeviceGate path as Get/Post/Delete. Do not "simplify" the proxy by
+        /// opening its own HttpWebRequest on a background thread: that would silently
+        /// drop the 426 update gate, the 403 device gate, the consent gate and the
+        /// device-id header, letting a swapped-out WebUI bundle talk to the server
+        /// outside every gate this mod exists to enforce.
+        ///
+        /// onDone receives (status, contentType, body). status is 0 on a transport
+        /// failure and 503 when transmission is blocked by the data-sharing opt-out.
+        /// </summary>
+        public IEnumerator Relay(string method, string path, string jsonBody,
+                                 Action<long, string, string> onDone)
+        {
+            if (TransmissionBlocked)
+            {
+                onDone(503, "application/json", "{\"error\":\"transmission_blocked\"}");
+                yield break;
+            }
+
+            string url = serverUrl + path;
+            using (var req = new UnityWebRequest(url, method))
+            {
+                if (!string.IsNullOrEmpty(jsonBody))
+                {
+                    req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(jsonBody));
+                    req.SetRequestHeader("Content-Type", "application/json");
+                }
+                req.downloadHandler = new DownloadHandlerBuffer();
+                ApplyHeaders(req);
+                req.SetRequestHeader("Accept", "application/json");
+                req.timeout = 15;
+
+                yield return req.SendWebRequest();
+
+                string body = req.downloadHandler?.text;
+                string contentType = req.GetResponseHeader("Content-Type") ?? "application/json";
+
+                // Gates first: a 426/403 must raise the in-game window even though we
+                // also pass the status through to the page.
+                HandleDeviceGate(req.responseCode, body);
+
+                if (req.isNetworkError)
+                {
+                    Debug.LogWarning($"[GeneKerman] Relay {method} {path} transport error: {req.error}");
+                    onDone(0, "application/json", "{\"error\":\"upstream_unreachable\"}");
+                    yield break;
+                }
+
+                onDone(req.responseCode, contentType, body ?? "");
+            }
+        }
+
         // ── Multipart Upload (craft + screenshots) ──────────────────────────
 
         public IEnumerator SubmitContract(
@@ -449,6 +699,9 @@ namespace GeneKerman
             string usedModlist,
             string usedParts,
             string deltaVVac,
+            string lifeSupport,
+            double lsEnduranceDays,
+            int lsCrewCapacity,
             ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
@@ -513,6 +766,16 @@ namespace GeneKerman
             // Craft's vacuum Δv (m/s) — server re-checks the contract's min/max-Δv limit.
             if (!string.IsNullOrEmpty(deltaVVac))
                 form.Add(new MultipartFormDataSection("delta_v_vac", deltaVVac));
+
+            // Life-support flag of the submitted craft (which LS mod it's provisioned for,
+            // per-kerbal endurance, crew capacity) — shown on the contract's review embed.
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            if (!string.IsNullOrEmpty(lifeSupport))
+                form.Add(new MultipartFormDataSection("life_support", lifeSupport));
+            if (lsEnduranceDays > 0)
+                form.Add(new MultipartFormDataSection("ls_endurance_days", lsEnduranceDays.ToString(inv)));
+            if (lsCrewCapacity > 0)
+                form.Add(new MultipartFormDataSection("ls_crew_capacity", lsCrewCapacity.ToString()));
 
             using (var req = UnityWebRequest.Post(url, form))
             {
@@ -1073,6 +1336,7 @@ namespace GeneKerman
             string craftName, string craftType, int partCount,
             float mass, float cost, int price,
             byte[] blueprintData, byte[] thumbnailData, string mods,
+            string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
             ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
@@ -1114,6 +1378,14 @@ namespace GeneKerman
             // Distinct GameData mod folders the craft uses (comma-separated), so the
             // website can filter listings by mod. Empty for stock-only crafts.
             AddText("mods", mods);
+
+            // Life-support flag: which LS mod the craft is provisioned for, how long it
+            // lasts per kerbal, and its crew capacity (for the min/max endurance range).
+            AddText("life_support", lifeSupport);
+            if (lsEnduranceDays > 0)
+                AddText("ls_endurance_days", lsEnduranceDays.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (lsCrewCapacity > 0)
+                AddText("ls_crew_capacity", lsCrewCapacity.ToString());
 
             using (var req = UnityWebRequest.Post(url, form))
             {
@@ -1198,7 +1470,7 @@ namespace GeneKerman
                 callback(ok, ok ? req.downloadHandler.data : null);
 
                 if (!ok)
-                    Debug.LogWarning($"[GeneKerman] Download failed: {req.error}");
+                    Debug.LogWarning($"[GeneKerman] Download failed ({req.responseCode}): {req.error} — url: {url}");
             }
         }
 

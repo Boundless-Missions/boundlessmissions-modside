@@ -16,8 +16,11 @@
 
   <!-- KSP Installation Path -->
   <PropertyGroup>
-    <KSPPath>/home/ayd/Documents/Kerbal Space Program</KSPPath>
-    <ManagedPath>$(KSPPath)/KSP_x64_Data/Managed</ManagedPath>
+    <!-- Reference instance: FK-KSP is the modded dev install, so ToolbarControl /
+         ClickThroughBlocker resolve from its GameData. Override on the command line
+         with -p:KSPPath="..." to compile against another install. -->
+    <KSPPath>/home/ayd/Documents/KSP DEV Instances/FK-KSP</KSPPath>
+    <ManagedPath>$(KSPPath)/KSP_Data/Managed</ManagedPath>
   </PropertyGroup>
 
   <!-- Source files -->

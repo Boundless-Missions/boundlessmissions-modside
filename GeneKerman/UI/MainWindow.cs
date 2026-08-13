@@ -9,6 +9,7 @@
  */
 
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 
 namespace GeneKerman.UI
@@ -150,9 +151,28 @@ namespace GeneKerman.UI
             System.IO.File.WriteAllLines(path, new List<string>(trashedContracts).ToArray());
         }
 
+        /// <summary>
+        /// The client is behind the server's required version and the player chose
+        /// "Continue anyway". Only the tabs that work with no server are shown; every
+        /// fetch is skipped, since each one would just come back 426.
+        /// </summary>
+        private static bool LimitedMode =>
+            GeneKermanMod.Instance != null && GeneKermanMod.Instance.UpdateRequired;
+
+        /// Tabs reachable in limited mode, as indices into tabNames: Tools, Settings.
+        private static readonly int[] LimitedTabs = { 4, 5 };
+
         public void OnOpen()
         {
             LoadTrash();
+            if (LimitedMode)
+            {
+                // Open on Settings — the reason to be here at all is usually to point
+                // the mod at a different server.
+                selectedTab = 5;
+                scrollPos = Vector2.zero;
+                return;
+            }
             RefreshAll();
         }
 
@@ -484,30 +504,36 @@ namespace GeneKerman.UI
             // Capture Achievement Shot — line up a good angle in flight, then
             // capture. The server verifies the shot and grants the matching KSP
             // title role. Disabled (greyed) until you're flying a vessel.
-            bool canCapture = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
-            string camTip = canCapture ? "Capture Achievement Shot" : "Enter flight to capture an achievement shot";
-            GUI.enabled = canCapture;
-            GUIContent camContent = iconCamera != null
-                ? new GUIContent(iconCamera, camTip)
-                : new GUIContent("📷", camTip);
-            if (GUILayout.Button(camContent, tabStyle, GUILayout.Height(25), GUILayout.Width(34)))
-                GeneKermanMod.Instance.StartAchievementCapture();
-            GUI.enabled = true;
-            int unread = GeneKermanMod.Instance.UnreadNotifications;
-            // The bell IS the button — clicking it opens the notifications view
-            // (there is no Notifications tab anymore). The bell icon always shows,
-            // even at zero unread, so the header never reads as blank; the unread
-            // count is appended next to it only when there's something to read.
-            GUIContent bellContent;
-            if (iconBell != null)
-                bellContent = unread > 0 ? new GUIContent(" " + unread, iconBell) : new GUIContent(iconBell);
-            else
-                bellContent = new GUIContent(unread > 0 ? $"🔔 {unread}" : "🔔");
-            if (GUILayout.Button(bellContent, unread > 0 ? notifBadgeStyle : tabStyle,
-                    GUILayout.Height(25), GUILayout.MinWidth(34)))
+            bool limited = LimitedMode;
+            // Achievement capture and the notification bell both need the server, so
+            // in limited mode the header carries nothing but the close button.
+            if (!limited)
             {
-                selectedTab = NotifTab;
-                scrollPos = Vector2.zero;
+                bool canCapture = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
+                string camTip = canCapture ? "Capture Achievement Shot" : "Enter flight to capture an achievement shot";
+                GUI.enabled = canCapture;
+                GUIContent camContent = iconCamera != null
+                    ? new GUIContent(iconCamera, camTip)
+                    : new GUIContent("📷", camTip);
+                if (GUILayout.Button(camContent, tabStyle, GUILayout.Height(25), GUILayout.Width(34)))
+                    GeneKermanMod.Instance.StartAchievementCapture();
+                GUI.enabled = true;
+                int unread = GeneKermanMod.Instance.UnreadNotifications;
+                // The bell IS the button — clicking it opens the notifications view
+                // (there is no Notifications tab anymore). The bell icon always shows,
+                // even at zero unread, so the header never reads as blank; the unread
+                // count is appended next to it only when there's something to read.
+                GUIContent bellContent;
+                if (iconBell != null)
+                    bellContent = unread > 0 ? new GUIContent(" " + unread, iconBell) : new GUIContent(iconBell);
+                else
+                    bellContent = new GUIContent(unread > 0 ? $"🔔 {unread}" : "🔔");
+                if (GUILayout.Button(bellContent, unread > 0 ? notifBadgeStyle : tabStyle,
+                        GUILayout.Height(25), GUILayout.MinWidth(34)))
+                {
+                    selectedTab = NotifTab;
+                    scrollPos = Vector2.zero;
+                }
             }
             if (GUILayout.Button("✕", tabStyle, GUILayout.Width(25), GUILayout.Height(25)))
                 GeneKermanMod.Instance.ShowMainWindow = false;
@@ -515,15 +541,36 @@ namespace GeneKerman.UI
 
             GUILayout.Space(5);
 
+            if (limited) DrawLimitedBanner();
+
             // Tabs
             GUILayout.BeginHorizontal();
-            for (int i = 0; i < tabNames.Length; i++)
+            if (limited)
             {
-                string label = tabNames[i];
-                if (GUILayout.Button(label, i == selectedTab ? tabActiveStyle : tabStyle))
+                // A tab left selected from before the gate (or the notifications
+                // pseudo-tab) would fall through the switch below and render nothing.
+                if (System.Array.IndexOf(LimitedTabs, selectedTab) < 0)
+                    selectedTab = LimitedTabs[LimitedTabs.Length - 1];
+
+                foreach (int i in LimitedTabs)
                 {
-                    selectedTab = i;
-                    scrollPos = Vector2.zero;
+                    if (GUILayout.Button(tabNames[i], i == selectedTab ? tabActiveStyle : tabStyle))
+                    {
+                        selectedTab = i;
+                        scrollPos = Vector2.zero;
+                    }
+                }
+            }
+            else
+            {
+                for (int i = 0; i < tabNames.Length; i++)
+                {
+                    string label = tabNames[i];
+                    if (GUILayout.Button(label, i == selectedTab ? tabActiveStyle : tabStyle))
+                    {
+                        selectedTab = i;
+                        scrollPos = Vector2.zero;
+                    }
                 }
             }
             GUILayout.EndHorizontal();
@@ -554,6 +601,43 @@ namespace GeneKerman.UI
             GUILayout.EndVertical();
 
             GUI.DragWindow();
+        }
+
+        /// <summary>
+        /// Persistent reminder shown above the tabs while the client is running behind
+        /// an acknowledged version gate, so "why is half the mod missing?" is answered
+        /// on screen rather than in the log.
+        /// </summary>
+        private void DrawLimitedBanner()
+        {
+            var mod = GeneKermanMod.Instance;
+
+            GUILayout.BeginVertical(boxDarkStyle);
+            GUILayout.Label("⚠ Limited mode — this version is out of date", new GUIStyle(valueStyle)
+            {
+                normal = { textColor = new Color(0.95f, 0.6f, 0.3f) }
+            });
+            string latest = string.IsNullOrEmpty(mod.LatestVersion) ? "a newer build" : mod.LatestVersion;
+            GUILayout.Label(
+                $"The server refused version {ModVersion.Current} and wants {latest}. Missions, " +
+                "contracts, the marketplace and sending craft are unavailable. Flag import/export " +
+                "still work, and you can point the mod at another server below.",
+                new GUIStyle(labelStyle) { wordWrap = true });
+            GUILayout.Space(4);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Re-check", tabStyle, GUILayout.Height(22)))
+            {
+                mod.RecheckVersion();
+                SetStatus("Re-checking version...");
+            }
+            if (!string.IsNullOrEmpty(mod.UpdateDownloadUrl)
+                && GUILayout.Button("Download latest ↗", tabStyle, GUILayout.Height(22)))
+            {
+                Application.OpenURL(mod.UpdateDownloadUrl);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.EndVertical();
+            GUILayout.Space(5);
         }
 
         // ── Missions Tab ────────────────────────────────────────────────────
@@ -1080,6 +1164,15 @@ namespace GeneKerman.UI
                 if (alreadySpawned)
                 {
                     GUILayout.Label("(Ok) Already spawned into this save.", labelStyle);
+                    // Stranded crew ride out the wait in stasis (removed from the sim so no
+                    // life-support mod consumes them). They re-board automatically when you
+                    // get close; this button forces it (your "revive emergency stasis crew").
+                    if (RescueImmunityGuardian.HasStasisCrew(rcid))
+                    {
+                        GUILayout.Label("🧊 Crew are in emergency stasis until you reach them.", labelStyle);
+                        if (GUILayout.Button("🧊 Revive emergency stasis crew", acceptBtnStyle, GUILayout.Height(28)))
+                            RescueImmunityGuardian.ReviveContract(rcid);
+                    }
                 }
                 else if (!sceneOk)
                 {
@@ -1096,7 +1189,10 @@ namespace GeneKerman.UI
                     {
                         string issuerName = MiniJSON.GetString(c, "issuer_name", "");
                         RescueTargetSpec target = RescueTargetSpec.FromDict(MiniJSON.GetDict(c, "rescue_target"));
-                        GeneKermanMod.Instance.RunCoroutine(DoSpawnRescueWreck(rcid, wreckUrl, target, issuerName));
+                        var kerbals = MiniJSON.GetList(c, "rescue_kerbals")
+                            .Select(o => o?.ToString())
+                            .Where(s => !string.IsNullOrEmpty(s)).ToList();
+                        GeneKermanMod.Instance.RunCoroutine(DoSpawnRescueWreck(rcid, wreckUrl, target, issuerName, kerbals));
                     }
                 }
                 GUILayout.EndVertical();
@@ -1715,6 +1811,18 @@ namespace GeneKerman.UI
             GUILayout.Space(6);
 
             // ── Tool 3: Quicksend to a friend ────────────────────────────────
+            // Server-backed (recipient list + upload), so it is the one tool that stays
+            // off in limited mode.
+            if (LimitedMode)
+            {
+                GUILayout.BeginVertical(boxDarkStyle);
+                GUILayout.Label("📤 Quicksend to a Friend", valueStyle);
+                GUILayout.Label("Unavailable until you update — sending needs the server.",
+                    new GUIStyle(labelStyle) { wordWrap = true });
+                GUILayout.EndVertical();
+                return;
+            }
+
             GUILayout.BeginVertical(boxDarkStyle);
             GUILayout.Label("📤 Quicksend to a Friend", valueStyle);
 
@@ -1991,6 +2099,27 @@ namespace GeneKerman.UI
 
             GUILayout.Space(18);
 
+            // UI mode. Classic is the default and stays fully supported: on a single
+            // monitor, or on a Steam Deck in gaming mode, the in-game windows are
+            // strictly better than alt-tabbing to a browser.
+            GUILayout.Label("🖥️ Interface", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
+            GUILayout.Space(4);
+            bool webOn = api.WebUiEnabled;
+            bool newWeb = GUILayout.Toggle(webOn, " Open the interface in my web browser");
+            if (newWeb != webOn)
+            {
+                GeneKermanMod.Instance.SetUiMode(newWeb);
+                SetStatus(newWeb
+                    ? "(Ok) Browser interface enabled — click the toolbar button to open it."
+                    : "(Ok) Classic in-game interface enabled.");
+            }
+            GUILayout.Label(
+                "Serves the interface to your browser from this PC only (127.0.0.1). " +
+                "Nothing is exposed to your network. Best with two monitors or in windowed mode.",
+                labelStyle);
+
+            GUILayout.Space(18);
+
             // Privacy & data sharing (KSP add-on rule 8.2): a master opt-out reachable
             // from the toolbar in every scene, incl. the Space Center. Turning it off
             // makes the mod inert (it collects and sends nothing) until re-enabled.
@@ -2039,6 +2168,23 @@ namespace GeneKerman.UI
             loadingMissions = false;
             loadingContracts = false;
             loadingNotifs = false;
+
+            // Socket teardown, the re-check against the server we just switched to, and
+            // the link prompt if this server has never seen us. Shared with the browser
+            // UI's settings screen so the two front ends behave identically.
+            GeneKermanMod.Instance.OnServerChanged();
+
+            // Under a version gate, that re-check is the escape hatch: if the new server
+            // accepts this build, CheckVersionRoutine clears UpdateRequired and the full
+            // UI returns without a restart. If it also rejects us, we stay in limited
+            // mode. Skip RefreshAll either way — those calls would 426 against a gating
+            // server and are re-run by OnOpen once the gate clears.
+            if (LimitedMode)
+            {
+                SetStatus("Checking the new server...");
+                return;
+            }
+
             RefreshAll();
         }
 
@@ -2171,7 +2317,7 @@ namespace GeneKerman.UI
             });
         }
 
-        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName)
+        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals)
         {
             // Permanent, per-save dedup: if the wreck is already in this save, never
             // spawn a second one. This is persisted in GKContractScenario, so it holds
@@ -2194,7 +2340,7 @@ namespace GeneKerman.UI
                     SetStatus("⚠ Could not download the stranded vessel. Try again.");
                     return;
                 }
-                string node = DecompressToString(fileData);
+                string node = CraftDelivery.DecompressToString(fileData);
                 // Spawn the stranded vessel where it actually is (its real orbit from the
                 // snapshot) — NOT at the delivery target. The target is where the rescuer
                 // must DELIVER the crew, so the wreck has to be elsewhere or there's no
@@ -2209,6 +2355,10 @@ namespace GeneKerman.UI
                     // Mark imported only on a real spawn, so a scene-guard / parse
                     // failure leaves the contract retryable instead of locked out.
                     GKContractScenario.Instance?.MarkVesselImported(contractId);
+
+                    // Hold the stranded crew immune from life support (frozen via DeepFreeze
+                    // if present, else timestamp-pinned) until the rescuer reaches the wreck.
+                    RescueImmunityGuardian.Register(contractId, VesselTransfer.LastSpawnedPid, rescueKerbals);
                     string dest = target != null ? target.body : "the target";
                     SetStatus($"🛟 Stranded vessel '{name}' is adrift. Find it and bring the crew to {dest}.");
                 }
@@ -2321,145 +2471,16 @@ namespace GeneKerman.UI
             statusTime = Time.realtimeSinceStartup;
         }
 
+        /// <summary>
+        /// Thin wrapper over CraftDelivery so the classic window keeps its status line.
+        /// The logic itself lives in CraftDelivery.cs, shared with the web bridge — two
+        /// copies of a two-round-trip install would drift the moment either changed.
+        /// </summary>
         private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "")
         {
             SetStatus("[+] Fetching craft info...");
-
-            // Get craft file URLs from the API
-            yield return GeneKermanMod.Instance.Api.Get($"/api/v1/craft/download/{contractId}", (ok, resp, status) =>
-            {
-                if (ok && !string.IsNullOrEmpty(resp))
-                {
-                    var data = MiniJSON.DeserializeDict(resp);
-                    var craftFiles = MiniJSON.GetList(data, "craft_files");
-                    string vesselNodeUrl = MiniJSON.GetString(data, "vessel_node_url", null);
-                    string loadmeta = MiniJSON.GetString(data, "loadmeta", null);
-
-                    // Priority: vessel node (full vessel state) > craft file (blueprint only)
-                    if (!string.IsNullOrEmpty(vesselNodeUrl))
-                    {
-                        SetStatus("[+] Downloading vessel data...");
-                        GeneKermanMod.Instance.RunCoroutine(DoImportVessel(contractId, vesselNodeUrl, ownerName));
-                    }
-                    else if (craftFiles != null && craftFiles.Count > 0)
-                    {
-                        var first = craftFiles[0] as Dictionary<string, object>;
-                        if (first == null)
-                        {
-                            SetStatus("(No) Invalid craft file data.");
-                            return;
-                        }
-
-                        string url = MiniJSON.GetString(first, "url", "");
-                        string filename = MiniJSON.GetString(first, "filename", "craft.craft");
-
-                        if (string.IsNullOrEmpty(url))
-                        {
-                            SetStatus("(No) No download URL.");
-                            return;
-                        }
-
-                        SetStatus("[+] Downloading craft file...");
-                        GeneKermanMod.Instance.RunCoroutine(
-                            GeneKermanMod.Instance.Api.DownloadFile(url, (dlOk, fileData) =>
-                            {
-                                if (dlOk && fileData != null)
-                                {
-                                    string path = CraftInstaller.Install(fileData, filename, loadmeta);
-                                    if (path != null)
-                                    {
-                                        string msg = $"(Ok) Craft installed: {System.IO.Path.GetFileName(path)}";
-                                        if (!string.IsNullOrEmpty(loadmeta))
-                                            msg += " (+ loadmeta)";
-                                        SetStatus(msg);
-                                    }
-                                    else
-                                        SetStatus("(No) Failed to install craft file.");
-                                }
-                                else
-                                {
-                                    SetStatus("(No) Download failed.");
-                                }
-                            }));
-                    }
-                    else
-                    {
-                        SetStatus("(No) No craft file or vessel data in this contract.");
-                    }
-                }
-                else
-                {
-                    SetStatus("(No) Could not fetch craft data.");
-                }
-            });
-        }
-
-        /// <summary>Gunzip (if needed) a downloaded vessel-node blob into its UTF-8 text.</summary>
-        private static string DecompressToString(byte[] fileData)
-        {
-            byte[] rawData = fileData;
-            if (fileData != null && fileData.Length >= 2 && fileData[0] == 0x1F && fileData[1] == 0x8B)
-            {
-                try
-                {
-                    using (var ms = new System.IO.MemoryStream(fileData))
-                    using (var gz = new System.IO.Compression.GZipStream(ms,
-                        System.IO.Compression.CompressionMode.Decompress))
-                    using (var output = new System.IO.MemoryStream())
-                    {
-                        gz.CopyTo(output);
-                        rawData = output.ToArray();
-                    }
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[GeneKerman] Vessel node decompression failed: {ex.Message}");
-                    rawData = fileData;
-                }
-            }
-            return System.Text.Encoding.UTF8.GetString(rawData);
-        }
-
-        private System.Collections.IEnumerator DoImportVessel(string contractId, string vesselNodeUrl, string ownerName = "")
-        {
-            Debug.Log($"[GeneKerman] DoImportVessel: Downloading from {vesselNodeUrl}");
-            string myName = GeneKermanMod.Instance.LinkedUsername;
-            yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
-            {
-                if (!ok || fileData == null)
-                {
-                    Debug.LogWarning($"[GeneKerman] DoImportVessel: Download failed (ok={ok}, data={fileData?.Length ?? -1})");
-                    SetStatus("(No) Failed to download vessel data.");
-                    return;
-                }
-
-                Debug.Log($"[GeneKerman] DoImportVessel: Downloaded {fileData.Length} bytes");
-
-                string vesselNodeStr = DecompressToString(fileData);
-                Debug.Log($"[GeneKerman] Vessel node string: {vesselNodeStr.Length} chars");
-
-                // A submission may carry several crafts (GKFLEET) or just one (legacy
-                // VESSEL); ImportFleet spawns each and installs any embedded blueprints.
-                int imported = VesselTransfer.ImportFleet(vesselNodeStr, ownerName, myName);
-
-                if (imported > 0)
-                {
-                    SetStatus(imported == 1
-                        ? "[!] Vessel imported."
-                        : $"[!] {imported} crafts imported.");
-                    if (imported > 1)
-                        GeneKermanMod.Instance.ShowNotification("🚀 Crafts Received",
-                            $"{imported} crafts arrived in your save.");
-                    if (GKContractScenario.Instance != null)
-                    {
-                        GKContractScenario.Instance.MarkVesselImported(contractId);
-                    }
-                }
-                else
-                {
-                    SetStatus("(No) Failed to import vessel.");
-                }
-            });
+            yield return CraftDelivery.Deliver(contractId, ownerName,
+                (ok, msg) => SetStatus((ok ? "(Ok) " : "(No) ") + msg));
         }
 
         // ── Marketplace Tab ─────────────────────────────────────────────────
@@ -2636,12 +2657,17 @@ namespace GeneKerman.UI
                 Debug.LogWarning($"[GeneKerman] Thumbnail render failed: {ex.Message}");
             }
 
+            // Life-support flag: which LS mod the craft is provisioned for and how long
+            // it lasts, read from the live editor ship (no-op tags as "none" if stock).
+            LifeSupportInfo ls = LifeSupportScan.FromEditor();
+
             SetStatus("Listing craft...");
             string fileName = editorCraftName + ".craft";
             yield return GeneKermanMod.Instance.Api.ListCraftForSale(
                 craftBytes, fileName, editorCraftName, editorCraftType,
                 editorPartCount, editorCraftMass, editorCraftCost, price,
                 blueprintBytes, thumbnailBytes, craftMods,
+                ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
                 (ok, resp, status) =>
                 {
                     selling = false;
@@ -2743,7 +2769,7 @@ namespace GeneKerman.UI
                 yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
                 {
                     if (!ok || fileData == null) return;
-                    string node = DecompressToString(fileData);
+                    string node = CraftDelivery.DecompressToString(fileData);
                     string vesselName = VesselTransfer.ImportVesselAtTarget(node, null, ownerName, myName);
                     if (!string.IsNullOrEmpty(vesselName))
                     {

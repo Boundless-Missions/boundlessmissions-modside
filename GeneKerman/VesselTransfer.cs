@@ -31,6 +31,11 @@ namespace GeneKerman
 
         private static System.Random rng = new System.Random();
 
+        /// <summary>The pid (GUID string) of the most recently spawned vessel, set by
+        /// SpawnInnerNode. Lets the rescue-immunity guardian pin the exact wreck it just
+        /// imported. Best-effort single-shot state — read it right after an import call.</summary>
+        public static string LastSpawnedPid { get; private set; }
+
         // ── Export ───────────────────────────────────────────────────────────
 
         /// <summary>
@@ -502,6 +507,10 @@ namespace GeneKerman
         private static string SpawnInnerNode(ConfigNode innerNode)
         {
             string vesselName = innerNode.GetValue("name") ?? "Imported Vessel";
+            // Remember the fresh pid assigned in PrepareInnerNode so the caller (e.g. the
+            // rescue-immunity guardian) can identify exactly the vessel we just spawned
+            // without guessing by name. Reset each spawn.
+            LastSpawnedPid = innerNode.GetValue("pid");
 
             // Add all crew to roster first (before creating ProtoVessel).
             AddCrewToRoster(innerNode);
@@ -682,24 +691,35 @@ namespace GeneKerman
             return "Your craft";
         }
 
+        /// <summary>Outcome of a <see cref="RemoveVesselFromSave"/> call, so the caller
+        /// can tell a terminal result (the vessel is gone — stop trying) from a
+        /// retry-later one (we're in flight and must defer to a safe scene).</summary>
+        public enum RemovalResult
+        {
+            Removed,   // we deleted it from this save
+            NotFound,  // not in this save — already gone, nothing to do (terminal)
+            Deferred,  // it's the focused flight vessel — retry from a non-flight scene
+            Failed,    // bad pid or an exception while removing
+        }
+
         /// <summary>
         /// Remove a vessel (by pid GUID) from the current save and drop its crew
         /// from the roster, so the same kerbals don't exist in two saves. Refuses
         /// to remove the focused active vessel in flight (caller must defer to a
-        /// Space Center / Tracking Station scene). Returns true if removed.
+        /// Space Center / Tracking Station scene).
         /// </summary>
-        public static bool RemoveVesselFromSave(string pid, bool dropCrew = true)
+        public static RemovalResult RemoveVesselFromSave(string pid, bool dropCrew = true)
         {
             if (string.IsNullOrEmpty(pid))
             {
                 Debug.LogWarning("[GeneKerman] RemoveVessel: no pid given.");
-                return false;
+                return RemovalResult.Failed;
             }
             Guid g;
             if (!Guid.TryParse(pid, out g))
             {
                 Debug.LogWarning($"[GeneKerman] RemoveVessel: pid '{pid}' is not a GUID.");
-                return false;
+                return RemovalResult.Failed;
             }
 
             Vessel target = null;
@@ -708,14 +728,17 @@ namespace GeneKerman
 
             if (target == null)
             {
-                Debug.LogWarning($"[GeneKerman] RemoveVessel: no vessel with pid {pid} found.");
-                return false;
+                // Not in this save — either already removed or it belongs to a different
+                // save. Either way there's nothing to remove, so this is terminal: the
+                // caller must stop retrying (otherwise it spins once per frame forever).
+                Debug.Log($"[GeneKerman] RemoveVessel: no vessel with pid {pid} in this save — already gone.");
+                return RemovalResult.NotFound;
             }
 
             if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel == target)
             {
                 Debug.LogWarning("[GeneKerman] RemoveVessel: target is the active vessel — defer to a non-flight scene.");
-                return false;
+                return RemovalResult.Deferred;
             }
 
             try
@@ -764,12 +787,12 @@ namespace GeneKerman
                 }
 
                 Debug.Log($"[GeneKerman] (Ok) Removed vessel pid {pid} from save.");
-                return true;
+                return RemovalResult.Removed;
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[GeneKerman] RemoveVessel failed: {ex}");
-                return false;
+                return RemovalResult.Failed;
             }
         }
 

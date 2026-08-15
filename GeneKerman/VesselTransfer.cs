@@ -79,11 +79,16 @@ namespace GeneKerman
                 ConfigNode vesselNode = new ConfigNode("VESSEL");
                 vessel.protoVessel.Save(vesselNode);
 
+                // The crew that the node above actually carries — read back off the
+                // snapshot rather than off the vessel, so the roster we embed and the
+                // count we log can never disagree with what was serialized. See CrewOf.
+                List<ProtoCrewMember> crew = CrewOf(vessel.protoVessel);
+
                 // Embed each crew member's full roster definition so the receiving
                 // save can recreate them faithfully (gender, profession/trait,
                 // courage, stupidity) instead of generating a random kerbal.
                 if (embedRoster)
-                    EmbedRosterData(vesselNode, vessel);
+                    EmbedRosterData(vesselNode, crew);
 
                 // Carry any custom mission flags the parts use so the receiving
                 // save renders them instead of a missing decal.
@@ -100,7 +105,15 @@ namespace GeneKerman
                 ScaleBridge.SnapshotIntoVesselNode(vessel, vesselNode);
 
                 Debug.Log($"[GeneKerman] Exported vessel '{vessel.vesselName}': " +
-                          $"{vessel.parts.Count} parts, {vessel.GetCrewCount()} crew");
+                          $"{vessel.parts.Count} parts, {crew.Count} crew" +
+                          (crew.Count > 0 ? $" ({string.Join(", ", crew.ConvertAll(p => p.name).ToArray())})" : ""));
+
+                // KSP's own cached crew list is what most callers read; if it has drifted
+                // from the parts, say so here rather than let a later "0 crew" report
+                // send someone hunting through the transfer path for a lost kerbal.
+                if (vessel.loaded && vessel.GetCrewCount() != crew.Count)
+                    Debug.LogWarning($"[GeneKerman] '{vessel.vesselName}': KSP's cached crew list says " +
+                                     $"{vessel.GetCrewCount()}, the parts say {crew.Count} — exporting the parts.");
                 return vesselNode;
             }
             catch (Exception ex)
@@ -196,10 +209,10 @@ namespace GeneKerman
         /// <summary>Save each crew member's full ProtoCrewMember into a GKCREW child
         /// node so a different save can rebuild them exactly (KSP ignores unknown
         /// node names on load).</summary>
-        private static void EmbedRosterData(ConfigNode vesselNode, Vessel vessel)
+        private static void EmbedRosterData(ConfigNode vesselNode, List<ProtoCrewMember> crew)
         {
-            var roster = HighLogic.CurrentGame.CrewRoster;
-            foreach (var pcm in vessel.GetVesselCrew())
+            if (crew == null) return;
+            foreach (var pcm in crew)
             {
                 if (pcm == null) continue;
                 try
@@ -213,6 +226,78 @@ namespace GeneKerman
                 }
             }
         }
+
+        // ── Who is actually aboard ───────────────────────────────────────────
+        //
+        // Vessel.GetCrewCount() is `Vessel.crew.Count` and Vessel.GetVesselCrew() returns
+        // that same list, refreshed only when the part count happens to have changed.
+        // It is a cache, rebuilt by RebuildCrewList() / the onVesselCrewWasModified event
+        // — so anything that seats or unseats a kerbal without firing that event leaves
+        // it stale, and a stale-empty cache reads as "nobody aboard".
+        //
+        // That matters here beyond a wrong number: the crew embedded as GKCREW came off
+        // the cache while the `crew = <name>` refs in each PART node come off
+        // Part.protoModuleCrew, so a stale cache would ship the names with no roster
+        // definitions and the recipient would rebuild each kerbal with a random gender,
+        // trait and courage. Every crew read in the mod goes through the helpers below,
+        // which read the same field KSP itself serializes.
+
+        /// <summary>Crew a snapshot will actually write out. ProtoPartSnapshot.Save emits
+        /// one `crew = name` per entry in protoCrewNames, filled from Part.protoModuleCrew
+        /// when the snapshot was taken — so this is exactly the payload's crew.</summary>
+        public static List<ProtoCrewMember> CrewOf(ProtoVessel pv)
+        {
+            var crew = new List<ProtoCrewMember>();
+            if (pv?.protoPartSnapshots == null) return crew;
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var roster = HighLogic.CurrentGame?.CrewRoster;
+
+            foreach (ProtoPartSnapshot pps in pv.protoPartSnapshots)
+            {
+                if (pps == null) continue;
+
+                // Resolved crew objects when the snapshot has them…
+                if (pps.protoModuleCrew != null)
+                    foreach (var pcm in pps.protoModuleCrew)
+                        if (pcm != null && seen.Add(pcm.name)) crew.Add(pcm);
+
+                // …and the names otherwise, which is what a snapshot read back from a
+                // ConfigNode carries before KSP resolves it. Names alone can't build a
+                // GKCREW node, so look each one up in the roster.
+                if (pps.protoCrewNames == null || roster == null) continue;
+                foreach (string name in pps.protoCrewNames)
+                {
+                    if (string.IsNullOrEmpty(name) || seen.Contains(name)) continue;
+                    ProtoCrewMember pcm = roster[name];
+                    if (pcm == null) continue;
+                    seen.Add(name);
+                    crew.Add(pcm);
+                }
+            }
+            return crew;
+        }
+
+        /// <summary>Crew aboard a vessel right now, read from the parts (or from its
+        /// snapshot when it isn't loaded) rather than from KSP's cached crew list.</summary>
+        public static List<ProtoCrewMember> CrewOf(Vessel vessel)
+        {
+            if (vessel == null) return new List<ProtoCrewMember>();
+            if (!vessel.loaded || vessel.parts == null) return CrewOf(vessel.protoVessel);
+
+            var crew = new List<ProtoCrewMember>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Part p in vessel.parts)
+            {
+                if (p?.protoModuleCrew == null) continue;
+                foreach (var pcm in p.protoModuleCrew)
+                    if (pcm != null && seen.Add(pcm.name)) crew.Add(pcm);
+            }
+            return crew;
+        }
+
+        /// <summary>Number of kerbals aboard, counted off the parts. See <see cref="CrewOf(Vessel)"/>.</summary>
+        public static int CrewCountOf(Vessel vessel) => CrewOf(vessel).Count;
 
         // ── Ownership name tagging ───────────────────────────────────────────
         //
@@ -744,11 +829,8 @@ namespace GeneKerman
             try
             {
                 // Snapshot the crew before destroying the hull — Die() unassigns them, so
-                // GetVesselCrew() returns nothing afterwards.
-                var crew = new List<ProtoCrewMember>();
-                if (dropCrew)
-                    foreach (var pcm in target.GetVesselCrew())
-                        if (pcm != null) crew.Add(pcm);
+                // there is nobody aboard to read afterwards.
+                var crew = dropCrew ? CrewOf(target) : new List<ProtoCrewMember>();
 
                 // Destroy the hull FIRST. The old order removed crew from the roster
                 // before Die(), which let KSP's own crew handling inside Die() trip over
@@ -982,15 +1064,26 @@ namespace GeneKerman
     }
 
     /// <summary>
-    /// The DELIVERY destination a rescuer must bring the stranded kerbals to — NOT
-    /// where the wreck spawns (the wreck keeps its own snapshot orbit so there's an
-    /// actual rescue to fly). Orbit mode uses Ap/Pe (altitudes above the surface);
-    /// surface mode uses Lat/Lon. Margins are the issuer-set tolerances.
+    /// What a rescuer has to deliver, and where.
+    ///
+    /// `mode` is the DELIVERY destination — NOT where the wreck spawns (the wreck keeps
+    /// its own snapshot orbit so there's an actual rescue to fly). Orbit mode uses Ap/Pe
+    /// (altitudes above the surface); surface mode uses Lat/Lon. Margins are the
+    /// issuer-set tolerances.
+    ///
+    /// `recovery` is the separate question of *what* has to arrive:
+    ///   "crew"   — the stranded kerbals, aboard whatever ship brought them. The wreck
+    ///              may be stripped, abandoned or destroyed.
+    ///   "vessel" — the crew AND the wreck itself, towed/flown home. Checked by part
+    ///              flightID: KSP keeps a part's uid across export, import, docking and
+    ///              undocking, so the wreck stays identifiable however it gets home.
+    /// `minDv` is a floor on the delivering craft's remaining vacuum Δv, so the crew are
+    /// dropped somewhere they can actually leave from. 0 means no requirement.
     /// </summary>
     public class RescueTargetSpec
     {
         public string body;
-        public string mode = "orbit"; // "orbit" | "surface"
+        public string mode = "orbit";       // "orbit" | "surface"
         public double ap;
         public double pe;
         public double lat;
@@ -998,10 +1091,20 @@ namespace GeneKerman
         public double marginAlt;
         public double marginPos;
 
+        public string recovery = "crew";    // "crew" | "vessel"
+        public double minDv;                // m/s, 0 = no requirement
+
+        /// <summary>flightIDs of the wreck's parts as it was handed over. Only the
+        /// rescuer's client is sent these, and only on a "vessel" recovery — nobody
+        /// else has anything to check them against.</summary>
+        public List<uint> wreckParts = new List<uint>();
+
+        public bool RequiresWreck => string.Equals(recovery, "vessel", StringComparison.OrdinalIgnoreCase);
+
         public static RescueTargetSpec FromDict(System.Collections.Generic.Dictionary<string, object> d)
         {
             if (d == null) return null;
-            return new RescueTargetSpec
+            var spec = new RescueTargetSpec
             {
                 body = MiniJSON.GetString(d, "body", ""),
                 mode = MiniJSON.GetString(d, "mode", "orbit"),
@@ -1011,7 +1114,22 @@ namespace GeneKerman
                 lon = MiniJSON.GetDouble(d, "lon", 0),
                 marginAlt = MiniJSON.GetDouble(d, "margin_alt", 0),
                 marginPos = MiniJSON.GetDouble(d, "margin_pos", 0),
+                // Absent on every rescue issued before the two modes existed, which were
+                // all crew-only with no Δv floor — exactly what these defaults mean.
+                recovery = MiniJSON.GetString(d, "recovery", "crew"),
+                minDv = MiniJSON.GetDouble(d, "min_dv", 0),
             };
+
+            var parts = MiniJSON.GetList(d, "wreck_parts");
+            if (parts != null)
+                foreach (var o in parts)
+                {
+                    if (o == null) continue;
+                    uint id;
+                    if (uint.TryParse(o.ToString(), out id) && id != 0) spec.wreckParts.Add(id);
+                }
+
+            return spec;
         }
     }
 }

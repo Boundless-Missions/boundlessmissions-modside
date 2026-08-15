@@ -25,7 +25,9 @@
 
   <!-- Source files -->
   <ItemGroup>
-    <Compile Include="**/*.cs" />
+    <!-- Exclude obj/bin: the SDK generates AssemblyAttributes.cs in there and adds it
+         itself, so the glob picking it up again is a CS2002 on every incremental build. -->
+    <Compile Include="**/*.cs" Exclude="obj/**/*.cs;bin/**/*.cs" />
   </ItemGroup>
 
   <!-- KSP / Unity References -->

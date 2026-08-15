@@ -30,7 +30,9 @@ namespace GeneKerman
         public const string TermsOfServiceUrl = "https://boundlessmissions.com/tos";
 
         /// <summary>Default marketplace website, opened from the Market tab. Overridable
-        /// via the <c>marketplaceUrl</c> key in settings.cfg.</summary>
+        /// via the <c>marketplaceProtocol</c> / <c>marketplaceAddress</c> keys in
+        /// settings.cfg — split for the same reason serverHost/serverProtocol are,
+        /// see LoadMarketplaceUrl.</summary>
         public const string DefaultMarketplaceUrl = "https://boundlessmissions.com/marketplace";
 
         private string serverUrl;
@@ -48,6 +50,18 @@ namespace GeneKerman
         // fully functional fallback — single-monitor and Steam Deck players are better
         // served by it, and it is the only UI available if the bridge cannot start.
         private bool webUiEnabled;
+        // Dev-only: adds the widget gallery to the uGUI sidebar. Hand-edited into
+        // settings.cfg; deliberately has no toggle in any UI, and is written back
+        // on save only so a settings change doesn't silently drop it.
+        private bool guiGalleryEnabled;
+        // Emergency freeze for rescue crew (see RescueImmunityGuardian). On by default:
+        // without it a stranded crew starves in whatever time the rescuer takes, and a
+        // wreck built for another life-support mod is unrescuable. Off leaves the crew
+        // seated and their life support running normally.
+        private bool emergencyFreezeEnabled = true;
+        // Days of the local LS mod's resources stowed aboard a rescue wreck, per rescued
+        // kerbal. 0 disables the ration kit; the freeze itself is unaffected.
+        private int emergencyRationDays = 3;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -91,6 +105,12 @@ namespace GeneKerman
         public bool DataGatheringEnabled => dataGatheringEnabled;
         /// <summary>Whether the UI opens in a browser (true) or as classic in-game windows (false).</summary>
         public bool WebUiEnabled => webUiEnabled;
+        /// <summary>Dev-only: show the uGUI sidebar's widget gallery. Off for players.</summary>
+        public bool GuiGalleryEnabled => guiGalleryEnabled;
+        /// <summary>Whether stranded rescue crew are held in emergency freeze until reached.</summary>
+        public bool EmergencyFreezeEnabled => emergencyFreezeEnabled;
+        /// <summary>Days of local life support stowed aboard a rescue wreck per kerbal (0 = off).</summary>
+        public int EmergencyRationDays => emergencyRationDays;
 
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
@@ -201,6 +221,13 @@ namespace GeneKerman
                         // Absent means classic: an existing install must never be moved
                         // to a different UI by a mod update.
                         bool.TryParse(gk.GetValue("enableWebUi") ?? "false", out webUiEnabled);
+                        bool.TryParse(gk.GetValue("enableGuiGallery") ?? "false", out guiGalleryEnabled);
+                        bool.TryParse(gk.GetValue("enableEmergencyFreeze") ?? "true", out emergencyFreezeEnabled);
+                        // Guarded rather than TryParse'd straight in: a hand-edited
+                        // negative would size a ration kit backwards.
+                        int rationDays;
+                        if (int.TryParse(gk.GetValue("emergencyRationDays") ?? "3", out rationDays))
+                            emergencyRationDays = rationDays < 0 ? 0 : rationDays;
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -209,10 +236,8 @@ namespace GeneKerman
                         string protocol = gk.GetValue("serverProtocol") ?? "http";
                         customServerUrl = $"{protocol}://{host}:{port}";
 
-                        // Marketplace website (Market tab "Open Marketplace"). Keep the
-                        // shipped default when the key is absent.
-                        string mkt = gk.GetValue("marketplaceUrl");
-                        marketplaceUrl = string.IsNullOrEmpty(mkt) ? DefaultMarketplaceUrl : mkt.Trim();
+                        // Marketplace website (Market tab "Open Marketplace").
+                        marketplaceUrl = LoadMarketplaceUrl(gk);
 
                         // When the official server is selected, ignore the stored custom
                         // host/port (kept so toggling back to custom restores it).
@@ -230,6 +255,96 @@ namespace GeneKerman
             serverUrl = OfficialServerUrl;
             SaveSettings();
             Debug.Log($"[GeneKerman] First setup — defaulting to official server: {serverUrl}");
+        }
+
+        // ── Marketplace URL ─────────────────────────────────────────────────
+        //
+        // Stored split into scheme and remainder for exactly the reason
+        // serverHost/serverPort/serverProtocol are: **ConfigNode treats `//` as a
+        // comment delimiter**, so a line reading
+        //
+        //     marketplaceUrl = https://boundlessmissions.com/marketplace
+        //
+        // parses back as the value `https:` — everything from the scheme's double
+        // slash on is discarded as a comment. The next SaveSettings then wrote
+        // `https:` back to disk, making the loss permanent, and Application.OpenURL
+        // received a URL with no host. Splitting the scheme out leaves no `//` in
+        // either value; a path's single slashes are fine.
+
+        /// <summary>
+        /// Resolve the marketplace URL from settings, preferring the split keys and
+        /// falling back to the pre-split single key. Anything that does not come out
+        /// as an absolute http(s) URL with a host is discarded for the shipped
+        /// default — which is what repairs an install already holding `https:`.
+        /// </summary>
+        private static string LoadMarketplaceUrl(ConfigNode gk)
+        {
+            string address = gk.GetValue("marketplaceAddress");
+            if (!string.IsNullOrEmpty(address))
+            {
+                string protocol = gk.GetValue("marketplaceProtocol");
+                if (string.IsNullOrEmpty(protocol)) protocol = "https";
+
+                string url;
+                if (TryNormalizeMarketplaceUrl(protocol.Trim() + "://" + address.Trim(), out url))
+                    return url;
+
+                Debug.LogWarning("[GeneKerman] Ignoring unusable marketplaceAddress in settings.cfg.");
+                return DefaultMarketplaceUrl;
+            }
+
+            // Written before the split. Almost every one of these is a mangled
+            // remnant rather than a real override, so it is validated, not trusted.
+            string legacy = gk.GetValue("marketplaceUrl");
+            if (string.IsNullOrEmpty(legacy)) return DefaultMarketplaceUrl;
+
+            string migrated;
+            if (TryNormalizeMarketplaceUrl(legacy.Trim(), out migrated)) return migrated;
+
+            Debug.LogWarning("[GeneKerman] settings.cfg has a truncated marketplaceUrl (\"" + legacy.Trim() +
+                             "\") — ConfigNode reads // as a comment. Using the default; " +
+                             "set marketplaceProtocol/marketplaceAddress to override.");
+            return DefaultMarketplaceUrl;
+        }
+
+        /// <summary>
+        /// Accept only an absolute http(s) URL that actually has a host, and return
+        /// it in the exact form the bridge's open-url allow-list compares against
+        /// (Web/GkRoutes.cs matches this string literally, so it must be stable).
+        /// </summary>
+        private static bool TryNormalizeMarketplaceUrl(string candidate, out string normalized)
+        {
+            normalized = null;
+            if (string.IsNullOrEmpty(candidate)) return false;
+
+            Uri uri;
+            // "https:" fails here outright — there is no authority to parse — which
+            // is the mangled case self-healing.
+            if (!Uri.TryCreate(candidate.Trim(), UriKind.Absolute, out uri)) return false;
+            if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return false;
+            if (string.IsNullOrEmpty(uri.Host)) return false;
+
+            normalized = candidate.Trim();
+            return true;
+        }
+
+        /// <summary>
+        /// Split a URL into the two settings.cfg values. False when the remainder
+        /// would itself contain a `//` (a doubled slash in the path), since
+        /// persisting that would reintroduce the very bug the split exists to fix.
+        /// </summary>
+        private static bool SplitMarketplaceUrl(string url, out string protocol, out string address)
+        {
+            protocol = null;
+            address = null;
+
+            string normalized;
+            if (!TryNormalizeMarketplaceUrl(url, out normalized)) return false;
+
+            var uri = new Uri(normalized);
+            protocol = uri.Scheme;
+            address = uri.Authority + uri.PathAndQuery;
+            return !address.Contains("//");
         }
 
         /// <summary>Switch to the official server and persist the choice.
@@ -336,6 +451,16 @@ namespace GeneKerman
             SaveSettings();
         }
 
+        /// <summary>Turn the rescue emergency freeze on or off and persist the choice.
+        /// Only affects wrecks spawned afterwards — crew already frozen stay frozen and
+        /// still thaw normally, since abandoning them mid-freeze would strand them in an
+        /// LS mod's books.</summary>
+        public void SetEmergencyFreezeEnabled(bool enabled)
+        {
+            emergencyFreezeEnabled = enabled;
+            SaveSettings();
+        }
+
         /// <summary>Master opt-out for all data sharing (KSP add-on rule 8.2). When set
         /// false the mod transmits nothing and runs inert until re-enabled.</summary>
         public void SetDataGatheringEnabled(bool enabled)
@@ -379,10 +504,32 @@ namespace GeneKerman
             gk.AddValue("enableCheckpointPhotos", checkpointPhotosEnabled);
             gk.AddValue("enableDataGathering", dataGatheringEnabled);
             gk.AddValue("enableWebUi", webUiEnabled);
+            // Written back rather than dropped: SaveSettings rewrites the whole
+            // node, so a hand-edited dev key would vanish the first time the player
+            // (or the Settings screen) saved anything.
+            gk.AddValue("enableGuiGallery", guiGalleryEnabled);
+            gk.AddValue("enableEmergencyFreeze", emergencyFreezeEnabled);
+            gk.AddValue("emergencyRationDays", emergencyRationDays);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
-            gk.AddValue("marketplaceUrl", string.IsNullOrEmpty(marketplaceUrl) ? DefaultMarketplaceUrl : marketplaceUrl);
+            // Split, never as one value — see LoadMarketplaceUrl. The old
+            // `marketplaceUrl` key is deliberately no longer written: leaving it
+            // behind would keep re-truncating on every load, and load already
+            // migrates it.
+            string mktProtocol, mktAddress;
+            if (!SplitMarketplaceUrl(MarketplaceUrl, out mktProtocol, out mktAddress))
+            {
+                // Only reachable for a URL with a doubled slash in its path, which
+                // cannot be stored in a ConfigNode at all. Say so rather than
+                // quietly replacing the player's override with the default.
+                Debug.LogWarning("[GeneKerman] Marketplace URL \"" + MarketplaceUrl +
+                                 "\" cannot be stored in settings.cfg (a `//` in the path is read as a " +
+                                 "comment); persisting the default instead.");
+                SplitMarketplaceUrl(DefaultMarketplaceUrl, out mktProtocol, out mktAddress);
+            }
+            gk.AddValue("marketplaceProtocol", mktProtocol);
+            gk.AddValue("marketplaceAddress", mktAddress);
             node.Save(settingsPath);
             Debug.Log($"[GeneKerman] Settings saved — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
         }
@@ -1267,6 +1414,8 @@ namespace GeneKerman
             double ap, double pe, double lat, double lon,
             double marginAlt, double marginPos, bool isModded,
             string rescuePid, string kerbalsJson, string vesselNodeData,
+            string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
+            string recovery, double minDv,
             ApiCallback<Dictionary<string, object>> callback)
         {
             if (TransmissionBlocked) { callback(false, null, "Data sharing is off."); yield break; }
@@ -1290,11 +1439,24 @@ namespace GeneKerman
                 new MultipartFormDataSection("margin_pos", marginPos.ToString("G17", inv)),
                 new MultipartFormDataSection("is_modded", isModded ? "true" : "false"),
                 new MultipartFormDataSection("kerbals", string.IsNullOrEmpty(kerbalsJson) ? "[]" : kerbalsJson),
+                // What has to come back: the crew alone, or the wreck with them. The
+                // server derives the wreck's part list from the node uploaded below, so
+                // there is nothing extra to send for it.
+                new MultipartFormDataSection("recovery", string.IsNullOrEmpty(recovery) ? "crew" : recovery),
+                new MultipartFormDataSection("min_dv", minDv.ToString("G17", inv)),
             };
             if (!string.IsNullOrEmpty(modlist))
                 form.Add(new MultipartFormDataSection("modlist", modlist));
             if (!string.IsNullOrEmpty(rescuePid))
                 form.Add(new MultipartFormDataSection("rescue_pid", rescuePid));
+            // What the wreck is provisioned for, so the rescuer's client can tell whether
+            // its supplies mean anything in their save (and stow rations if not).
+            if (!string.IsNullOrEmpty(lifeSupport))
+                form.Add(new MultipartFormDataSection("life_support", lifeSupport));
+            if (lsEnduranceDays > 0)
+                form.Add(new MultipartFormDataSection("ls_endurance_days", lsEnduranceDays.ToString(inv)));
+            if (lsCrewCapacity > 0)
+                form.Add(new MultipartFormDataSection("ls_crew_capacity", lsCrewCapacity.ToString(inv)));
 
             byte[] nodeBytes = Encoding.UTF8.GetBytes(vesselNodeData ?? "");
             byte[] compressed = GzipCompress(nodeBytes);

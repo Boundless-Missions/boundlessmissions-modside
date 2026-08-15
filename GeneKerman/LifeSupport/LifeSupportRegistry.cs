@@ -5,10 +5,13 @@
  * LifeSupport.LifeSupportManager type that UsiLsAdapter reflects into.
  *
  * Holds one instance of each adapter, reports which mods are present on THIS (the
- * contractor / importing) client, and picks:
- *   • the consumption LS mod a craft was "built with" (for marketplace/contract tags), and
- *   • the adapter used to hold rescue kerbals immune (DeepFreeze preferred, else the
- *     active consumption mod; Kerbalism can't hold immunity).
+ * contractor / importing) client, and picks the consumption LS mod this install runs —
+ * which is both the "built with" tag on anything listed from here and the mod an
+ * emergency ration kit is sized for when a wreck arrives from a player running another.
+ *
+ * Freeze/thaw goes through every installed adapter rather than the primary one (see
+ * LsFreeze): a save can have two LS mods loaded, and a kerbal only stays frozen if all
+ * of them let go.
  */
 
 using System.Collections.Generic;

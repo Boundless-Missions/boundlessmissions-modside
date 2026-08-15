@@ -1,9 +1,16 @@
 /*
  * TacLsAdapter.cs – TAC Life Support (assembly "TacLifeSupport", namespace "Tac").
  *
- * Detection + endurance only (CONFIRMED against the installed TacLifeSupport.dll —
- * Tac.TacLifeSupport.Instance exists). Rescue immunity is handled by
- * RescueImmunityGuardian (stasis), not here.
+ * CONFIRMED against the installed TacLifeSupport.dll (see INTEGRATION_NOTES.md):
+ *   Tac.TacLifeSupport.Instance → gameSettings → knownCrew, a KSP
+ *   DictionaryValueList<string, Tac.CrewMemberInfo> (not a plain IDictionary — read it
+ *   through LsReflect.GetByKey), whose entries carry lastUpdate / lastFood / lastWater /
+ *   lastO2 (not "lastOxygen") / lastEC.
+ *
+ * TAC decides how starved a kerbal is purely from the gap between those stamps and now,
+ * so both freeze and thaw do the same thing: pin them to now. On freeze that neutralises
+ * the record while the crew are out of the simulation; on thaw it erases the drift, which
+ * is the difference between a rescued kerbal and one that dies as it boards.
  */
 
 using System.Collections.Generic;
@@ -11,54 +18,69 @@ using UnityEngine;
 
 namespace GeneKerman
 {
-    public class TacLsAdapter : ILifeSupportAdapter
+    public class TacLsAdapter : LsAdapterBase
     {
-        public string ModKey => "tac";
-        public string DisplayName => "TAC-LS";
-        public bool IsConsumptionLs => true;
-        public string[] ResourceNames => new[] { "Food", "Water", "Oxygen" };
+        public override string ModKey => "tac";
+        public override string DisplayName => "TAC-LS";
+        public override string[] ResourceNames => new[] { "Food", "Water", "Oxygen" };
 
         // Canonical TAC defaults, units/second per kerbal (independent of day length).
         private const double FoodPerSecond = 0.000016927083;
         private const double WaterPerSecond = 0.000011188078;
         private const double OxygenPerSecond = 0.001713537562;
 
-        private bool _checked;
-        private bool _ok;
-
-        public bool IsInstalled
+        public override IDictionary<string, double> DailyNeedPerKerbal
         {
             get
             {
-                if (!_checked)
+                double day = LsEndurance.SecondsPerDay();
+                return new Dictionary<string, double>
                 {
-                    _checked = true;
-                    _ok = LsReflect.GetStatic(
-                        LsReflect.FindType("TacLifeSupport", "Tac.TacLifeSupport"), "Instance") != null;
-                    if (_ok) Debug.Log("[GeneKerman] TAC-LS detected.");
-                }
-                return _ok;
+                    { "Food", FoodPerSecond * day },
+                    { "Water", WaterPerSecond * day },
+                    { "Oxygen", OxygenPerSecond * day },
+                };
             }
         }
 
-        public double EnduranceDaysPerKerbal(IDictionary<string, double> amounts)
+        private static readonly string[] TimeStamps =
         {
-            if (amounts == null) return 0;
-            double best = double.PositiveInfinity;
-            best = Limit(best, amounts, "Food", FoodPerSecond);
-            best = Limit(best, amounts, "Water", WaterPerSecond);
-            best = Limit(best, amounts, "Oxygen", OxygenPerSecond);
-            if (double.IsInfinity(best)) return 0;
-            return best / LsEndurance.SecondsPerDay();
+            "lastUpdate", "lastFood", "lastWater", "lastO2", "lastEC",
+        };
+
+        private static object LifeSupport =>
+            LsReflect.GetStatic(LsReflect.FindType("TacLifeSupport", "Tac.TacLifeSupport"), "Instance");
+
+        private static object KnownCrew
+        {
+            get
+            {
+                object settings = LsReflect.GetMember(LifeSupport, "gameSettings");
+                return LsReflect.GetMember(settings, "knownCrew");
+            }
         }
 
-        // The limiting resource sets endurance: min seconds across the three.
-        private static double Limit(double best, IDictionary<string, double> amounts, string res, double perSec)
+        protected override bool Detect() => LifeSupport != null;
+
+        public override void SuspendKerbal(string kerbalName) => PinToNow(kerbalName);
+
+        public override void ResumeKerbal(string kerbalName)
         {
-            double amt;
-            if (perSec <= 0 || !amounts.TryGetValue(res, out amt) || amt <= 0) return best;
-            double secs = amt / perSec;
-            return secs < best ? secs : best;
+            if (PinToNow(kerbalName))
+                Debug.Log($"[GeneKerman] TAC-LS: reset consumption stamps for {kerbalName}.");
+        }
+
+        /// <summary>Pin a kerbal's TAC stamps to the current UT. False when TAC has no
+        /// record for them — which is the good case: TAC then starts fresh on its own.</summary>
+        private bool PinToNow(string kerbalName)
+        {
+            if (!IsInstalled || string.IsNullOrEmpty(kerbalName)) return false;
+            object info = LsReflect.GetByKey(KnownCrew, kerbalName);
+            if (info == null) return false;
+
+            double now = LsReflect.Now();
+            foreach (var stamp in TimeStamps) LsReflect.SetMember(info, stamp, now);
+            return true;
         }
     }
 }

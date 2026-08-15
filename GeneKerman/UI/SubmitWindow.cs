@@ -227,19 +227,22 @@ namespace GeneKerman.UI
         }
 
         /// <summary>
-        /// Rescue checks: the active vessel must carry every stranded kerbal and be
-        /// at the target orbit (Ap/Pe within margin) or surface spot (Lat/Lon within
-        /// margin). Appends any failures to <paramref name="issues"/>.
+        /// Rescue checks: the active vessel must carry every stranded kerbal, be at the
+        /// target orbit (Ap/Pe within margin) or surface spot (Lat/Lon within margin),
+        /// and — on a "vessel" recovery — have the wreck itself aboard. A Δv floor, when
+        /// the issuer set one, applies to either mode. Appends failures to
+        /// <paramref name="issues"/>.
         /// </summary>
         private void ValidateRescue(List<string> issues)
         {
-            // All stranded kerbals aboard?
+            // All stranded kerbals aboard? Required in both modes — bringing the hull
+            // home without its crew is not a rescue.
             if (rescueKerbals != null && rescueKerbals.Count > 0)
             {
                 var aboard = new HashSet<string>(StringComparer.Ordinal);
                 var vessel = FlightGlobals.ActiveVessel;
                 if (vessel != null)
-                    foreach (var pcm in vessel.GetVesselCrew())
+                    foreach (var pcm in VesselTransfer.CrewOf(vessel))
                         if (pcm != null) aboard.Add(pcm.name);
 
                 var missing = new List<string>();
@@ -254,6 +257,9 @@ namespace GeneKerman.UI
             }
 
             if (rescueTarget == null) return;
+
+            ValidateWreckAboard(issues);
+            ValidateRescueDeltaV(issues);
 
             bool surface = (rescueTarget.mode ?? "orbit").ToLower() == "surface";
             if (surface)
@@ -298,6 +304,67 @@ namespace GeneKerman.UI
                     }
                 }
             }
+        }
+
+        /// <summary>"Vessel" recovery only: the wreck itself has to have made it here.
+        ///
+        /// Matched by part flightID, which KSP assigns once and then preserves through
+        /// export, import, docking and undocking — so the wreck is recognisable whether
+        /// it was towed, docked into the rescue ship, or refuelled and flown home under
+        /// its own power. A share of the parts is enough (see WreckCoverageRequired):
+        /// demanding all of them would fail a tow that shed an antenna.</summary>
+        private void ValidateWreckAboard(List<string> issues)
+        {
+            if (!rescueTarget.RequiresWreck) return;
+
+            // No part list means the server had nothing to give us — an older contract,
+            // or a wreck node it couldn't read. Don't invent a failure the player has no
+            // way to fix; the server re-checks this authoritatively on submission.
+            if (rescueTarget.wreckParts == null || rescueTarget.wreckParts.Count == 0) return;
+
+            var here = new HashSet<uint>();
+            var parts = FlightGlobals.ActiveVessel?.parts;
+            if (parts != null)
+                foreach (Part p in parts)
+                    if (p != null) here.Add(p.flightID);
+
+            int found = 0;
+            foreach (uint id in rescueTarget.wreckParts)
+                if (here.Contains(id)) found++;
+
+            int needed = (int)Math.Ceiling(rescueTarget.wreckParts.Count * ContractCreation.WreckCoverageRequired);
+            if (needed < 1) needed = 1;
+            if (found >= needed) return;
+
+            vesselValid = false;
+            issues.Add($"❌ The stranded vessel isn't here: {found} of {rescueTarget.wreckParts.Count} " +
+                       $"of its parts aboard, need at least {needed}. This contract wants the wreck " +
+                       $"brought home, not just its crew.");
+        }
+
+        /// <summary>Δv floor on whatever is carrying the crew, so they're left somewhere
+        /// they can leave from. Skipped when the issuer set none, or when the stock Δv
+        /// readout can't give us a number (CraftDeltaV returns -1) — failing on a value
+        /// we couldn't read would block a valid submission.</summary>
+        private void ValidateRescueDeltaV(List<string> issues)
+        {
+            if (rescueTarget.minDv <= 0) return;
+
+            double dv = CraftDeltaV.TotalVacuum();
+            if (dv < 0)
+            {
+                issues.Add($"⚠ Δv unreadable — this rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
+                           "Turn on the stock Δv readout to check it here; the server checks it either way.");
+                return;
+            }
+
+            // Same 0.5% slack the mission-limit Δv check allows, so a craft sitting right
+            // on the number isn't failed by rounding.
+            if (dv >= rescueTarget.minDv * 0.995) return;
+
+            vesselValid = false;
+            issues.Add($"❌ Not enough Δv left: {dv:F0} m/s, need ≥{rescueTarget.minDv:F0} m/s " +
+                       "so the crew can get home from here.");
         }
 
         public void Draw()
@@ -904,7 +971,7 @@ namespace GeneKerman.UI
                 // Crew aboard for the crew-count limit (flight only; -1 elsewhere so it's
                 // skipped, matching the server which reads crew from submitted telemetry).
                 int crewAboard = (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null)
-                    ? FlightGlobals.ActiveVessel.GetCrewCount() : -1;
+                    ? VesselTransfer.CrewCountOf(FlightGlobals.ActiveVessel) : -1;
                 var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac, crewAboard);
                 if (violations.Count > 0)
                 {

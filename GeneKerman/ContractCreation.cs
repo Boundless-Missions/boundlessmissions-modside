@@ -44,6 +44,19 @@ namespace GeneKerman
         public const double MinMarginOrbitKm = 5.0;
         public const double MinMarginSurfaceDeg = 0.5;
 
+        /// <summary>What the rescuer has to bring back. Crew-only is the historical
+        /// behaviour and stays the default; "vessel" additionally requires the wreck
+        /// itself to arrive, which turns a rescue into a salvage/tow job.</summary>
+        public const string RecoveryCrew = "crew";
+        public const string RecoveryVessel = "vessel";
+
+        /// <summary>Fraction of the wreck's original parts that must reach the target on
+        /// a "vessel" recovery. Not 100%: a tow that loses a solar panel to a docking
+        /// bump is still the wreck brought home, and holding out for every part would
+        /// make the mode unplayable. Both the client check and the server's re-check
+        /// read this same number — see _WRECK_COVERAGE_REQUIRED in api_server.py.</summary>
+        public const double WreckCoverageRequired = 0.5;
+
         private static readonly HashSet<string> StockBodies = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "Kerbol", "Sun", "Moho", "Eve", "Gilly", "Kerbin", "Mun", "Minmus", "Duna", "Ike",
@@ -224,7 +237,9 @@ namespace GeneKerman
             if (v == null) return ctx;
 
             ctx.VesselName = v.vesselName ?? "";
-            foreach (var pcm in v.GetVesselCrew())
+            // Off the parts, not KSP's cached crew list — a stranded kerbal missing from
+            // the list here would never make it into the rescue contract at all.
+            foreach (var pcm in VesselTransfer.CrewOf(v))
                 if (pcm != null) ctx.Crew.Add(pcm.name);
 
             ctx.Body = v.mainBody != null ? v.mainBody.bodyName : "";
@@ -265,7 +280,9 @@ namespace GeneKerman
             public int DurationHours = 24;          // auction only
 
             // Rescue only. Altitudes in km and margins in km/degrees, as typed.
-            public string RescueMode = "orbit";     // orbit | surface
+            public string RescueMode = "orbit";     // orbit | surface — where
+            public string RescueRecovery = RecoveryCrew;  // crew | vessel — what
+            public double MinDvMs;                  // Δv the delivering craft must have left; 0 = off
             public string RescueBody = "";
             public double ApKm = 100, PeKm = 100, MarginAltKm = MinMarginOrbitKm;
             public double Lat, Lon, MarginPosDeg = MinMarginSurfaceDeg;
@@ -313,6 +330,10 @@ namespace GeneKerman
                 { error = "Pick a target body."; return false; }
                 if (r.RescueMode != "orbit" && r.RescueMode != "surface")
                 { error = "Pick orbit or surface."; return false; }
+                if (r.RescueRecovery != RecoveryCrew && r.RescueRecovery != RecoveryVessel)
+                { error = "Pick what has to come back: the crew, or the vessel too."; return false; }
+                if (!Finite(r.MinDvMs) || r.MinDvMs < 0)
+                { error = "Enter a valid Δv requirement in m/s (0 for none)."; return false; }
 
                 if (r.RescueMode == "orbit")
                 {
@@ -437,11 +458,19 @@ namespace GeneKerman
             bool ok = false;
             string message = null;
 
+            // Life-support flag of the wreck itself: which mod its supplies belong to and
+            // how long they last. The rescuer's client compares this with their own install
+            // — a craft built for another LS mod carries nothing they can use, which is what
+            // the emergency freeze and ration kit exist for.
+            LifeSupportInfo ls = LifeSupportScan.Scan(vessel.parts);
+
             yield return mod.Api.CreateRescueContract(
                 r.ContractorId, r.Mission, r.Payment, r.Fine, r.DueDate,
                 BuildActiveModlist(), r.RescueBody, r.RescueMode,
                 ap, pe, lat, lon, marginAlt, marginPos, isModded,
                 pid, MiniJSON.Serialize(taggedKerbals), node,
+                ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
+                r.RescueRecovery, r.MinDvMs,
                 (success, data, err) =>
                 {
                     ok = success;

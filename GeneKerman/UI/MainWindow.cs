@@ -8,6 +8,7 @@
  *   4. Notifications — Incoming requests and review results
  */
 
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
@@ -194,6 +195,111 @@ namespace GeneKerman.UI
         /// so it is already there when the user opens the tab. De-duped by id; the unread
         /// badge is managed by the caller, so this does not recount.
         /// </summary>
+        // ── Read-only views for the uGUI sidebar ────────────────────────────
+        //
+        // The sidebar's notification panel *displays* this feed; MainWindow keeps
+        // owning the fetch, the local-notification merge, the de-dup and the unread
+        // count. Exposing the list rather than copying it is the point — a second
+        // copy would drift the moment either side gained a mutation.
+
+        /// <summary>The loaded feed, newest first. Null before the first fetch.</summary>
+        internal IList<object> NotificationFeed => notifications;
+
+        /// <summary>True while a notification fetch is in flight.</summary>
+        internal bool NotificationsLoading => loadingNotifs;
+
+        /// <summary>Kick a refresh from another front end (same call the tab's button makes).</summary>
+        internal void RequestNotificationRefresh() => RefreshNotifications();
+
+        /// <summary>The account profile blob. Null before the first fetch.</summary>
+        internal Dictionary<string, object> ProfileData => profile;
+        internal bool ProfileLoading => loadingProfile;
+        internal void RequestProfileRefresh() => RefreshProfile();
+
+        /// <summary>This week's missions, plus the two facts that qualify them.</summary>
+        internal IList<object> MissionList => missions;
+        internal string MissionWeekKey => weekKey;
+        internal bool MissionsLocked => missionsLocked;
+        internal bool MissionsLoading => loadingMissions;
+        internal void RequestMissionsRefresh() => RefreshMissions();
+
+        /// <summary>Active + incoming contracts, as the API returned them.</summary>
+        internal IList<object> ContractList => contracts;
+        internal bool ContractsLoading => loadingContracts;
+        internal void RequestContractsRefresh() => RefreshContracts();
+
+        /// <summary>One contract by id, from the same cache the list renders.</summary>
+        internal Dictionary<string, object> FindContract(string contractId) => FindContractById(contractId);
+
+        // ── Actions, for the uGUI sidebar ───────────────────────────────────
+        //
+        // These run the *same* coroutines the classic window runs, rather than
+        // reissuing the API calls from the sidebar. That matters more than it
+        // looks: the bodies carry side effects a second copy would silently drop —
+        // DoSelectMission injects the contract into KSP's stock contract system,
+        // DoCancelContract and DoGiveUpContract stop EditorPartEnforcer if it is
+        // gating parts for that contract, and every one of them re-reads the list
+        // afterwards. The Python side learned this the hard way in 6a-i, where two
+        // copies of "give up" disagreed about whether the fine was charged.
+        //
+        // Each takes an onDone the coroutine invokes exactly once, so a caller that
+        // is not MainWindow can report the outcome; MainWindow's own status line
+        // still updates either way.
+
+        internal void RequestSelectMission(int missionId, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoSelectMission(missionId, onDone));
+
+        internal void RequestAcceptContract(string contractId, string issuerName, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoAcceptContract(contractId, issuerName, onDone));
+
+        internal void RequestCancelContract(string contractId, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoCancelContract(contractId, onDone));
+
+        internal void RequestGiveUpContract(string contractId, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoGiveUpContract(contractId, onDone));
+
+        internal void RequestReviewContract(string contractId, bool approve, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoReviewContract(contractId, approve, onDone));
+
+        internal void RequestDispute(string contractId, string action, string newDate, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoDispute(contractId, action, newDate, onDone));
+
+        internal void RequestDownloadCraft(string contractId, string ownerName, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(contractId, ownerName, onDone));
+
+        /// <summary>Spawn an accepted rescue's stranded vessel into this save. Takes the
+        /// contract dict rather than the pieces because everything the spawn needs — the
+        /// wreck URL, the target, the tagged crew names, the LS flag — is read off it,
+        /// and a caller assembling those itself would be a second place to get them
+        /// wrong.</summary>
+        internal void RequestSpawnRescueWreck(Dictionary<string, object> contract, Action<bool, string> onDone)
+        {
+            if (contract == null) { onDone?.Invoke(false, "No contract."); return; }
+
+            string cid = MiniJSON.GetString(contract, "contract_id");
+            string wreckUrl = MiniJSON.GetString(contract, "rescue_vessel_node_url", null);
+            if (string.IsNullOrEmpty(wreckUrl))
+            {
+                onDone?.Invoke(false, "Vessel data unavailable. Refresh contracts and try again.");
+                return;
+            }
+
+            var kerbals = MiniJSON.GetList(contract, "rescue_kerbals")
+                .Select(o => o?.ToString())
+                .Where(s => !string.IsNullOrEmpty(s)).ToList();
+
+            GeneKermanMod.Instance.RunCoroutine(DoSpawnRescueWreck(
+                cid, wreckUrl,
+                RescueTargetSpec.FromDict(MiniJSON.GetDict(contract, "rescue_target")),
+                MiniJSON.GetString(contract, "issuer_name", ""),
+                kerbals,
+                MiniJSON.GetString(contract, "life_support", "none"),
+                onDone));
+        }
+
+        internal void RequestLogoutAllDevices()
+            => GeneKermanMod.Instance.RunCoroutine(DoLogoutAllDevices());
+
         public void AddNotification(Dictionary<string, object> n)
         {
             if (n == null) return;
@@ -1093,6 +1199,13 @@ namespace GeneKerman.UI
                         DrawDetailRow("Target", $"{rbody} orbit Ap {MiniJSON.GetDouble(rt, "ap") / 1000:F0}km / Pe {MiniJSON.GetDouble(rt, "pe") / 1000:F0}km");
                     if (MiniJSON.GetBool(rt, "is_modded"))
                         DrawDetailRow("⚠ Mod", $"Needs the {rbody} planet pack");
+
+                    // What counts as done: the crew alone, or the wreck with them.
+                    bool wreckToo = MiniJSON.GetString(rt, "recovery", "crew") == "vessel";
+                    DrawDetailRow("Recover", wreckToo ? "Crew + the stranded vessel" : "Crew only");
+                    double minDv = MiniJSON.GetDouble(rt, "min_dv", 0);
+                    if (minDv > 0)
+                        DrawDetailRow("Δv left", $"≥{minDv:F0} m/s on arrival");
                 }
                 var krew = MiniJSON.GetList(c, "rescue_kerbals");
                 if (krew != null && krew.Count > 0)
@@ -1164,13 +1277,22 @@ namespace GeneKerman.UI
                 if (alreadySpawned)
                 {
                     GUILayout.Label("(Ok) Already spawned into this save.", labelStyle);
-                    // Stranded crew ride out the wait in stasis (removed from the sim so no
-                    // life-support mod consumes them). They re-board automatically when you
-                    // get close; this button forces it (your "revive emergency stasis crew").
-                    if (RescueImmunityGuardian.HasStasisCrew(rcid))
+                    // Stranded crew ride out the wait in emergency freeze (removed from the
+                    // sim and released by every LS mod, so nothing consumes them). They thaw
+                    // automatically when you get within 10 km; this button forces it.
+                    var freezeRec = RescueImmunityGuardian.GetRecord(rcid);
+                    if (freezeRec != null)
                     {
-                        GUILayout.Label("🧊 Crew are in emergency stasis until you reach them.", labelStyle);
-                        if (GUILayout.Button("🧊 Revive emergency stasis crew", acceptBtnStyle, GUILayout.Height(28)))
+                        GUILayout.Label($"🧊 {freezeRec.Crew.Count} kerbal(s) in emergency freeze — " +
+                                        "they thaw when you get close.", labelStyle);
+                        // Only worth saying when the two installs actually differ: that is
+                        // the case where the wreck's own supplies are useless here.
+                        if (LsFreeze.IsCrossMod(freezeRec.BuiltWithLs))
+                            GUILayout.Label(
+                                $"⚠ Built for {LsFreeze.DisplayNameFor(freezeRec.BuiltWithLs)}; you run " +
+                                $"{LsFreeze.DisplayNameFor(LsFreeze.LocalLsKey)}. Emergency rations were " +
+                                "stowed aboard so the crew survive the thaw.", labelStyle);
+                        if (GUILayout.Button("🧊 Thaw the crew now", acceptBtnStyle, GUILayout.Height(28)))
                             RescueImmunityGuardian.ReviveContract(rcid);
                     }
                 }
@@ -1192,7 +1314,11 @@ namespace GeneKerman.UI
                         var kerbals = MiniJSON.GetList(c, "rescue_kerbals")
                             .Select(o => o?.ToString())
                             .Where(s => !string.IsNullOrEmpty(s)).ToList();
-                        GeneKermanMod.Instance.RunCoroutine(DoSpawnRescueWreck(rcid, wreckUrl, target, issuerName, kerbals));
+                        // What the issuer's install provisioned the wreck for — recorded so
+                        // the rescuer can see a mismatch with their own life-support mod.
+                        string builtWithLs = MiniJSON.GetString(c, "life_support", "none");
+                        GeneKermanMod.Instance.RunCoroutine(
+                            DoSpawnRescueWreck(rcid, wreckUrl, target, issuerName, kerbals, builtWithLs));
                     }
                 }
                 GUILayout.EndVertical();
@@ -1332,19 +1458,50 @@ namespace GeneKerman.UI
                 // Submission was refused. The contractor (incoming side) resolves it
                 // here, mirroring the Discord dispute buttons. The issuer just waits.
                 bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
+                // An open settle / more-time request means the ball is in the issuer's
+                // court, not the contractor's. Answering one is browser-UI and Discord
+                // only, so this window says who is actually being waited on rather than
+                // claiming the contractor is stalling.
+                var pendingReq = MiniJSON.GetDict(c, "pending_request");
+                string reqKind = pendingReq != null ? MiniJSON.GetString(pendingReq, "kind") : "";
+
                 if (isOutgoing)
                 {
+                    string cid = MiniJSON.GetString(c, "contract_id");
+
                     GUI.enabled = false;
-                    GUILayout.Button("Waiting for the contractor to resolve...", submitBtnStyle, GUILayout.Height(30));
+                    if (reqKind == "settle")
+                        GUILayout.Button("They asked to settle — answer in the browser UI or Discord.",
+                                         submitBtnStyle, GUILayout.Height(30));
+                    else if (reqKind == "more_time")
+                        GUILayout.Button("They asked for more time (" +
+                                         MiniJSON.GetString(pendingReq, "new_date") +
+                                         ") — answer in the browser UI or Discord.",
+                                         submitBtnStyle, GUILayout.Height(30));
+                    else
+                        GUILayout.Button("Waiting for the contractor to resolve...", submitBtnStyle, GUILayout.Height(30));
                     GUI.enabled = true;
+
+                    // Changing your mind about a refusal is the one exit from a dispute
+                    // that favours the contractor, so it lives here regardless of which
+                    // request (if any) is outstanding. Same call as approving a fresh
+                    // submission — the server allows it from `disputed` too.
+                    GUILayout.Space(6);
+                    if (GUILayout.Button("(Yes) Accept After All", acceptBtnStyle, GUILayout.Height(30)))
+                        GeneKermanMod.Instance.RunCoroutine(DoReviewContract(cid, true));
                 }
                 else
                 {
                     string cid = MiniJSON.GetString(c, "contract_id");
                     bool botIssued = MiniJSON.GetBool(c, "is_bot_issued");
+                    // One extension request per dispute — the server refuses a second,
+                    // so offering the button would only produce an error. A granted
+                    // extension reopens the contract, and being refused again starts a
+                    // fresh dispute with the allowance restored.
+                    bool moreTimeUsed = MiniJSON.GetBool(c, "more_time_used");
 
                     // "More Time" on a human contract needs a proposed new date.
-                    if (!botIssued)
+                    if (!botIssued && !moreTimeUsed)
                     {
                         if (string.IsNullOrEmpty(disputeDateInput))
                             disputeDateInput = System.DateTime.Now.AddDays(7).ToString("yyyy-MM-dd");
@@ -1352,9 +1509,12 @@ namespace GeneKerman.UI
                         disputeDateInput = GUILayout.TextField(disputeDateInput, GUILayout.Width(86), GUILayout.Height(30));
                     }
 
-                    if (GUILayout.Button("More Time", submitBtnStyle, GUILayout.Height(30)))
-                        GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "more_time", botIssued ? null : disputeDateInput));
-                    GUILayout.Space(6);
+                    if (!moreTimeUsed)
+                    {
+                        if (GUILayout.Button("More Time", submitBtnStyle, GUILayout.Height(30)))
+                            GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "more_time", botIssued ? null : disputeDateInput));
+                        GUILayout.Space(6);
+                    }
                     if (GUILayout.Button("Pay Fine", deleteBtnStyle, GUILayout.Height(30)))
                         GeneKermanMod.Instance.RunCoroutine(DoDispute(cid, "pay_fine", null));
                     GUILayout.Space(6);
@@ -1422,6 +1582,20 @@ namespace GeneKerman.UI
             GUILayout.FlexibleSpace();
             GUILayout.EndHorizontal();
 
+            // A dispute is the one state nothing else ever ends, so the server closes it
+            // on a timer and collects the fine. Both parties get told when, because the
+            // contractor is the one it costs and the issuer is the one it pays.
+            if (status == "disputed")
+            {
+                string autoFine = MiniJSON.GetString(c, "auto_fine_at");
+                if (!string.IsNullOrEmpty(autoFine))
+                {
+                    GUILayout.Space(4);
+                    GUILayout.Label("⏱ Unresolved: fine collected automatically on " +
+                                    FormatLocal(autoFine), labelStyle);
+                }
+            }
+
             // Submission preview — once work has been submitted, either party can pull
             // up the contractor's blueprint render(s) and (for active-vessel / rescue
             // contracts) the orbital telemetry "mission state" image right here, in any
@@ -1435,6 +1609,25 @@ namespace GeneKerman.UI
             }
         }
 
+        /// <summary>
+        /// An API timestamp in the player's own timezone.
+        ///
+        /// The server sends naive UTC (Python's isoformat, no trailing Z), so it has to
+        /// be told that — left to itself DateTime.Parse reads it as local, which on a
+        /// UTC+3 machine shows a deadline three hours later than the one being enforced.
+        /// Falls back to the raw string rather than throwing inside OnGUI.
+        /// </summary>
+        private static string FormatLocal(string iso)
+        {
+            System.DateTime dt;
+            if (System.DateTime.TryParse(iso, System.Globalization.CultureInfo.InvariantCulture,
+                                         System.Globalization.DateTimeStyles.AssumeUniversal |
+                                         System.Globalization.DateTimeStyles.AdjustToUniversal,
+                                         out dt))
+                return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+            return iso;
+        }
+
         private void DrawDetailRow(string label, string value)
         {
             GUILayout.BeginHorizontal();
@@ -1443,7 +1636,12 @@ namespace GeneKerman.UI
             GUILayout.EndHorizontal();
         }
 
-        private Color GetStatusColor(string status)
+        /// <summary>
+        /// Status → dot colour. Internal and static so the uGUI sidebar renders the
+        /// same mapping rather than a second one that drifts; it holds no instance
+        /// state, so there is nothing to share but the switch.
+        /// </summary>
+        internal static Color GetStatusColor(string status)
         {
             switch (status)
             {
@@ -2099,26 +2297,10 @@ namespace GeneKerman.UI
 
             GUILayout.Space(18);
 
-            // UI mode. Classic is the default and stays fully supported: on a single
-            // monitor, or on a Steam Deck in gaming mode, the in-game windows are
-            // strictly better than alt-tabbing to a browser.
-            GUILayout.Label("🖥️ Interface", new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold });
-            GUILayout.Space(4);
-            bool webOn = api.WebUiEnabled;
-            bool newWeb = GUILayout.Toggle(webOn, " Open the interface in my web browser");
-            if (newWeb != webOn)
-            {
-                GeneKermanMod.Instance.SetUiMode(newWeb);
-                SetStatus(newWeb
-                    ? "(Ok) Browser interface enabled — click the toolbar button to open it."
-                    : "(Ok) Classic in-game interface enabled.");
-            }
-            GUILayout.Label(
-                "Serves the interface to your browser from this PC only (127.0.0.1). " +
-                "Nothing is exposed to your network. Best with two monitors or in windowed mode.",
-                labelStyle);
-
-            GUILayout.Space(18);
+            // The interface setting used to live here. It moved to the sidebar's
+            // Settings panel (UI/Gui/Panels/SettingsPanel.cs) when the toolbar button
+            // started opening the sidebar: the switch that decides what that button
+            // does cannot sit behind the window it steers you away from.
 
             // Privacy & data sharing (KSP add-on rule 8.2): a master opt-out reachable
             // from the toolbar in every scene, incl. the Space Center. Turning it off
@@ -2253,7 +2435,7 @@ namespace GeneKerman.UI
 
         // ── Actions ─────────────────────────────────────────────────────────
 
-        private System.Collections.IEnumerator DoSelectMission(int missionId)
+        private System.Collections.IEnumerator DoSelectMission(int missionId, Action<bool, string> onDone = null)
         {
             // Store mission info for contract injection
             Dictionary<string, object> selectedMission = null;
@@ -2272,6 +2454,7 @@ namespace GeneKerman.UI
                 {
                     SetStatus($"(Ok) {MiniJSON.GetString(data, "message", "Mission accepted!")}");
                     RefreshContracts();
+                    onDone?.Invoke(true, MiniJSON.GetString(data, "message", "Mission accepted."));
 
                     // Inject into stock contract system
                     if (GKContractScenario.Instance != null && selectedMission != null)
@@ -2292,11 +2475,12 @@ namespace GeneKerman.UI
                 else
                 {
                     SetStatus($"(No) {err ?? "Failed to select mission."}");
+                    onDone?.Invoke(false, err ?? "Failed to select mission.");
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoAcceptContract(string contractId, string issuerName = "")
+        private System.Collections.IEnumerator DoAcceptContract(string contractId, string issuerName = "", Action<bool, string> onDone = null)
         {
             // Accept only flips the contract to active. The rescue wreck is NOT spawned
             // here anymore — it spawns on demand via the "Spawn stranded vessel" button on
@@ -2309,15 +2493,17 @@ namespace GeneKerman.UI
                 {
                     SetStatus("(Ok) Contract accepted!");
                     RefreshContracts();
+                    onDone?.Invoke(true, "Contract accepted.");
                 }
                 else
                 {
                     SetStatus("(No) Failed to accept contract.");
+                    onDone?.Invoke(false, "Failed to accept contract.");
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals)
+        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals, string builtWithLs = "none", Action<bool, string> onDone = null)
         {
             // Permanent, per-save dedup: if the wreck is already in this save, never
             // spawn a second one. This is persisted in GKContractScenario, so it holds
@@ -2327,17 +2513,22 @@ namespace GeneKerman.UI
                 && GKContractScenario.Instance.HasImportedVessel(contractId))
             {
                 SetStatus("🛟 Stranded vessel already spawned for this contract.");
+                onDone?.Invoke(false, "Already spawned into this save.");
                 yield break;
             }
             // Transient guard against a double-click while the download is in flight.
             if (!string.IsNullOrEmpty(contractId) && !spawnedRescueWrecks.Add(contractId))
+            {
+                onDone?.Invoke(false, "Already spawning — give it a moment.");
                 yield break;
+            }
             string myName = GeneKermanMod.Instance.LinkedUsername;
             yield return GeneKermanMod.Instance.Api.DownloadFile(wreckUrl, (ok, fileData) =>
             {
                 if (!ok || fileData == null)
                 {
                     SetStatus("⚠ Could not download the stranded vessel. Try again.");
+                    onDone?.Invoke(false, "Could not download the stranded vessel. Try again.");
                     return;
                 }
                 string node = CraftDelivery.DecompressToString(fileData);
@@ -2356,22 +2547,27 @@ namespace GeneKerman.UI
                     // failure leaves the contract retryable instead of locked out.
                     GKContractScenario.Instance?.MarkVesselImported(contractId);
 
-                    // Hold the stranded crew immune from life support (frozen via DeepFreeze
-                    // if present, else timestamp-pinned) until the rescuer reaches the wreck.
-                    RescueImmunityGuardian.Register(contractId, VesselTransfer.LastSpawnedPid, rescueKerbals);
+                    // Emergency freeze: the stranded crew are lifted out of the simulation
+                    // (and released by every installed LS mod) until the rescuer reaches the
+                    // wreck, which also gets a ration kit of THIS install's life support in
+                    // case it was built for another mod.
+                    RescueImmunityGuardian.Register(contractId, VesselTransfer.LastSpawnedPid,
+                                                    rescueKerbals, builtWithLs);
                     string dest = target != null ? target.body : "the target";
                     SetStatus($"🛟 Stranded vessel '{name}' is adrift. Find it and bring the crew to {dest}.");
+                    onDone?.Invoke(true, $"'{name}' is adrift. Find it and bring the crew to {dest}.");
                 }
                 else
                 {
                     SetStatus("⚠ Could not spawn. Enter Flight, Space Center, or Tracking Station and try again.");
+                    onDone?.Invoke(false, "Could not spawn. Enter Flight, Space Center, or Tracking Station and try again.");
                 }
             });
             // Always clear the transient guard so a failed attempt can be retried.
             if (!string.IsNullOrEmpty(contractId)) spawnedRescueWrecks.Remove(contractId);
         }
 
-        private System.Collections.IEnumerator DoReviewContract(string contractId, bool approve)
+        private System.Collections.IEnumerator DoReviewContract(string contractId, bool approve, Action<bool, string> onDone = null)
         {
             string body = approve ? "{\"approve\":true}" : "{\"approve\":false}";
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/review", body, (ok, resp, status) =>
@@ -2381,15 +2577,17 @@ namespace GeneKerman.UI
                     SetStatus(approve ? "(Ok) Submission approved!" : "🗑 Submission refused (dispute opened).");
                     openContractId = null;
                     RefreshContracts();
+                    onDone?.Invoke(true, approve ? "Submission approved." : "Submission refused; a dispute is open.");
                 }
                 else
                 {
                     SetStatus("(No) Failed to review submission.");
+                    onDone?.Invoke(false, "Failed to review submission.");
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoDispute(string contractId, string action, string newDate)
+        private System.Collections.IEnumerator DoDispute(string contractId, string action, string newDate, Action<bool, string> onDone = null)
         {
             var body = new Dictionary<string, object> { { "action", action } };
             if (!string.IsNullOrEmpty(newDate)) body["new_date"] = newDate;
@@ -2410,15 +2608,17 @@ namespace GeneKerman.UI
                     openContractId = null;
                     disputeDateInput = "";
                     RefreshContracts();
+                    onDone?.Invoke(true, string.IsNullOrEmpty(msg) ? "Done." : msg);
                 }
                 else
                 {
                     SetStatus("(No) " + (string.IsNullOrEmpty(msg) ? "Action failed." : msg));
+                    onDone?.Invoke(false, string.IsNullOrEmpty(msg) ? "Action failed." : msg);
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoCancelContract(string contractId)
+        private System.Collections.IEnumerator DoCancelContract(string contractId, Action<bool, string> onDone = null)
         {
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/cancel", "{}", (ok, resp, status) =>
             {
@@ -2430,15 +2630,17 @@ namespace GeneKerman.UI
                         EditorPartEnforcer.Instance.ActiveContractId == contractId)
                         EditorPartEnforcer.Instance.StopEnforcing();
                     RefreshContracts();
+                    onDone?.Invoke(true, "Contract cancelled.");
                 }
                 else
                 {
                     SetStatus("(No) Failed to cancel contract.");
+                    onDone?.Invoke(false, "Failed to cancel contract.");
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoGiveUpContract(string contractId)
+        private System.Collections.IEnumerator DoGiveUpContract(string contractId, Action<bool, string> onDone = null)
         {
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/give_up", "{}", (ok, resp, status) =>
             {
@@ -2457,10 +2659,12 @@ namespace GeneKerman.UI
                         EditorPartEnforcer.Instance.ActiveContractId == contractId)
                         EditorPartEnforcer.Instance.StopEnforcing();
                     RefreshContracts();
+                    onDone?.Invoke(true, string.IsNullOrEmpty(msg) ? "Contract given up." : msg);
                 }
                 else
                 {
                     SetStatus("(No) " + (string.IsNullOrEmpty(msg) ? "Failed to give up contract." : msg));
+                    onDone?.Invoke(false, string.IsNullOrEmpty(msg) ? "Failed to give up contract." : msg);
                 }
             });
         }
@@ -2476,11 +2680,14 @@ namespace GeneKerman.UI
         /// The logic itself lives in CraftDelivery.cs, shared with the web bridge — two
         /// copies of a two-round-trip install would drift the moment either changed.
         /// </summary>
-        private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "")
+        private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "", Action<bool, string> onDone = null)
         {
             SetStatus("[+] Fetching craft info...");
-            yield return CraftDelivery.Deliver(contractId, ownerName,
-                (ok, msg) => SetStatus((ok ? "(Ok) " : "(No) ") + msg));
+            yield return CraftDelivery.Deliver(contractId, ownerName, (ok, msg) =>
+            {
+                SetStatus((ok ? "(Ok) " : "(No) ") + msg);
+                onDone?.Invoke(ok, msg);
+            });
         }
 
         // ── Marketplace Tab ─────────────────────────────────────────────────
@@ -2839,83 +3046,19 @@ namespace GeneKerman.UI
 
         private System.Collections.IEnumerator FetchBlueprints(string contractId)
         {
-            string resp = null;
-            bool ok = false;
-            yield return GeneKermanMod.Instance.Api.Get(
-                $"/api/v1/contracts/{contractId}/submission", (s, body, status) =>
-                {
-                    ok = s;
-                    resp = body;
-                });
-
-            if (!ok || string.IsNullOrEmpty(resp))
+            // The fetch/parse/download lives in SubmissionPreviewLoader so the uGUI
+            // sidebar shows the same images without a second copy of the
+            // telemetry_urls/telemetry_url fallback. This window keeps its own popup
+            // state and its own ownership of the textures.
+            yield return SubmissionPreviewLoader.Fetch(contractId, preview =>
             {
+                blueprintVesselName = preview.VesselName;
+                blueprintTextures.AddRange(preview.Blueprints);
+                telemetryTextures.AddRange(preview.Telemetry);
+
                 loadingBlueprints = false;
-                blueprintStatus = "❌ Could not load the submission.";
-                yield break;
-            }
-
-            var data = MiniJSON.DeserializeDict(resp);
-            blueprintVesselName = MiniJSON.GetString(data, "vessel_name", "");
-            var images = MiniJSON.GetList(data, "images");
-
-            // Orbital telemetry diagrams (active-vessel / rescue submissions, one per
-            // craft for multi-vessel submissions). Downloaded into their own textures and
-            // shown in a separate window — they're not blueprints, so they don't belong in
-            // the blueprint scroll list.
-            var telemetryUrls = new List<string>();
-            var telemetryList = MiniJSON.GetList(data, "telemetry_urls");
-            if (telemetryList != null)
-            {
-                foreach (var t in telemetryList)
-                {
-                    string u = t as string;
-                    if (!string.IsNullOrEmpty(u)) telemetryUrls.Add(u);
-                }
-            }
-            if (telemetryUrls.Count == 0)
-            {
-                string single = MiniJSON.GetString(data, "telemetry_url", "");
-                if (!string.IsNullOrEmpty(single)) telemetryUrls.Add(single);
-            }
-            foreach (var turl in telemetryUrls)
-            {
-                yield return GeneKermanMod.Instance.Api.DownloadFile(turl, (dok, bytes) =>
-                {
-                    if (!dok || bytes == null) return;
-                    var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
-                    if (tex.LoadImage(bytes))
-                        telemetryTextures.Add(tex);
-                });
-            }
-
-            if (images == null || images.Count == 0)
-            {
-                loadingBlueprints = false;
-                blueprintStatus = "No blueprint images were submitted for this contract.";
-                yield break;
-            }
-
-            foreach (var obj in images)
-            {
-                var entry = obj as Dictionary<string, object>;
-                if (entry == null) continue;
-                string url = MiniJSON.GetString(entry, "url", null);
-                if (string.IsNullOrEmpty(url)) continue;
-
-                yield return GeneKermanMod.Instance.Api.DownloadFile(url, (dok, bytes) =>
-                {
-                    if (!dok || bytes == null) return;
-                    var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
-                    if (tex.LoadImage(bytes))
-                        blueprintTextures.Add(tex);
-                });
-            }
-
-            loadingBlueprints = false;
-            blueprintStatus = blueprintTextures.Count > 0
-                ? ""
-                : "❌ Failed to load the submitted images.";
+                blueprintStatus = preview.Error ?? "";
+            });
         }
 
         private void CloseBlueprintPreview()
@@ -2929,7 +3072,7 @@ namespace GeneKerman.UI
             blueprintResizingBR = false;
             blueprintResizingTL = false;
             foreach (var tex in blueprintTextures)
-                if (tex != null) Object.Destroy(tex);
+                if (tex != null) UnityEngine.Object.Destroy(tex);
             blueprintTextures.Clear();
             // Telemetry belongs to this same submission — tear it down too so a
             // stale diagram never lingers when a different contract is opened.
@@ -3041,7 +3184,7 @@ namespace GeneKerman.UI
             telemetryResizingBR = false;
             telemetryResizingTL = false;
             foreach (var tex in telemetryTextures)
-                if (tex != null) Object.Destroy(tex);
+                if (tex != null) UnityEngine.Object.Destroy(tex);
             telemetryTextures.Clear();
         }
 

@@ -46,6 +46,21 @@ namespace GeneKerman
             catch { return null; }
         }
 
+        /// <summary>Resolve a type by full name from whichever of several candidate
+        /// assemblies holds it. Kerbalism needs this: it ships as KerbalismBootstrap.dll
+        /// and side-loads the real "Kerbalism" assembly from a .kbin during startup, so
+        /// which name carries the types depends on when we look.</summary>
+        public static Type FindTypeAny(string fullTypeName, params string[] assemblyNames)
+        {
+            if (assemblyNames == null) return null;
+            foreach (var name in assemblyNames)
+            {
+                Type t = FindType(name, fullTypeName);
+                if (t != null) return t;
+            }
+            return null;
+        }
+
         /// <summary>Value of a static property/field by name on a type, or null.</summary>
         public static object GetStatic(Type type, string memberName)
         {
@@ -117,6 +132,47 @@ namespace GeneKerman
             }
         }
 
+        /// <summary>Invoke a static method by name (first overload matching arg count),
+        /// returning its result or null. Best-effort; never throws.</summary>
+        public static object InvokeStatic(Type type, string methodName, params object[] args)
+        {
+            if (type == null) return null;
+            const BindingFlags F = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
+            try
+            {
+                int n = args?.Length ?? 0;
+                MethodInfo mi = type.GetMethods(F)
+                    .FirstOrDefault(m => m.Name == methodName && m.GetParameters().Length == n);
+                return mi?.Invoke(null, args);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] LsReflect.InvokeStatic {methodName} failed: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>Every value in a dictionary-like container, or an empty list. Used to
+        /// walk per-kerbal rule state without knowing the mod's value type.</summary>
+        public static System.Collections.Generic.List<object> Values(object container)
+        {
+            var result = new System.Collections.Generic.List<object>();
+            if (container == null) return result;
+            try
+            {
+                if (container is System.Collections.IDictionary d)
+                {
+                    foreach (object v in d.Values) result.Add(v);
+                    return result;
+                }
+                object values = GetMember(container, "Values");
+                if (values is System.Collections.IEnumerable e)
+                    foreach (object v in e) result.Add(v);
+            }
+            catch { /* ignore */ }
+            return result;
+        }
+
         /// <summary>Look up a value by string key in a dictionary-like container. Handles
         /// a plain Dictionary (via IDictionary) and KSP's DictionaryValueList (via its
         /// ContainsKey(string) + string indexer). Returns null on miss.</summary>
@@ -159,13 +215,24 @@ namespace GeneKerman
             catch { return 0d; }
         }
 
+        // Every status, so a kerbal parked by the emergency freeze (rosterStatus = Dead,
+        // which keeps KSP's respawn timer off it) is still findable. The plain Crew list
+        // would miss exactly the kerbals a thaw needs to look up.
+        private static readonly ProtoCrewMember.RosterStatus[] AllStatuses =
+        {
+            ProtoCrewMember.RosterStatus.Assigned,
+            ProtoCrewMember.RosterStatus.Available,
+            ProtoCrewMember.RosterStatus.Dead,
+            ProtoCrewMember.RosterStatus.Missing,
+        };
+
         /// <summary>Locate a ProtoCrewMember in the current game's roster by name.</summary>
         public static ProtoCrewMember FindCrew(string kerbalName)
         {
             if (string.IsNullOrEmpty(kerbalName) || HighLogic.CurrentGame == null) return null;
             try
             {
-                foreach (var pcm in HighLogic.CurrentGame.CrewRoster.Crew)
+                foreach (var pcm in HighLogic.CurrentGame.CrewRoster.Kerbals(AllStatuses))
                     if (pcm != null && pcm.name == kerbalName) return pcm;
                 foreach (var pcm in HighLogic.CurrentGame.CrewRoster.Tourist)
                     if (pcm != null && pcm.name == kerbalName) return pcm;

@@ -1,21 +1,28 @@
 /*
- * RescueImmunityGuardian.cs – Keeps stranded rescue kerbals alive until rescued, by
- * putting them in "stasis": the crew are removed from the wreck (and the simulation)
- * while it drifts, then re-boarded when a rescuer approaches. Because the kerbals aren't
- * aboard any vessel while stranded, NO life-support mod consumes them — this works
- * uniformly for USI-LS, TAC-LS, Snacks and Kerbalism, with no per-mod hacks and no
- * DeepFreeze dependency.
+ * RescueImmunityGuardian.cs – The emergency freeze: keeps stranded rescue kerbals alive
+ * until rescued, however long that takes and whichever life-support mod either player
+ * runs. Three parts, all of which have to hold for a cross-mod rescue to work:
  *
- *   • Stash (on spawn): remove each non-frozen rescue kerbal from the wreck, remembering
- *     which part/seat they were in, and park them (rosterStatus = Dead so KSP's respawn
- *     timer can't revive them behind our back). Crew already frozen in a real DeepFreeze
+ *   • Freeze (on spawn): each non-frozen rescue kerbal is removed from the wreck —
+ *     remembering which part/seat they were in — and parked (rosterStatus = Dead, so
+ *     KSP's respawn timer can't revive them behind our back). A kerbal that isn't aboard
+ *     any vessel is consumed by nothing, so this holds uniformly for USI-LS, TAC-LS,
+ *     Snacks and Kerbalism with no per-mod hacks. LsFreeze additionally tells each
+ *     installed LS mod to let go of them. Crew already frozen in a real DeepFreeze
  *     cryopod are left alone — they're inert and the player thaws them at the pod.
- *   • Revive (on contact / button): when the active vessel comes within REVIVE_RADIUS of
- *     the wreck, put the crew back into their parts and mark them Assigned. We do this
- *     while the wreck is still UNLOADED whenever possible (editing the ProtoVessel), so
- *     KSP seats them naturally when it loads; a loaded re-seat is the fallback.
+ *   • Rations (on spawn): the wreck is stocked with a few days of the RESCUER's
+ *     life-support resources (LsRations), because a craft provisioned for someone else's
+ *     LS mod carries nothing this save recognises.
+ *   • Thaw (on contact / button): when the active vessel comes within ReviveRadiusMeters
+ *     the crew go back into their parts, marked Assigned, and LsFreeze hands them to the
+ *     local LS mod with a clean slate — without that reset, a mod that reconstructs
+ *     hunger from a "last meal" timestamp kills them the instant they board. We act while
+ *     the wreck is still UNLOADED whenever possible (editing the ProtoVessel), so KSP
+ *     seats them naturally when it loads; a loaded re-seat is the fallback.
  *
- * Records persist in GKContractScenario so stasis survives a restart mid-rescue.
+ * Records persist in GKContractScenario so a freeze survives a restart mid-rescue. Every
+ * path that drops a record thaws first, including the one where the wreck is already
+ * gone: a kerbal frozen and never thawed would stay exempt from life support forever.
  * Everything is best-effort and guarded — a failure never throws into KSP.
  */
 
@@ -33,17 +40,23 @@ namespace GeneKerman
         public uint PartFlightId;
     }
 
-    /// <summary>One spawned wreck's stasis crew, persisted in the contract scenario.</summary>
+    /// <summary>One spawned wreck's frozen crew, persisted in the contract scenario.</summary>
     public class RescueImmunityRecord
     {
         public string ContractId;
         public string VesselPid;          // GUID string of the spawned wreck
         public List<StasisCrew> Crew = new List<StasisCrew>();
 
+        /// <summary>LS mod the wreck was built/provisioned for on the issuer's client
+        /// (usi|tac|snacks|kerbalism|none) — shown to the rescuer so a mismatch with their
+        /// own install is visible before they set off.</summary>
+        public string BuiltWithLs = "none";
+
         public void Save(ConfigNode node)
         {
             node.AddValue("contractId", ContractId ?? "");
             node.AddValue("vesselPid", VesselPid ?? "");
+            node.AddValue("builtWithLs", BuiltWithLs ?? "none");
             foreach (var c in (Crew ?? new List<StasisCrew>()))
             {
                 ConfigNode cn = node.AddNode("CREW");
@@ -59,6 +72,8 @@ namespace GeneKerman
             {
                 ContractId = node.GetValue("contractId") ?? "",
                 VesselPid = node.GetValue("vesselPid") ?? "",
+                // Absent in records written before the LS flag existed.
+                BuiltWithLs = node.GetValue("builtWithLs") ?? "none",
             };
             foreach (ConfigNode cn in node.GetNodes("CREW"))
             {
@@ -82,11 +97,13 @@ namespace GeneKerman
         private const float TickInterval = 1.0f;
         private static float _lastTick;
 
-        // ── Stash (on spawn) ─────────────────────────────────────────────────
+        // ── Freeze (on spawn) ────────────────────────────────────────────────
 
-        /// <summary>Put a freshly spawned wreck's crew into stasis. Already-frozen crew
-        /// (DeepFreeze cryopod) are left alone. No-op if no crew need stashing.</summary>
-        public static void Register(string contractId, string vesselPid, IEnumerable<string> kerbalNames)
+        /// <summary>Put a freshly spawned wreck's crew into emergency freeze and stow an
+        /// emergency ration kit aboard. Already-frozen crew (DeepFreeze cryopod) are left
+        /// alone. No-op if the player turned the freeze off, or no crew need freezing.</summary>
+        public static void Register(string contractId, string vesselPid,
+                                    IEnumerable<string> kerbalNames, string builtWithLs = "none")
         {
             var names = (kerbalNames ?? Enumerable.Empty<string>())
                 .Where(n => !string.IsNullOrEmpty(n)).Distinct().ToList();
@@ -95,62 +112,102 @@ namespace GeneKerman
             Vessel wreck = FindVesselByPid(vesselPid);
             if (wreck == null)
             {
-                Debug.LogWarning($"[GeneKerman] RescueStasis: wreck {vesselPid} not found — cannot stash crew.");
+                Debug.LogWarning($"[GeneKerman] RescueFreeze: wreck {vesselPid} not found — cannot freeze crew.");
                 return;
             }
 
-            var stashed = new List<StasisCrew>();
+            // Rations are stowed whether or not the freeze itself runs: a player who
+            // turned the freeze off still gets a craft carrying an LS mod they may not run.
+            string rations = LsRations.Provision(wreck, names.Count);
+
+            if (!FreezeEnabled)
+            {
+                Debug.Log("[GeneKerman] RescueFreeze: disabled in settings — crew left aboard the wreck.");
+                if (rations != null) PersistIfPossible(wreck);
+                return;
+            }
+
+            var frozen = new List<StasisCrew>();
             foreach (var name in names)
             {
                 if (LifeSupportRegistry.IsFrozen(name))
                 {
-                    Debug.Log($"[GeneKerman] RescueStasis: {name} is cryo-frozen — left as-is.");
+                    Debug.Log($"[GeneKerman] RescueFreeze: {name} is cryo-frozen — left as-is.");
                     continue;
                 }
                 uint partId;
                 if (RemoveCrewFromWreck(wreck, name, out partId))
-                    stashed.Add(new StasisCrew { Name = name, PartFlightId = partId });
+                    frozen.Add(new StasisCrew { Name = name, PartFlightId = partId });
             }
 
-            if (stashed.Count == 0) return;
+            if (frozen.Count == 0)
+            {
+                // Nobody needed freezing (all already in cryopods) — but a ration kit may
+                // still have been stowed, and that change deserves the same save.
+                if (rations != null) PersistIfPossible(wreck);
+                return;
+            }
+
+            // Out of the simulation AND released by every installed LS mod — the second
+            // half is what stops a mod aging them from a stored timestamp.
+            LsFreeze.Freeze(frozen.Select(c => c.Name));
 
             RefreshLoadedCrew(wreck);
             PersistIfPossible(wreck);
 
             GKContractScenario.Instance?.AddImmunity(new RescueImmunityRecord
             {
-                ContractId = contractId, VesselPid = vesselPid, Crew = stashed,
+                ContractId = contractId, VesselPid = vesselPid, Crew = frozen,
+                BuiltWithLs = string.IsNullOrEmpty(builtWithLs) ? "none" : builtWithLs.ToLowerInvariant(),
             });
-            Debug.Log($"[GeneKerman] RescueStasis: {stashed.Count} kerbal(s) put in stasis for contract {contractId}.");
+            Debug.Log($"[GeneKerman] RescueFreeze: {frozen.Count} kerbal(s) frozen for contract {contractId} " +
+                      $"(built for {builtWithLs}, this install runs {LsFreeze.LocalLsKey}).");
         }
+
+        /// <summary>Player-facing kill switch (settings.cfg `enableEmergencyFreeze`). With
+        /// it off the crew stay seated and their life support runs normally.</summary>
+        private static bool FreezeEnabled =>
+            GeneKermanMod.Instance?.Api == null || GeneKermanMod.Instance.Api.EmergencyFreezeEnabled;
 
         // ── Revive ───────────────────────────────────────────────────────────
 
-        /// <summary>Manually revive a contract's stasis crew (the in-UI button). Returns
-        /// true if a record was found and revived.</summary>
+        /// <summary>Manually thaw a contract's frozen crew (the in-UI button). Returns
+        /// true if a record was found and thawed.</summary>
         public static bool ReviveContract(string contractId)
         {
             var scenario = GKContractScenario.Instance;
             var rec = scenario?.Immunities?.FirstOrDefault(r => r.ContractId == contractId);
             if (rec == null) return false;
-            Revive(rec);
+            Revive(rec, manual: true);
             return true;
         }
 
-        /// <summary>True when a contract still has crew waiting in stasis.</summary>
+        /// <summary>True when a contract still has crew waiting in emergency freeze.</summary>
         public static bool HasStasisCrew(string contractId)
         {
             var scenario = GKContractScenario.Instance;
             return scenario?.Immunities?.Any(r => r.ContractId == contractId) ?? false;
         }
 
-        private static void Revive(RescueImmunityRecord rec)
+        /// <summary>The frozen-crew record for a contract, for UI that wants to describe it
+        /// (how many, what LS the wreck was built for). Null when nobody is frozen.</summary>
+        public static RescueImmunityRecord GetRecord(string contractId)
         {
+            var scenario = GKContractScenario.Instance;
+            return scenario?.Immunities?.FirstOrDefault(r => r.ContractId == contractId);
+        }
+
+        private static void Revive(RescueImmunityRecord rec, bool manual = false)
+        {
+            var names = rec.Crew.Select(c => c.Name).ToList();
             Vessel wreck = FindVesselByPid(rec.VesselPid);
             if (wreck == null)
             {
-                // Wreck is gone (recovered/destroyed) — nothing to board them onto. Free the
-                // record; the kerbals stay parked (the rescue can no longer complete anyway).
+                // Wreck is gone (recovered/destroyed) — nothing to board them onto. Thaw
+                // them anyway before dropping the record: leaving a kerbal suspended in an
+                // LS mod's books would exempt them from life support for the rest of the
+                // save. Then free the record; the rescue can no longer complete.
+                LsFreeze.Thaw(names);
                 GKContractScenario.Instance?.RemoveImmunity(rec.ContractId);
                 return;
             }
@@ -159,11 +216,33 @@ namespace GeneKerman
             foreach (var c in rec.Crew)
                 if (AddCrewToWreck(wreck, c.Name, c.PartFlightId)) revived++;
 
+            // Hand them back to the local LS mod with a clean slate, and make sure the
+            // wreck is carrying enough of that mod's resources to keep them alive while
+            // the rescuer closes the remaining distance.
+            LsFreeze.Thaw(names);
+            string rations = LsRations.Provision(wreck, rec.Crew.Count);
+
             RefreshLoadedCrew(wreck);
             PersistIfPossible(wreck);
             GKContractScenario.Instance?.RemoveImmunity(rec.ContractId);
-            Debug.Log($"[GeneKerman] RescueStasis: revived {revived}/{rec.Crew.Count} kerbal(s) " +
+            Debug.Log($"[GeneKerman] RescueFreeze: thawed {revived}/{rec.Crew.Count} kerbal(s) " +
                       $"for contract {rec.ContractId}.");
+
+            if (revived > 0 && !manual) Announce(revived, rations);
+        }
+
+        /// <summary>Tell the player the crew woke up — an automatic thaw happens while they
+        /// are flying an approach and would otherwise be invisible.</summary>
+        private static void Announce(int revived, string rations)
+        {
+            try
+            {
+                string body = rations == null
+                    ? $"{revived} kerbal(s) are back aboard the stranded craft."
+                    : $"{revived} kerbal(s) are back aboard, with {rations} stowed aboard.";
+                GeneKermanMod.Instance?.ShowNotification("🧊 Rescue crew thawed", body);
+            }
+            catch { /* a notification is never worth an exception */ }
         }
 
         // ── Tick (approach detection) ────────────────────────────────────────
@@ -179,8 +258,9 @@ namespace GeneKerman
             foreach (var rec in records.ToList())
             {
                 Vessel wreck = FindVesselByPid(rec.VesselPid);
-                if (wreck == null) { scenario.RemoveImmunity(rec.ContractId); continue; }
-                if (RescuerInRange(wreck)) Revive(rec);
+                // Both branches go through Revive: a vanished wreck still has to release
+                // its crew from every LS mod's books before the record is dropped.
+                if (wreck == null || RescuerInRange(wreck)) Revive(rec);
             }
         }
 

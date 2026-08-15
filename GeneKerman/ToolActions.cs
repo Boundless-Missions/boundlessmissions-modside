@@ -174,6 +174,128 @@ namespace GeneKerman
             onDone(ok, message ?? "Failed to send.");
         }
 
+        // ── Craft state ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// What the Tools screens need to know about the running game: which craft is
+        /// open in the editor, whether it has ever been saved (nothing can be sent or
+        /// exported until it has — there is no file to read), and what is being flown.
+        ///
+        /// Read on the main thread only. Every caller already is one: the bridge goes
+        /// through MainThreadQueue, the sidebar runs in Update.
+        /// </summary>
+        public struct CraftState
+        {
+            public string EditorCraft;
+            public string EditorType;
+            public int EditorParts;
+            /// <summary>The saved .craft on disk. Empty when the craft is unsaved.</summary>
+            public string EditorPath;
+            public string ActiveVessel;
+
+            public bool EditorSaved => !string.IsNullOrEmpty(EditorPath);
+
+            /// <summary>
+            /// "vessel", "craft", or null when there is nothing to send. A flying
+            /// vessel goes as a live vessel, crew and all; otherwise a saved editor
+            /// craft goes as a blueprint. All three front ends apply this same rule.
+            /// </summary>
+            public string SendKind =>
+                !string.IsNullOrEmpty(ActiveVessel) ? "vessel"
+                : (!string.IsNullOrEmpty(EditorCraft) && EditorSaved) ? "craft"
+                : null;
+        }
+
+        public static CraftState ReadCraftState()
+        {
+            var state = new CraftState
+            {
+                EditorCraft = "",
+                EditorType = "",
+                EditorPath = "",
+                ActiveVessel = "",
+            };
+
+            try
+            {
+                var ship = EditorLogic.fetch?.ship;
+                if (ship != null)
+                {
+                    state.EditorCraft = ship.shipName ?? "Untitled";
+                    state.EditorParts = ship.parts?.Count ?? 0;
+                    state.EditorType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
+                    state.EditorPath = FindSavedCraftPath(state.EditorCraft, state.EditorType);
+                }
+            }
+            catch (Exception) { /* not in the editor */ }
+
+            try
+            {
+                state.ActiveVessel = FlightGlobals.ActiveVessel != null
+                    ? FlightGlobals.ActiveVessel.vesselName : "";
+            }
+            catch (Exception) { }
+
+            return state;
+        }
+
+        /// <summary>Mirrors MainWindow.CaptureEditorCraft's lookup: save folder first, then stock.</summary>
+        public static string FindSavedCraftPath(string name, string type)
+        {
+            try
+            {
+                string saveFolder = HighLogic.SaveFolder ?? "default";
+                string p = Path.Combine(KSPUtil.ApplicationRootPath, "saves", saveFolder,
+                                        "Ships", type, name + ".craft");
+                if (File.Exists(p)) return p;
+
+                p = Path.Combine(KSPUtil.ApplicationRootPath, "Ships", type, name + ".craft");
+                if (File.Exists(p)) return p;
+            }
+            catch (Exception) { }
+            return "";
+        }
+
+        /// <summary>
+        /// Export whatever is open in the editor. The path is resolved here rather
+        /// than passed in: a filesystem path must never arrive from a UI, least of
+        /// all from a page served over HTTP.
+        /// </summary>
+        public static bool ExportCurrentCraft(out string message)
+        {
+            var state = ReadCraftState();
+            if (string.IsNullOrEmpty(state.EditorCraft))
+            {
+                message = "Open a craft in the VAB or SPH first.";
+                return false;
+            }
+            return ExportFlagCraft(state.EditorPath, state.EditorCraft, out message);
+        }
+
+        /// <summary>
+        /// Quicksend the current vessel or editor craft. Same reasoning as
+        /// <see cref="ExportCurrentCraft"/>: the caller names the recipient and the
+        /// kind, never a path.
+        /// </summary>
+        public static IEnumerator QuicksendCurrent(string recipientId, string recipientName,
+                                                   string kind, Action<bool, string> onDone)
+        {
+            string path = "", name = "";
+            if (kind == "craft")
+            {
+                var state = ReadCraftState();
+                if (string.IsNullOrEmpty(state.EditorCraft))
+                {
+                    onDone(false, "Open a craft in the VAB or SPH first.");
+                    yield break;
+                }
+                path = state.EditorPath;
+                name = state.EditorCraft;
+            }
+
+            yield return Quicksend(recipientId, recipientName, kind, path, name, onDone);
+        }
+
         // ── Guards ──────────────────────────────────────────────────────────
 
         /// <summary>

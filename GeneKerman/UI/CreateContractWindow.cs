@@ -63,13 +63,15 @@ namespace GeneKerman.UI
         private string durationText = "24";
 
         // Rescue setup state
-        private int rescueMode = 0; // 0 = orbit (Ap/Pe), 1 = surface (Lat/Lon)
+        private int rescueMode = 0;     // 0 = orbit (Ap/Pe), 1 = surface (Lat/Lon) — where
+        private int rescueRecovery = 0; // 0 = crew only, 1 = crew + the vessel — what
         private readonly List<string> bodyNames = new List<string>();
         private readonly List<bool> bodyModded = new List<bool>();
         private int bodyIndex = -1;
         private Vector2 bodyScrollPos;
         private string apText = "100", peText = "100", marginAltText = "10";
         private string latText = "0", lonText = "0", marginPosText = "1";
+        private string minDvText = "0";
         private readonly List<string> rescueCrew = new List<string>();
 
         // Status
@@ -597,6 +599,22 @@ namespace GeneKerman.UI
                 GUILayout.Label($"  • {currentUserName}'s {k}", valueStyle);
 
             GUILayout.Space(6);
+
+            // What has to come back. Crew-only is the ordinary rescue; "vessel" turns it
+            // into a salvage — the rescuer has to tow or fly the wreck home too, which is
+            // a much harder job and should be priced like one.
+            GUILayout.Label("What must come back?", labelStyle);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Toggle(rescueRecovery == 0, " Crew only", checkboxStyle)) rescueRecovery = 0;
+            GUILayout.Space(16);
+            if (GUILayout.Toggle(rescueRecovery == 1, " Crew + this vessel", checkboxStyle)) rescueRecovery = 1;
+            GUILayout.EndHorizontal();
+            GUILayout.Label(rescueRecovery == 1
+                ? $"They must bring this craft home too (at least " +
+                  $"{ContractCreation.WreckCoverageRequired * 100:F0}% of its parts), not just the kerbals."
+                : "They may strip or abandon this craft — only the kerbals have to arrive.", labelStyle);
+
+            GUILayout.Space(6);
             GUILayout.Label("Deliver the rescued crew to:", labelStyle);
 
             // Body selector
@@ -635,6 +653,11 @@ namespace GeneKerman.UI
                 DrawNumberRow("Longitude (°):", ref lonText);
                 DrawNumberRow($"Margin (°, min {ContractCreation.MinMarginSurfaceDeg}):", ref marginPosText);
             }
+
+            GUILayout.Space(4);
+            DrawNumberRow("Δv they must have left (m/s, 0 = any):", ref minDvText);
+            GUILayout.Label("Checked on the craft that delivers the crew, so they're not " +
+                            "dropped somewhere they can't leave.", labelStyle);
 
             GUILayout.Space(4);
             GUILayout.Label("Part restriction: auto (your active modlist).", labelStyle);
@@ -694,6 +717,13 @@ namespace GeneKerman.UI
                 if (bodyIndex < 0 || bodyIndex >= bodyNames.Count) { Fail("Pick a target body."); return; }
                 req.RescueBody = bodyNames[bodyIndex];
                 req.RescueMode = rescueMode == 0 ? "orbit" : "surface";
+                req.RescueRecovery = rescueRecovery == 1
+                    ? ContractCreation.RecoveryVessel : ContractCreation.RecoveryCrew;
+
+                double minDv;
+                if (!TryParseInv(minDvText, out minDv) || minDv < 0)
+                { Fail("Enter a valid Δv requirement in m/s (0 for none)."); return; }
+                req.MinDvMs = minDv;
 
                 if (rescueMode == 0)
                 {

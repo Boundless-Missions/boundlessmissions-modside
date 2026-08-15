@@ -1,9 +1,13 @@
 /*
  * SnacksAdapter.cs – Snacks! continued (assembly "SnacksUtils", namespace "Snacks").
  *
- * Detection + endurance only (CONFIRMED against the installed SnacksUtils.dll — note the
- * assembly is "SnacksUtils", not "Snacks"; Snacks.SnacksScenario.Instance exists).
- * Rescue immunity is handled by RescueImmunityGuardian (stasis), not here.
+ * CONFIRMED against the installed SnacksUtils.dll (the assembly is "SnacksUtils", not
+ * "Snacks"): Snacks.SnacksScenario.Instance → AstronautData GetAstronautData(ProtoCrewMember),
+ * whose lastUpdated is the UT Snacks measures the next meal from.
+ *
+ * AstronautData is a reference type held by the scenario, so writing lastUpdated on the
+ * fetched instance is the update — there's nothing to store back. Freeze and thaw both
+ * pin it to now, for the same reason as TAC.
  */
 
 using System.Collections.Generic;
@@ -11,40 +15,40 @@ using UnityEngine;
 
 namespace GeneKerman
 {
-    public class SnacksAdapter : ILifeSupportAdapter
+    public class SnacksAdapter : LsAdapterBase
     {
-        public string ModKey => "snacks";
-        public string DisplayName => "Snacks";
-        public bool IsConsumptionLs => true;
-        public string[] ResourceNames => new[] { "Snacks" };
+        public override string ModKey => "snacks";
+        public override string DisplayName => "Snacks";
+        public override string[] ResourceNames => new[] { "Snacks" };
 
-        // Snacks default: 1 snack/meal × 3 meals/day = 3 snacks per kerbal per day.
+        // Snacks default: 1 snack/meal × 3 meals/day.
         private const double SnacksPerDay = 3.0;
 
-        private bool _checked;
-        private bool _ok;
+        public override IDictionary<string, double> DailyNeedPerKerbal =>
+            new Dictionary<string, double> { { "Snacks", SnacksPerDay } };
 
-        public bool IsInstalled
+        private static object Scenario =>
+            LsReflect.GetStatic(LsReflect.FindType("SnacksUtils", "Snacks.SnacksScenario"), "Instance");
+
+        protected override bool Detect() => Scenario != null;
+
+        public override void SuspendKerbal(string kerbalName) => PinToNow(kerbalName);
+
+        public override void ResumeKerbal(string kerbalName)
         {
-            get
-            {
-                if (!_checked)
-                {
-                    _checked = true;
-                    var t = LsReflect.FindType("SnacksUtils", "Snacks.SnacksScenario");
-                    _ok = LsReflect.GetStatic(t, "Instance") != null;
-                    if (_ok) Debug.Log("[GeneKerman] Snacks detected.");
-                }
-                return _ok;
-            }
+            if (PinToNow(kerbalName))
+                Debug.Log($"[GeneKerman] Snacks: reset meal clock for {kerbalName}.");
         }
 
-        public double EnduranceDaysPerKerbal(IDictionary<string, double> amounts)
+        private bool PinToNow(string kerbalName)
         {
-            if (amounts == null) return 0;
-            double snacks;
-            if (!amounts.TryGetValue("Snacks", out snacks) || snacks <= 0) return 0;
-            return SnacksPerDay > 0 ? snacks / SnacksPerDay : 0;
+            if (!IsInstalled || string.IsNullOrEmpty(kerbalName)) return false;
+            ProtoCrewMember pcm = LsReflect.FindCrew(kerbalName);
+            if (pcm == null) return false;
+
+            object data = LsReflect.Invoke(Scenario, "GetAstronautData", pcm);
+            if (data == null) return false;
+            return LsReflect.SetMember(data, "lastUpdated", LsReflect.Now());
         }
     }
 }

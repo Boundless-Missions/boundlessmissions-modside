@@ -75,6 +75,11 @@ namespace GeneKerman
         private Web.LocalServer webServer;
         private UI.WebUiWindow webUiWindow;
 
+        // In-game uGUI sidebar (UI/Gui/). Additive: it does not replace the IMGUI
+        // windows or the browser UI, and it draws on its own Canvas rather than in
+        // OnGUI — which is why it needs its own hide/scene/teardown handling below.
+        private UI.Gui.SidebarController sidebar;
+
         // Device binding: set while we're blocked on an unrecognized-device challenge.
         private bool deviceGateActive;
         private string deviceGateChallenge;
@@ -176,6 +181,21 @@ namespace GeneKerman
             };
             checkpointDetector.Register();
 
+            // Build the sidebar canvas once. Parented to this (DontDestroyOnLoad)
+            // GameObject, so the hierarchy survives every scene change and only its
+            // textures need regenerating — see SidebarController.OnSceneChange.
+            sidebar = new UI.Gui.SidebarController();
+            sidebar.Build(transform);
+            // Order mirrors the browser UI's tab order so the two read the same.
+            sidebar.AddPanel(new UI.Gui.ProfilePanel());
+            sidebar.AddPanel(new UI.Gui.MissionsPanel());
+            sidebar.AddPanel(new UI.Gui.ContractsPanel());
+            sidebar.AddPanel(new UI.Gui.NotificationsPanel());
+            sidebar.AddPanel(new UI.Gui.ToolsPanel());
+            sidebar.AddPanel(new UI.Gui.SettingsPanel());
+            if (Api.GuiGalleryEnabled)
+                sidebar.AddPanel(new UI.Gui.GalleryPanel());
+
             // Detect installed life-support / DeepFreeze mods once (drives rescue-kerbal
             // immunity and the Kerbalism rescue gate). Reflection-only; safe if none present.
             LifeSupportRegistry.LogDetected();
@@ -272,12 +292,20 @@ namespace GeneKerman
             webServer = null;
         }
 
-        private void OnHideUI() => uiHidden = true;
-        private void OnShowUI() => uiHidden = false;
+        // The sidebar gets none of `uiHidden` for free: it renders on a Canvas, and
+        // UIMasterController does not govern our Canvas any more than it governs
+        // OnGUI. Without these two lines it appears in every screenshot, cinematic
+        // capture and F2 press.
+        private void OnHideUI() { uiHidden = true; sidebar?.SetHidden(true); }
+        private void OnShowUI() { uiHidden = false; sidebar?.SetHidden(false); }
 
         private void OnSceneChange(GameScenes scene)
         {
             UI.GKSkin.Invalidate();
+            // Same problem GKSkin solves, different resource: Unity destroys the
+            // sidebar's textures on a scene load. The hierarchy survives, so this
+            // regenerates sprites and re-binds them rather than rebuilding the tree.
+            sidebar?.OnSceneChange();
             // Drop any in-flight prompt and clear SOI/proximity state so milestones
             // don't carry over (or re-fire) across a scene load.
             checkpointPrompt?.Dismiss(false);
@@ -291,6 +319,11 @@ namespace GeneKerman
             // otherwise a request thread blocks for the full 30s timeout, and the page
             // cannot even ask *why* it is unavailable.
             webServer?.Pump();
+
+            // Hoisted for the same reason as Pump: the sidebar exists in every
+            // scene and for unlinked clients too — its own gate cascade decides
+            // whether it draws, and its slide/pulse must keep running either way.
+            sidebar?.Tick();
 
             if (!initialized || !Api.IsLinked) return;
 
@@ -380,6 +413,15 @@ namespace GeneKerman
             while (notifSocket.TryDequeue(out var notif))
                 HandleIncomingNotification(notif);
 
+            // Commands from the website. Peek-then-drop: one that can't be shown right
+            // now (a time-critical prompt is already up) stays queued and is retried
+            // next frame, until the socket's 30 s TTL discards it.
+            while (notifSocket.TryPeekCommand(out var cmd))
+            {
+                if (!HandleWebCommand(cmd)) break;
+                notifSocket.DropCommand();
+            }
+
             // Fallback polling — only when the live socket is down.
             if (!notifSocket.IsConnected &&
                 Time.realtimeSinceStartup - lastNotificationCheck > notificationInterval)
@@ -421,6 +463,11 @@ namespace GeneKerman
             // Keep the panel in sync so the item is already there when opened.
             mainWindow.AddNotification(notif);
 
+            // Pulse the sidebar tab. Unconditional by design — every notification,
+            // regardless of setting, regardless of whether the panel is already
+            // open. It also marks the feed dirty so an open panel gains the row.
+            sidebar?.Pulse();
+
             // Tee to the browser UI — deliberately in addition to the toast above, not
             // instead of it. A player in web mode may be flying with the browser behind
             // the game window; the in-game toast is the only thing they will actually
@@ -439,6 +486,65 @@ namespace GeneKerman
             // first poll's backlog seeding, which doesn't route through here.
             if (IsContractEvent(MiniJSON.GetString(notif, "type")))
                 RefreshContracts();
+        }
+
+        /// <summary>
+        /// Act on a command frame from the website. Returns false to leave it queued and
+        /// try again next frame (see the caller in Update).
+        ///
+        /// Deliberately an enumerated switch and not a dispatcher. This channel is
+        /// reached with a browser session token, which has no device binding and no mod
+        /// hash behind it, so every arm is a decision made once and reviewed: web
+        /// commands may only *raise UI*, and they arrive as a prompt the player still
+        /// has to accept. That keeps the worst case of a stolen token at "an unwanted
+        /// prompt appeared" rather than "something happened in my save".
+        /// </summary>
+        private bool HandleWebCommand(Dictionary<string, object> cmd)
+        {
+            if (cmd == null) return true;
+
+            switch (MiniJSON.GetString(cmd, "command", ""))
+            {
+                case "open_submit":
+                    return PromptOpenSubmit(
+                        MiniJSON.GetString(cmd, "contract_id", ""),
+                        MiniJSON.GetString(cmd, "mission", ""));
+
+                default:
+                    // An unknown command means a newer server; drop it rather than
+                    // queueing it forever.
+                    return true;
+            }
+        }
+
+        /// <summary>
+        /// Offer to open the submit window for a contract, at the player's confirmation.
+        /// Never opens it outright: a window yanked up over a landing is the failure mode
+        /// this whole channel is shaped to avoid.
+        /// </summary>
+        private bool PromptOpenSubmit(string contractId, string mission)
+        {
+            if (string.IsNullOrEmpty(contractId)) return true;
+            if (Api == null || !Api.IsLinked || Api.TransmissionBlocked) return true;
+
+            // A checkpoint prompt is time-critical and mid-flight; a website button is
+            // not. Wait for the slot rather than stealing it.
+            if (checkpointPrompt.IsVisible) return false;
+
+            string subject = string.IsNullOrEmpty(mission)
+                ? "a contract"
+                : "\"" + mission + "\"";
+
+            checkpointPrompt.Show(
+                "🌐 Requested from the website",
+                "Open the submission window for " + subject + "?",
+                onAccept: () => StartCoroutine(Web.GkRoutes.OpenSubmitRoutine(
+                    contractId,
+                    (ok, msg) => notificationPopup.Show(
+                        ok ? "📤 Submit" : "📤 Submit unavailable", msg))),
+                acceptLabel: "Open");
+
+            return true;
         }
 
         // Notification types that imply a contract list change. Kept as an explicit
@@ -474,6 +580,9 @@ namespace GeneKerman
             checkpointDetector?.Unregister();
             notifSocket?.Disconnect();
             webServer?.Stop();
+            // Must run: Destroy() releases the InputLockManager lock, and a leaked
+            // control lock outlives this GameObject and soft-bricks the save.
+            sidebar?.Destroy();
             RemoveToolbarButton();
         }
 
@@ -631,16 +740,24 @@ namespace GeneKerman
                     5f, ScreenMessageStyle.UPPER_CENTER);
             }
 
-            if (Api.IsLinked)
-            {
-                ShowMainWindow = !ShowMainWindow;
-                if (ShowMainWindow)
-                    mainWindow.OnOpen();
-            }
-            else
-            {
-                ShowLinkWindow = !ShowLinkWindow;
-            }
+            // The sidebar is what the button opens now. The classic window is still
+            // built, still loaded and still holds the things the sidebar does not do
+            // (rescue contracts, submission, wreck spawning) — it is reached from
+            // Settings → Open the classic window rather than from here.
+            if (Api.IsLinked) sidebar?.Toggle();
+            else ShowLinkWindow = !ShowLinkWindow;
+        }
+
+        /// <summary>
+        /// Raise the classic IMGUI window. Called from the sidebar's Settings panel,
+        /// which is the only route to it now that the toolbar button opens the
+        /// sidebar — and there has to be one, because the sidebar deliberately does
+        /// not carry every flow (see ContractForm's note on rescue contracts).
+        /// </summary>
+        public void OpenClassicWindow()
+        {
+            ShowMainWindow = true;
+            mainWindow.OnOpen();
         }
 
         // ── GUI ─────────────────────────────────────────────────────────────
@@ -729,6 +846,10 @@ namespace GeneKerman
         /// </summary>
         private void OnCheckpoint(Checkpoint cp)
         {
+            // Close any prompt already up *before* suspending: Show() dismisses the
+            // outgoing one, and that dismissal runs the old onClose — which un-suspends
+            // the detector. Doing it first keeps the flag we set below.
+            checkpointPrompt.Dismiss(false);
             checkpointDetector.Suspended = true;
             checkpointPrompt.Show(
                 cp.title,
@@ -1356,6 +1477,13 @@ namespace GeneKerman
             submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist,
                 rescueTarget, rescueKerbals, constraints);
         }
+
+        /// <summary>
+        /// The classic main window, for front ends that display data it already
+        /// owns (currently the uGUI sidebar's notification feed). Internal, and
+        /// read-only by convention: MainWindow stays the one place that fetches.
+        /// </summary>
+        internal UI.MainWindow MainWindowRef => mainWindow;
 
         public void RunCoroutine(IEnumerator routine)
         {

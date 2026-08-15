@@ -92,7 +92,7 @@ namespace GeneKerman
                 longitude = vessel.longitude,
                 altitude = vessel.altitude,
                 partCount = vessel.parts?.Count ?? 0,
-                crewCount = vessel.GetCrewCount(),
+                crewCount = VesselTransfer.CrewCountOf(vessel),
             };
 
             // Mass and cost

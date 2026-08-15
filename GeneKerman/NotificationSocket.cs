@@ -26,6 +26,23 @@ namespace GeneKerman
         private readonly ConcurrentQueue<Dictionary<string, object>> incoming =
             new ConcurrentQueue<Dictionary<string, object>>();
 
+        /// <summary>A command frame plus when it arrived, so a stale one can be dropped.</summary>
+        private class PendingCommand
+        {
+            public Dictionary<string, object> payload;
+            public int receivedTick;   // Environment.TickCount — Unity's Time is main-thread only
+        }
+
+        private readonly ConcurrentQueue<PendingCommand> commands =
+            new ConcurrentQueue<PendingCommand>();
+
+        // Commands are the opposite of notifications: a notification the client missed
+        // is worth recovering, a command is not. If the player closed their laptop after
+        // pressing a website button, a window opening an hour later during a reentry is
+        // a bug, not a feature. Hence a small cap and a short life.
+        private const int COMMAND_CAPACITY = 4;
+        private const int COMMAND_TTL_MS = 30000;
+
         private volatile bool connected;
         private volatile bool connecting;
         private volatile bool pendingRetry; // set by OnClose (bg thread), consumed by Tick (main)
@@ -112,6 +129,37 @@ namespace GeneKerman
         public bool TryDequeue(out Dictionary<string, object> notif)
         {
             return incoming.TryDequeue(out notif);
+        }
+
+        /// <summary>
+        /// The oldest live command, without removing it — expired ones are dropped on
+        /// the way. Peek rather than dequeue because the caller may not be able to act
+        /// yet (a time-critical prompt could be on screen), and a command it declined
+        /// to show this frame must stay queued until it is shown or expires.
+        /// Call on the main thread; DropCommand() removes the one you handled.
+        /// </summary>
+        public bool TryPeekCommand(out Dictionary<string, object> cmd)
+        {
+            cmd = null;
+            PendingCommand head;
+            while (commands.TryPeek(out head))
+            {
+                // unchecked so the comparison still works across TickCount's ~24.9-day wrap.
+                if (unchecked(Environment.TickCount - head.receivedTick) <= COMMAND_TTL_MS)
+                {
+                    cmd = head.payload;
+                    return true;
+                }
+                commands.TryDequeue(out head);
+            }
+            return false;
+        }
+
+        /// <summary>Remove the command returned by the last TryPeekCommand. Main thread.</summary>
+        public void DropCommand()
+        {
+            PendingCommand ignored;
+            commands.TryDequeue(out ignored);
         }
 
         /// <summary>Drives (re)connection. Call once per frame on the main thread.</summary>
@@ -229,6 +277,11 @@ namespace GeneKerman
                     connected = true;
                     connecting = false;
                     justConnected = true;
+                    // Anything queued before this connection is from before the gap and
+                    // is no longer what the player is looking at. Notifications catch up
+                    // after a reconnect; commands must do the opposite.
+                    PendingCommand stale;
+                    while (commands.TryDequeue(out stale)) { }
                     retryDelay = 2f;
                     Debug.Log("[GeneKerman] Notification socket connected.");
                 };
@@ -252,6 +305,22 @@ namespace GeneKerman
                         if (MiniJSON.GetString(msg, "type") == "policy")
                         {
                             policyPoke = true;
+                            return;
+                        }
+                        // A "command" frame is the website asking this game to raise a
+                        // window. Bounded, because nothing consumes these while the
+                        // player is at the main menu or mid-scene-load, and an unbounded
+                        // queue would turn a stuck client into a burst of prompts.
+                        if (MiniJSON.GetString(msg, "type") == "command")
+                        {
+                            PendingCommand evicted;
+                            while (commands.Count >= COMMAND_CAPACITY &&
+                                   commands.TryDequeue(out evicted)) { }
+                            commands.Enqueue(new PendingCommand
+                            {
+                                payload = msg,
+                                receivedTick = Environment.TickCount
+                            });
                             return;
                         }
                         var notif = MiniJSON.GetDict(msg, "notification");

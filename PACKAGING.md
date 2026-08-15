@@ -9,7 +9,11 @@ Work through this before publishing a build. The first item is a hard blocker.
       gate would block every test. Shipping with it off means *no* build can be rejected —
       including a modified `GeneKerman.dll` talking to the live server. `bot.py` prints a
       `SECURITY GATES DISABLED` banner on every start; that banner must be absent in
-      production.
+      production. **This one flag controls two mechanisms**: the `X-Mod-Hash` gate on
+      every request, and challenge-response DLL attestation (`/api/v1/attest/*`), which
+      verifies the same thing cryptographically instead of on the client's word. Turning
+      it back on restores both; leaving it off disables both, so a tampered DLL is
+      neither blocked nor reported.
 - [ ] `KSP_DEVICE_BINDING_ENABLED` and `KSP_2FA_ENABLED` also `true` (same banner covers them).
 - [ ] `ModVersion.Current` and `<Version>` in `GeneKerman.csproj` bumped and equal.
 - [ ] `./build.sh --release` run clean, and the printed `/admin publishversion` line executed

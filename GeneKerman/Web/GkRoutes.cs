@@ -422,71 +422,32 @@ namespace GeneKerman.Web
         /// see craft files, so it asks the game what it is holding and renders the
         /// options from that.
         /// </summary>
+        /// <summary>
+        /// The craft situation, serialized. The reading of it lives in ToolActions,
+        /// because the sidebar's Tools panel needs exactly the same answers and a
+        /// second copy of "is this craft saved" would drift.
+        /// </summary>
         private JobResult CurrentCraft()
         {
+            var state = ToolActions.ReadCraftState();
+
             var sb = new StringBuilder();
-            sb.Append("{\"scene\":").Append(JobResult.Quote(SceneName()));
-
-            string craftName = "", craftType = "", craftPath = "";
-            int parts = 0;
-            try
-            {
-                var ship = EditorLogic.fetch?.ship;
-                if (ship != null)
-                {
-                    craftName = ship.shipName ?? "Untitled";
-                    parts = ship.parts?.Count ?? 0;
-                    craftType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
-                    craftPath = FindSavedCraftPath(craftName, craftType);
-                }
-            }
-            catch (Exception) { /* not in the editor */ }
-
-            sb.Append(",\"editorCraft\":").Append(JobResult.Quote(craftName))
-              .Append(",\"editorType\":").Append(JobResult.Quote(craftType))
-              .Append(",\"editorParts\":").Append(parts)
+            sb.Append("{\"scene\":").Append(JobResult.Quote(SceneName()))
+              .Append(",\"editorCraft\":").Append(JobResult.Quote(state.EditorCraft))
+              .Append(",\"editorType\":").Append(JobResult.Quote(state.EditorType))
+              .Append(",\"editorParts\":").Append(state.EditorParts)
               // Unsaved crafts cannot be sent or exported — there is no file to read.
-              .Append(",\"editorSaved\":").Append(string.IsNullOrEmpty(craftPath) ? "false" : "true");
-
-            string vessel = "";
-            try { vessel = FlightGlobals.ActiveVessel != null ? FlightGlobals.ActiveVessel.vesselName : ""; }
-            catch (Exception) { }
-            sb.Append(",\"activeVessel\":").Append(JobResult.Quote(vessel)).Append('}');
+              // The path itself never leaves the mod.
+              .Append(",\"editorSaved\":").Append(Json(state.EditorSaved))
+              .Append(",\"activeVessel\":").Append(JobResult.Quote(state.ActiveVessel))
+              .Append('}');
 
             return JobResult.Json(sb.ToString());
         }
 
-        /// <summary>Mirrors MainWindow.CaptureEditorCraft's lookup: save folder first, then stock.</summary>
-        private static string FindSavedCraftPath(string name, string type)
-        {
-            try
-            {
-                string saveFolder = HighLogic.SaveFolder ?? "default";
-                string p = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "saves", saveFolder,
-                    "Ships", type, name + ".craft");
-                if (System.IO.File.Exists(p)) return p;
-
-                p = System.IO.Path.Combine(KSPUtil.ApplicationRootPath, "Ships", type, name + ".craft");
-                if (System.IO.File.Exists(p)) return p;
-            }
-            catch (Exception) { }
-            return "";
-        }
-
         private JobResult ExportCraft()
         {
-            string name = "", type = "";
-            try
-            {
-                var ship = EditorLogic.fetch?.ship;
-                if (ship == null) return JobResult.Error(409, "Open a craft in the VAB or SPH first.");
-                name = ship.shipName ?? "Untitled";
-                type = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
-            }
-            catch (Exception) { return JobResult.Error(409, "Open a craft in the VAB or SPH first."); }
-
-            string path = FindSavedCraftPath(name, type);
-            bool ok = ToolActions.ExportFlagCraft(path, name, out string message);
+            bool ok = ToolActions.ExportCurrentCraft(out string message);
             return ok
                 ? JobResult.Json("{\"ok\":true,\"path\":" + JobResult.Quote(message) + "}")
                 : JobResult.Error(409, message);
@@ -522,27 +483,7 @@ namespace GeneKerman.Web
 
             // The craft path is resolved on the main thread inside the job — the browser
             // must never supply a filesystem path.
-            StartJob(ctx, done => Quicksend(recipientId, recipientName, kind, done));
-        }
-
-        private static IEnumerator Quicksend(string recipientId, string recipientName, string kind,
-                                             Action<bool, string> done)
-        {
-            string path = "", name = "";
-            if (kind == "craft")
-            {
-                try
-                {
-                    var ship = EditorLogic.fetch?.ship;
-                    if (ship == null) { done(false, "Open a craft in the VAB or SPH first."); yield break; }
-                    name = ship.shipName ?? "Untitled";
-                    string type = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
-                    path = FindSavedCraftPath(name, type);
-                }
-                catch (Exception) { done(false, "Open a craft in the VAB or SPH first."); yield break; }
-            }
-
-            yield return ToolActions.Quicksend(recipientId, recipientName, kind, path, name, done);
+            StartJob(ctx, done => ToolActions.QuicksendCurrent(recipientId, recipientName, kind, done));
         }
 
         // ── Favorites ───────────────────────────────────────────────────────
@@ -661,6 +602,8 @@ namespace GeneKerman.Web
             if (rescue != null)
             {
                 req.RescueMode = MiniJSON.GetString(rescue, "mode", "orbit");
+                req.RescueRecovery = MiniJSON.GetString(rescue, "recovery", ContractCreation.RecoveryCrew);
+                req.MinDvMs = MiniJSON.GetDouble(rescue, "min_dv", 0);
                 req.RescueBody = MiniJSON.GetString(rescue, "body", "");
                 req.ApKm = MiniJSON.GetDouble(rescue, "ap_km", 0);
                 req.PeKm = MiniJSON.GetDouble(rescue, "pe_km", 0);
@@ -706,7 +649,14 @@ namespace GeneKerman.Web
             StartJob(ctx, onDone => OpenSubmitRoutine(contractId, onDone));
         }
 
-        private static IEnumerator OpenSubmitRoutine(string contractId, Action<bool, string> onDone)
+        /// <summary>
+        /// Re-reads the contract from the API and raises the IMGUI submit window for it.
+        /// Internal because the website's `open_submit` command routes here too: the
+        /// terms (mission type, situation, body, mod list, constraints, rescue target)
+        /// are fetched here rather than supplied by the caller, so neither front end can
+        /// relax a contract's own requirements. Two callers, one place that decides.
+        /// </summary>
+        internal static IEnumerator OpenSubmitRoutine(string contractId, Action<bool, string> onDone)
         {
             var mod = GeneKermanMod.Instance;
             if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }

@@ -64,6 +64,15 @@ namespace GeneKerman.Web
             Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/give_up$", "POST"),
             Allow(@"^/api/v1/corps/list$", "GET"),
 
+            // ── Phase 6a: the issuer's side of a dispute ────────────────────
+            // Settle and more-time are requests the contractor makes and the issuer
+            // answers. The answer used to exist only as a Discord DM, which stalled
+            // the whole flow for anyone playing without Discord open. Neither takes a
+            // date: the granted one is read from the request stored on the contract,
+            // so a page cannot approve an extension nobody asked for.
+            Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/settle_response$", "POST"),
+            Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/more_time_response$", "POST"),
+
             // Contract creation is NOT here: it goes through /gk/actions/create-contract,
             // because the mod has to derive the mod list and read the rescue vessel from
             // the running game. Craft download stays out too — the browser

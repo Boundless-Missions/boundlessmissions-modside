@@ -21,6 +21,7 @@ namespace GeneKerman.UI
         private bool visible;
         private string title;
         private string message;
+        private string acceptLabel = "📷  Capture";
         private float shownAt;
         private float timeout = TIMEOUT;
         private Action onAccept;
@@ -35,14 +36,26 @@ namespace GeneKerman.UI
 
         public bool IsVisible => visible;
 
+        /// <param name="acceptLabel">
+        /// Text on the confirm button. Defaults to the capture wording because that is
+        /// what this panel was built for, but the widget itself is the mod's generic
+        /// "here is a thing, do you want it?" prompt and is reused as such.
+        /// </param>
         public void Show(string title, string message, Action onAccept, Action onClose = null,
-            float timeoutOverride = 0f)
+            float timeoutOverride = 0f, string acceptLabel = null)
         {
+            // Close whatever is already on screen properly rather than overwriting it:
+            // onClose is how a caller undoes what it set up when it opened the prompt
+            // (the checkpoint detector's Suspended flag), and dropping it would strand
+            // that state until the game restarts.
+            Dismiss(false);
+
             this.title = title;
             this.message = message;
             this.onAccept = onAccept;
             this.onClose = onClose;
             this.timeout = timeoutOverride > 0f ? timeoutOverride : TIMEOUT;
+            this.acceptLabel = string.IsNullOrEmpty(acceptLabel) ? "📷  Capture" : acceptLabel;
             shownAt = Time.realtimeSinceStartup;
             visible = true;
         }
@@ -85,7 +98,7 @@ namespace GeneKerman.UI
             float by = rect.y + HEIGHT - bh - 12f;
             float bx = rect.x + (WIDTH - (bw * 2 + gap)) * 0.5f;
 
-            if (GUI.Button(new Rect(bx, by, bw, bh), "📷  Capture", acceptStyle))
+            if (GUI.Button(new Rect(bx, by, bw, bh), acceptLabel, acceptStyle))
                 Dismiss(true);
             if (GUI.Button(new Rect(bx + bw + gap, by, bw, bh), "Dismiss", dismissStyle))
                 Dismiss(false);

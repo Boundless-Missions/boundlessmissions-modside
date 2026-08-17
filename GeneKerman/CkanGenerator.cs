@@ -13,11 +13,23 @@
  * or an appended GKMODS text block in a raw .craft. It is appended LAST and stripped
  * FIRST so it never interferes with the flag/TweakScale blocks.
  *
- * IMPORT (recipient): we read GKMODS, diff its folder list against the recipient's own
+ * IMPORT (recipient): we read GKMODS, diff its install paths against the recipient's own
  * GameData, and for any mod they don't have we write a CKAN metapackage (.ckan) listing
  * those mods as dependencies — open it in CKAN and it installs everything the craft
  * needs. Installed crafts also get a small "<craft>.gkmods" sidecar so the editor hook
  * can regenerate the .ckan if the player later loads the craft and is still missing mods.
+ *
+ * A GameData folder is NOT a mod, and treating it as one is what this file gets wrong
+ * if you let it. Two separately-distributed mods routinely share a top-level folder:
+ * DeepFreeze installs REPOSoftTech/DeepFreeze while its companion library installs
+ * REPOSoftTech/BackgroundResources, and the "-Core" split many mods ship (Firespitter /
+ * FirespitterCore, NearFutureElectrical / NearFutureElectrical-Core) puts a parts mod and
+ * a plugin-only one in the same folder. Keying on the folder therefore both picks an
+ * arbitrary winner on export — usually the companion, since it has no parts and so is a
+ * useless thing to hand CKAN — and reads as "already installed" on import for a recipient
+ * who has only the companion, which silences the warning entirely. So the registry is
+ * indexed by INSTALL PATH, a part resolves through the longest path prefix that exactly
+ * one module owns, and the recipient-side check tests that same path rather than a folder.
  *
  * Mapping a *missing* part back to a mod is impossible on the recipient's side (the part
  * isn't loaded), which is exactly why the mapping is captured at export time instead.
@@ -53,9 +65,11 @@ namespace GeneKerman
             new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase)
         {
             { "SquadExpansion/MakingHistory", new ModEntry {
-                folder = "SquadExpansion/MakingHistory", ckan = "MakingHistory-DLC", name = "Making History" } },
+                folder = "SquadExpansion/MakingHistory", path = "SquadExpansion/MakingHistory",
+                ckan = "MakingHistory-DLC", name = "Making History" } },
             { "SquadExpansion/Serenity", new ModEntry {
-                folder = "SquadExpansion/Serenity", ckan = "BreakingGround-DLC", name = "Breaking Ground" } },
+                folder = "SquadExpansion/Serenity", path = "SquadExpansion/Serenity",
+                ckan = "BreakingGround-DLC", name = "Breaking Ground" } },
         };
 
         private static bool IsDlc(ModEntry m)
@@ -79,12 +93,37 @@ namespace GeneKerman
             new Regex(@"^[A-Za-z_][A-Za-z0-9_.\-]*$", RegexOptions.Compiled);
 
         /// <summary>A mod a craft depends on: its GameData folder, its CKAN identifier
-        /// (falls back to the folder when unknown), and a human-readable name.</summary>
+        /// (falls back to the folder when unknown), and a human-readable name.
+        ///
+        /// <c>path</c> is the GameData-relative directory whose presence means this mod is
+        /// installed — usually the same as <c>folder</c>, but "REPOSoftTech/DeepFreeze" for
+        /// a mod that lives inside an author's shared folder. It is what the recipient-side
+        /// check tests, and it is the one field a GKMODS block written by an older client
+        /// won't carry, so every read falls back to <c>folder</c> when it is absent.</summary>
         public class ModEntry
         {
             public string folder;
+            public string path;
             public string ckan;
             public string name;
+        }
+
+        /// <summary>The install path to test for a mod's presence: <c>path</c> when the
+        /// sender recorded one, otherwise the folder (which is what pre-path GKMODS blocks
+        /// and non-CKAN senders give us).</summary>
+        private static string PathOf(ModEntry m)
+        {
+            if (m == null) return null;
+            return string.IsNullOrEmpty(m.path) ? m.folder : m.path;
+        }
+
+        /// <summary>What makes two resolved mods the same mod. The CKAN identifier when we
+        /// have one — two mods sharing a folder must stay two entries — falling back to the
+        /// install path for a sender without CKAN.</summary>
+        private static string DedupeKey(ModEntry m)
+        {
+            if (m == null) return "";
+            return !string.IsNullOrEmpty(m.ckan) ? m.ckan : (PathOf(m) ?? "");
         }
 
         // ── Export: collect ──────────────────────────────────────────────────
@@ -93,22 +132,38 @@ namespace GeneKerman
         /// keyed by GameData folder and (when CKAN is present) CKAN identifier.</summary>
         private static List<ModEntry> CollectMods(IEnumerable<AvailablePart> parts)
         {
-            var byFolder = new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
+            var found = new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
             if (parts == null) return new List<ModEntry>();
 
-            var registry = LoadCkanRegistry();
             foreach (var ap in parts)
             {
-                string folder = GetModFolder(ap);
-                if (string.IsNullOrEmpty(folder) || StockFolders.Contains(folder)) continue;
-                if (byFolder.ContainsKey(folder)) continue;
-
-                ModEntry e;
-                if (!DlcMods.TryGetValue(folder, out e) && !registry.TryGetValue(folder, out e))
-                    e = new ModEntry { folder = folder, ckan = folder, name = folder };
-                byFolder[folder] = e;
+                var e = ResolvePartMod(ap);
+                if (e == null) continue;
+                string key = DedupeKey(e);
+                if (!found.ContainsKey(key)) found[key] = e;
             }
-            return byFolder.Values.ToList();
+            return found.Values.ToList();
+        }
+
+        /// <summary>The mod a loaded part comes from, or null for stock / this mod's own
+        /// parts. Prefers the CKAN module that owns the part's own install path over any
+        /// guess made from its top-level folder — see the file header for why the folder
+        /// alone is not an answer.</summary>
+        private static ModEntry ResolvePartMod(AvailablePart ap)
+        {
+            string folder = GetModFolder(ap);
+            if (string.IsNullOrEmpty(folder) || StockFolders.Contains(folder)) return null;
+
+            ModEntry e;
+            if (DlcMods.TryGetValue(folder, out e)) return e;
+
+            e = RegistryLookupByUrl(ap.partUrl) ?? RegistryLookupByFolder(folder);
+            if (e != null) return e;
+
+            // No CKAN on this machine: the folder is all we can say, which is also all
+            // the recipient can check. An identifier CKAN has never heard of makes an
+            // unresolvable modpack, but naming the folder at least names the problem.
+            return new ModEntry { folder = folder, path = folder, ckan = folder, name = folder };
         }
 
         /// <summary>Resolve bare GameData folder names to ModEntries carrying their real
@@ -122,7 +177,6 @@ namespace GeneKerman
             var list = new List<ModEntry>();
             if (folders == null) return list;
 
-            var registry = LoadCkanRegistry();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var folder in folders)
             {
@@ -130,8 +184,9 @@ namespace GeneKerman
                 if (!seen.Add(folder)) continue;
 
                 ModEntry e;
-                if (!DlcMods.TryGetValue(folder, out e) && !registry.TryGetValue(folder, out e))
-                    e = new ModEntry { folder = folder, ckan = folder, name = folder };
+                if (!DlcMods.TryGetValue(folder, out e))
+                    e = RegistryLookupByFolder(folder)
+                        ?? new ModEntry { folder = folder, path = folder, ckan = folder, name = folder };
                 list.Add(e);
             }
             return list;
@@ -141,7 +196,10 @@ namespace GeneKerman
         /// except under SquadExpansion, where the second segment is kept too. The two
         /// DLCs are bought separately, so "SquadExpansion" alone says nothing about
         /// whether the recipient can load the part; this is the same distinction
-        /// ModuleManager draws with <c>:NEEDS[SquadExpansion/MakingHistory]</c>.</summary>
+        /// ModuleManager draws with <c>:NEEDS[SquadExpansion/MakingHistory]</c>.
+        ///
+        /// This is a folder, not a mod — see <see cref="ResolvePartMod"/>, which uses it
+        /// only to spot stock and the DLCs and to fall back on when CKAN can't be read.</summary>
         private static string GetModFolder(AvailablePart ap)
         {
             if (ap == null || string.IsNullOrEmpty(ap.partUrl)) return null;
@@ -232,6 +290,7 @@ namespace GeneKerman
                 {
                     ConfigNode e = mn.AddNode("MOD");
                     e.AddValue("folder", m.folder);
+                    e.AddValue("path", PathOf(m));
                     e.AddValue("ckan", m.ckan);
                     e.AddValue("name", m.name);
                 }
@@ -267,6 +326,7 @@ namespace GeneKerman
                 {
                     sb.Append("\tMOD\n\t{\n");
                     sb.Append("\t\tfolder = ").Append(m.folder).Append("\n");
+                    sb.Append("\t\tpath = ").Append(PathOf(m)).Append("\n");
                     sb.Append("\t\tckan = ").Append(m.ckan).Append("\n");
                     sb.Append("\t\tname = ").Append(m.name).Append("\n");
                     sb.Append("\t}\n");
@@ -397,7 +457,13 @@ namespace GeneKerman
         }
 
         /// <summary>The marketplace mod label for a part: the stock DLCs as their own names,
-        /// null for base-game / this mod's parts, otherwise the part's GameData folder.</summary>
+        /// null for base-game / this mod's parts, otherwise the mod's own folder — the last
+        /// segment of its install root, so a part under REPOSoftTech/DeepFreeze tags as
+        /// "DeepFreeze" and not as its author. That deeper name is only used when the
+        /// resolved root actually contains this part, which keeps a plugin-only sibling
+        /// (whose root is something like "SomeMod/Plugins") from lending its subfolder name
+        /// to a part that doesn't live there. Without CKAN there is nothing to resolve
+        /// against and the top-level folder stands, as before.</summary>
         private static string MarketplaceModName(AvailablePart ap)
         {
             if (ap == null || string.IsNullOrEmpty(ap.partUrl)) return null;
@@ -414,7 +480,26 @@ namespace GeneKerman
             }
             // Squad / BoundlessMissions (this mod) are not "mods" for filtering purposes.
             if (StockFolders.Contains(first)) return null;
+
+            var e = RegistryLookupByUrl(ap.partUrl);
+            string root = PathOf(e);
+            if (!string.IsNullOrEmpty(root) && IsPathPrefix(root, ap.partUrl))
+            {
+                string[] rs = root.Split('/');
+                string last = rs[rs.Length - 1];
+                if (last.Length > 0) return last;
+            }
             return first;
+        }
+
+        /// <summary>Whether <paramref name="prefix"/> names a directory the path sits in
+        /// (or is), matched a whole segment at a time so "Near" never matches
+        /// "NearFuture/…".</summary>
+        private static bool IsPathPrefix(string prefix, string path)
+        {
+            if (string.IsNullOrEmpty(prefix) || string.IsNullOrEmpty(path)) return false;
+            if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
+            return path.Length == prefix.Length || path[prefix.Length] == '/';
         }
 
         // ── Import: strip + act ──────────────────────────────────────────────
@@ -493,8 +578,8 @@ namespace GeneKerman
         {
             if (mods == null || mods.Count == 0) return;
 
-            var installed = InstalledFolders();
-            var missing = mods.Where(m => !installed.Contains(m.folder)).ToList();
+            var installed = InstalledPaths(MaxSegments(mods));
+            var missing = mods.Where(m => !installed.Contains(PathOf(m) ?? "")).ToList();
             if (missing.Count == 0) return;
 
             var missingDlc = missing.Where(IsDlc).ToList();
@@ -561,7 +646,7 @@ namespace GeneKerman
             var arr = new List<object>();
             foreach (var m in mods)
                 arr.Add(new Dictionary<string, object>
-                { { "folder", m.folder }, { "ckan", m.ckan }, { "name", m.name } });
+                { { "folder", m.folder }, { "path", PathOf(m) }, { "ckan", m.ckan }, { "name", m.name } });
             File.WriteAllText(craftPath + ".gkmods", MiniJSON.Serialize(arr), Encoding.UTF8);
         }
 
@@ -585,6 +670,7 @@ namespace GeneKerman
                     mods.Add(new ModEntry
                     {
                         folder = folder,
+                        path = MiniJSON.GetString(d, "path", folder),
                         ckan = MiniJSON.GetString(d, "ckan", folder),
                         name = MiniJSON.GetString(d, "name", folder),
                     });
@@ -598,25 +684,59 @@ namespace GeneKerman
             }
         }
 
-        // ── CKAN registry (folder → identifier) ──────────────────────────────
+        // ── CKAN registry (install path → identifier) ────────────────────────
 
-        private static Dictionary<string, ModEntry> _registryCache;
+        /// <summary>How deep below GameData the prefix index goes. A part's url runs at most
+        /// <c>Mod/Parts/Category/name/name</c>, and in a real 77-mod install no prefix past
+        /// two segments was ever contested, so four is generous — and it keeps the index at
+        /// a few thousand entries instead of one per installed file.</summary>
+        private const int RegistryPrefixDepth = 4;
 
-        /// <summary>Map of GameData folder → ModEntry, built from CKAN's registry.json so
-        /// embedded mods carry their real CKAN identifiers. Empty when CKAN isn't used.
+        /// <summary>CKAN's answer to "who installed this", in the two shapes we ask it in.</summary>
+        private class RegistryIndex
+        {
+            /// <summary>GameData-relative path prefix → the single module that owns it. A
+            /// prefix two modules both install into is deliberately absent, so a lookup
+            /// walking down from the longest prefix skips past the ambiguity instead of
+            /// guessing at it.</summary>
+            public readonly Dictionary<string, ModEntry> byPath =
+                new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
+
+            /// <summary>Top-level GameData folder → the module with the most files under it.
+            /// The fallback for a caller who only has a folder name (or a part whose every
+            /// prefix is contested). Picking by file count rather than by whichever module
+            /// the registry happened to list first is what stops a plugin-only companion
+            /// from claiming a folder: it is the parts mod that carries the files.</summary>
+            public readonly Dictionary<string, ModEntry> byFolder =
+                new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
+
+            public bool Empty { get { return byPath.Count == 0; } }
+        }
+
+        private static RegistryIndex _registryCache;
+
+        /// <summary>Index CKAN's registry.json by install path. Empty when CKAN isn't used.
         /// Cached for the session (the registry doesn't change mid-flight).</summary>
-        private static Dictionary<string, ModEntry> LoadCkanRegistry()
+        private static RegistryIndex LoadCkanRegistry()
         {
             if (_registryCache != null) return _registryCache;
-            _registryCache = new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
+            var idx = new RegistryIndex();
+            _registryCache = idx;
             try
             {
                 string path = Path.Combine(KSPUtil.ApplicationRootPath, "CKAN", "registry.json");
-                if (!File.Exists(path)) return _registryCache;
+                if (!File.Exists(path)) return idx;
 
                 var root = MiniJSON.DeserializeDict(File.ReadAllText(path));
                 var installed = MiniJSON.GetDict(root, "installed_modules");
-                if (installed == null) return _registryCache;
+                if (installed == null) return idx;
+
+                // prefix → identifier, plus the prefixes more than one module claims.
+                var owner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var contested = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var entries = new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase);
+                // folder → identifier → how many paths that module installs there.
+                var weight = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
 
                 foreach (var kv in installed)
                 {
@@ -630,15 +750,81 @@ namespace GeneKerman
                     var files = MiniJSON.GetDict(mod, "installed_files");
                     if (files == null) continue;
 
+                    string shortest = null;
+                    int shortestLen = int.MaxValue;
                     foreach (var fileKey in files.Keys)
                     {
-                        string folder = FolderFromInstalledPath(fileKey);
-                        if (string.IsNullOrEmpty(folder) || StockFolders.Contains(folder)) continue;
-                        if (!_registryCache.ContainsKey(folder))
-                            _registryCache[folder] = new ModEntry { folder = folder, ckan = identifier, name = name };
+                        string rel = RelativeToGameData(fileKey);
+                        if (string.IsNullOrEmpty(rel)) continue;
+
+                        string[] segs = rel.Split('/');
+                        if (StockFolders.Contains(segs[0])) continue;
+
+                        // Ties break on the path itself, so the root a mod reports never
+                        // depends on the order its files were listed in.
+                        if (segs.Length < shortestLen ||
+                            (segs.Length == shortestLen && string.CompareOrdinal(rel, shortest) < 0))
+                        { shortest = rel; shortestLen = segs.Length; }
+
+                        int depth = Math.Min(segs.Length, RegistryPrefixDepth);
+                        for (int n = 1; n <= depth; n++)
+                        {
+                            string prefix = string.Join("/", segs, 0, n);
+                            string had;
+                            if (owner.TryGetValue(prefix, out had))
+                            {
+                                if (!had.Equals(identifier, StringComparison.OrdinalIgnoreCase))
+                                    contested.Add(prefix);
+                            }
+                            else owner[prefix] = identifier;
+                        }
+
+                        Dictionary<string, int> byId;
+                        if (!weight.TryGetValue(segs[0], out byId))
+                            weight[segs[0]] = byId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                        int n0;
+                        byId.TryGetValue(identifier, out n0);
+                        byId[identifier] = n0 + 1;
                     }
+                    if (shortest == null) continue;
+
+                    string installRoot = InstallRoot(shortest);
+                    if (string.IsNullOrEmpty(installRoot)) continue;
+                    entries[identifier] = new ModEntry
+                    {
+                        folder = installRoot.Split('/')[0],
+                        path = installRoot,
+                        ckan = identifier,
+                        name = name,
+                    };
                 }
-                Debug.Log($"[GeneKerman] CkanGenerator: mapped {_registryCache.Count} GameData folder(s) from CKAN registry.");
+
+                foreach (var kv in owner)
+                {
+                    if (contested.Contains(kv.Key)) continue;
+                    ModEntry e;
+                    if (entries.TryGetValue(kv.Value, out e)) idx.byPath[kv.Key] = e;
+                }
+
+                foreach (var kv in weight)
+                {
+                    string best = null;
+                    int bestN = -1;
+                    foreach (var c in kv.Value)
+                    {
+                        // Ties break on the identifier so the winner never depends on the
+                        // order the registry happened to be serialised in.
+                        if (c.Value > bestN ||
+                            (c.Value == bestN && string.CompareOrdinal(c.Key, best) < 0))
+                        { best = c.Key; bestN = c.Value; }
+                    }
+                    ModEntry e;
+                    if (best != null && entries.TryGetValue(best, out e)) idx.byFolder[kv.Key] = e;
+                }
+
+                Debug.Log($"[GeneKerman] CkanGenerator: indexed {idx.byPath.Count} install path(s) "
+                          + $"across {idx.byFolder.Count} folder(s) from CKAN registry "
+                          + $"({contested.Count} shared by more than one mod).");
             }
             catch (Exception ex)
             {
@@ -647,40 +833,106 @@ namespace GeneKerman
             return _registryCache;
         }
 
-        /// <summary>"GameData/RestockPlus/Parts/..." → "RestockPlus". Null for paths that
-        /// don't sit under a GameData subfolder.</summary>
-        private static string FolderFromInstalledPath(string installedPath)
+        /// <summary>The CKAN module that owns a part's install path — the longest prefix of
+        /// the url exactly one module claims. Null when CKAN isn't in use, or when the part
+        /// sits somewhere two modules both install into.</summary>
+        private static ModEntry RegistryLookupByUrl(string partUrl)
+        {
+            var idx = LoadCkanRegistry();
+            if (idx.Empty || string.IsNullOrEmpty(partUrl)) return null;
+
+            string[] segs = partUrl.Split('/');
+            for (int n = Math.Min(segs.Length, RegistryPrefixDepth); n >= 1; n--)
+            {
+                ModEntry e;
+                if (idx.byPath.TryGetValue(string.Join("/", segs, 0, n), out e)) return e;
+            }
+            return null;
+        }
+
+        /// <summary>The CKAN module that best accounts for a top-level GameData folder, for
+        /// callers who have no finer path to go on. Null when CKAN isn't in use.</summary>
+        private static ModEntry RegistryLookupByFolder(string folder)
+        {
+            var idx = LoadCkanRegistry();
+            if (idx.Empty || string.IsNullOrEmpty(folder)) return null;
+            ModEntry e;
+            return idx.byFolder.TryGetValue(folder, out e) ? e : null;
+        }
+
+        /// <summary>"GameData/REPOSoftTech/DeepFreeze/Parts/…" → "REPOSoftTech/DeepFreeze/Parts/…".
+        /// Null for paths that don't sit under a GameData subfolder.</summary>
+        private static string RelativeToGameData(string installedPath)
         {
             if (string.IsNullOrEmpty(installedPath)) return null;
             string[] segs = installedPath.Replace('\\', '/').Split('/');
             for (int i = 0; i < segs.Length - 1; i++)
                 if (segs[i].Equals("GameData", StringComparison.OrdinalIgnoreCase))
-                    return segs[i + 1];
+                    return string.Join("/", segs, i + 1, segs.Length - i - 1);
             return null;
+        }
+
+        /// <summary>The directory whose presence proves a mod is installed, taken from the
+        /// shallowest path it installs. CKAN lists directories as entries in their own right,
+        /// so that is usually already a directory; when a mod's shallowest entry is a loose
+        /// file (a bare plugin dll) the containing directory stands in for it.</summary>
+        private static string InstallRoot(string shortestPath)
+        {
+            if (string.IsNullOrEmpty(shortestPath)) return null;
+            int slash = shortestPath.LastIndexOf('/');
+            string last = slash < 0 ? shortestPath : shortestPath.Substring(slash + 1);
+            if (last.IndexOf('.') < 0) return shortestPath;
+            return slash < 0 ? null : shortestPath.Substring(0, slash);
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────
 
-        private static HashSet<string> InstalledFolders()
+        /// <summary>The GameData-relative directory paths this install has, to
+        /// <paramref name="depth"/> segments — the set the recipient-side check tests a
+        /// mod's install path against. Walking to the depth the mods actually name rather
+        /// than to the top level is what makes "has REPOSoftTech/BackgroundResources" stop
+        /// reading as "has DeepFreeze"; it also subsumes the DLCs, whose two-segment paths
+        /// used to need a special case so that owning one didn't read as owning the other.
+        /// Read fresh each time: a player can install a mod and reopen the craft.</summary>
+        private static HashSet<string> InstalledPaths(int depth)
         {
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
                 if (!Directory.Exists(GameDataRoot)) return set;
-                foreach (var dir in Directory.GetDirectories(GameDataRoot))
-                {
-                    string folder = Path.GetFileName(dir);
-                    set.Add(folder);
-                    // Record the DLCs by their two-segment path as well, to match the
-                    // keys GetModFolder produces for expansion parts. Owning one DLC
-                    // must not read as owning the other.
-                    if (folder.Equals("SquadExpansion", StringComparison.OrdinalIgnoreCase))
-                        foreach (var sub in Directory.GetDirectories(dir))
-                            set.Add(folder + "/" + Path.GetFileName(sub));
-                }
+                WalkInstalled(GameDataRoot, "", set, Math.Max(1, depth));
             }
             catch { /* unreadable GameData → treat as nothing installed */ }
             return set;
+        }
+
+        private static void WalkInstalled(string dir, string prefix, HashSet<string> into, int depth)
+        {
+            if (depth <= 0) return;
+            foreach (var sub in Directory.GetDirectories(dir))
+            {
+                string rel = prefix.Length == 0
+                    ? Path.GetFileName(sub)
+                    : prefix + "/" + Path.GetFileName(sub);
+                into.Add(rel);
+                WalkInstalled(sub, rel, into, depth - 1);
+            }
+        }
+
+        /// <summary>How deep the deepest install path in a mod list goes, so the GameData
+        /// walk stops as soon as it can answer for all of them.</summary>
+        private static int MaxSegments(List<ModEntry> mods)
+        {
+            int max = 1;
+            foreach (var m in mods)
+            {
+                string p = PathOf(m);
+                if (string.IsNullOrEmpty(p)) continue;
+                int n = 1;
+                for (int i = 0; i < p.Length; i++) if (p[i] == '/') n++;
+                if (n > max) max = n;
+            }
+            return max;
         }
 
         /// <summary>Index of the line-anchored GKMODS block (so a stray substring inside a
@@ -709,6 +961,7 @@ namespace GeneKerman
                     // close of a MOD subblock
                     if (line == "}" && !string.IsNullOrEmpty(cur.folder))
                     {
+                        if (string.IsNullOrEmpty(cur.path)) cur.path = cur.folder;
                         if (string.IsNullOrEmpty(cur.ckan)) cur.ckan = cur.folder;
                         if (string.IsNullOrEmpty(cur.name)) cur.name = cur.folder;
                         mods.Add(cur);
@@ -719,6 +972,7 @@ namespace GeneKerman
                 string key = line.Substring(0, eq).Trim();
                 string val = line.Substring(eq + 1).Trim();
                 if (key == "folder") cur.folder = val;
+                else if (key == "path") cur.path = val;
                 else if (key == "ckan") cur.ckan = val;
                 else if (key == "name") cur.name = val;
             }
@@ -735,6 +989,7 @@ namespace GeneKerman
                 mods.Add(new ModEntry
                 {
                     folder = folder,
+                    path = e.GetValue("path") ?? folder,
                     ckan = e.GetValue("ckan") ?? folder,
                     name = e.GetValue("name") ?? folder,
                 });

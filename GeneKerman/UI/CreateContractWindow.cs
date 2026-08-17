@@ -57,10 +57,17 @@ namespace GeneKerman.UI
         };
 
         // Auction mode: post as an open reverse auction instead of a direct contract.
-        // Only valid for Craft Build / Active Mission. Runs durationText hours; the
-        // lowest bidder is bound to a contract that inherits the selected type.
+        // Runs durationText hours; the lowest bidder is bound to a contract that
+        // inherits the selected type.
         private bool auctionMode = false;
         private string durationText = "24";
+
+        /// <summary>Which types can be put up for open bidding. Everything the window
+        /// offers except a rescue — sending one destroys the issuer's vessel, so it
+        /// cannot be handed to a contractor who is not decided yet — and except Auto,
+        /// which is server-only and not selectable here anyway.</summary>
+        private static bool Auctionable(int typeIndex)
+            => typeIndex != RESCUE_TYPE_INDEX && typeIndex != AUTO_TYPE_INDEX;
 
         // Rescue setup state
         private int rescueMode = 0;     // 0 = orbit (Ap/Pe), 1 = surface (Lat/Lon) — where
@@ -73,6 +80,17 @@ namespace GeneKerman.UI
         private string latText = "0", lonText = "0", marginPosText = "1";
         private string minDvText = "0";
         private readonly List<string> rescueCrew = new List<string>();
+        // Orbit-mode plane/regime requirement. Off by default — Ap/Pe is all a rescue
+        // has ever asked for, and switching a plane match on silently would make every
+        // rescue issued here a much more expensive job than the issuer expected.
+        private bool requireIncl;
+        private string inclText = "0";
+        private string marginInclText = "5";
+        private readonly List<string> rescueOrbitTypes = new List<string>();
+        // Where the vessel being handed over actually is, from the last scan: offered as
+        // the seed when the plane requirement is switched on.
+        private double rescueInclNow;
+        private bool rescueInOrbitNow;
 
         // Status
         private string statusMsg = "";
@@ -177,6 +195,9 @@ namespace GeneKerman.UI
             rescueCrew.Clear();
             rescueCrew.AddRange(ctx.Crew);
 
+            rescueInclNow = ctx.InclDeg;
+            rescueInOrbitNow = ctx.InOrbit;
+
             if (ctx.Crew.Count > 0)
             {
                 // Restore the player's previous pick if they made one; otherwise default
@@ -185,6 +206,60 @@ namespace GeneKerman.UI
                 for (int i = 0; i < bodyNames.Count; i++)
                     if (bodyNames[i] == desired) { bodyIndex = i; break; }
             }
+        }
+
+        /// <summary>
+        /// Which orbit the rescuer has to be in, beyond how high: the plane, and any
+        /// named regime. Orbit mode only — a surface target has no orbit to constrain.
+        ///
+        /// Ap/Pe say nothing about the plane, and the plane is the half of a rendezvous
+        /// that costs delta-v, so this is what separates "be at 100×100 km" from an
+        /// actual intercept. Both parts are off until the issuer asks for them.
+        /// </summary>
+        private void DrawOrbitShape()
+        {
+            GUILayout.Space(4);
+            bool want = GUILayout.Toggle(requireIncl, " Require an orbital plane", checkboxStyle);
+            if (want != requireIncl)
+            {
+                requireIncl = want;
+                // Seed from the wreck's own orbit the first time it's switched on: the
+                // plane the stranded ship is in is the one a rescuer has to match.
+                if (want && rescueInOrbitNow)
+                    inclText = rescueInclNow.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            }
+            if (requireIncl)
+            {
+                DrawNumberRow("Inclination (°, 0-180):", ref inclText);
+                DrawNumberRow($"Plane margin (°, min {ContractCreation.MinMarginInclDeg}):", ref marginInclText);
+                if (rescueInOrbitNow)
+                    GUILayout.Label($"You are in a {rescueInclNow:F1}° orbit now " +
+                                    "(over 90° is retrograde).", labelStyle);
+            }
+
+            GUILayout.Space(4);
+            GUILayout.Label("Orbit type (optional):", labelStyle);
+            var tokens = ContractCreation.OrbitTypeTokens;
+            for (int i = 0; i < tokens.Length; i += 3)
+            {
+                GUILayout.BeginHorizontal();
+                for (int j = i; j < i + 3 && j < tokens.Length; j++)
+                {
+                    string tok = tokens[j];
+                    bool on = rescueOrbitTypes.Contains(tok);
+                    bool now = GUILayout.Toggle(on, " " + ContractCreation.OrbitTypeLabel(tok),
+                                                checkboxStyle, GUILayout.Width(130));
+                    if (now != on)
+                    {
+                        if (now) rescueOrbitTypes.Add(tok);
+                        else rescueOrbitTypes.Remove(tok);
+                    }
+                }
+                GUILayout.FlexibleSpace();
+                GUILayout.EndHorizontal();
+            }
+            GUILayout.Label("Checked against the rescuer's own orbit when they submit; " +
+                            "none selected = any orbit that meets the numbers above.", labelStyle);
         }
 
         private void DrawNumberRow(string label, ref string val)
@@ -396,8 +471,8 @@ namespace GeneKerman.UI
                 {
                     contractType = i;
                     if (i == RESCUE_TYPE_INDEX) ScanRescueContext();
-                    // Auctions only apply to build / active missions.
-                    if (i != CRAFT_BUILD_INDEX && i != ACTIVE_TYPE_INDEX) auctionMode = false;
+                    // Everything but a rescue can be auctioned — see Auctionable.
+                    if (!Auctionable(i)) auctionMode = false;
                 }
                 string typeLabel = ContractTypeLabels[i] + (disabled ? "  (server only)" : "");
                 GUILayout.Label(typeLabel, valueStyle, GUILayout.Width(140));
@@ -408,9 +483,9 @@ namespace GeneKerman.UI
             }
             GUILayout.Space(8);
 
-            // ── Auction toggle (build / active only) — turns the direct contract
-            //    into an open reverse auction, so there's no single recipient. ──
-            if (contractType == CRAFT_BUILD_INDEX || contractType == ACTIVE_TYPE_INDEX)
+            // ── Auction toggle — turns the direct contract into an open reverse
+            //    auction, so there's no single recipient. ──
+            if (Auctionable(contractType))
             {
                 GUILayout.BeginHorizontal();
                 auctionMode = GUILayout.Toggle(auctionMode, "", checkboxStyle, GUILayout.Width(18));
@@ -612,7 +687,7 @@ namespace GeneKerman.UI
             GUILayout.Label(rescueRecovery == 1
                 ? $"They must bring this craft home too (at least " +
                   $"{ContractCreation.WreckCoverageRequired * 100:F0}% of its parts), not just the kerbals."
-                : "They may strip or abandon this craft — only the kerbals have to arrive.", labelStyle);
+                : "They may strip or abandon this craft; only the kerbals have to arrive.", labelStyle);
 
             GUILayout.Space(6);
             GUILayout.Label("Deliver the rescued crew to:", labelStyle);
@@ -646,6 +721,7 @@ namespace GeneKerman.UI
                 DrawNumberRow("Apoapsis (km):", ref apText);
                 DrawNumberRow("Periapsis (km):", ref peText);
                 DrawNumberRow($"Margin (km, min {ContractCreation.MinMarginOrbitKm}):", ref marginAltText);
+                DrawOrbitShape();
             }
             else
             {
@@ -732,6 +808,18 @@ namespace GeneKerman.UI
                     { Fail("Enter valid Apoapsis/Periapsis (km)."); return; }
                     if (!TryParseInv(marginAltText, out margin)) margin = 0;
                     req.ApKm = ap; req.PeKm = pe; req.MarginAltKm = margin;
+
+                    req.RequireIncl = requireIncl;
+                    if (requireIncl)
+                    {
+                        double incl, inclMargin;
+                        if (!TryParseInv(inclText, out incl) || incl < 0 || incl > 180)
+                        { Fail("Enter a valid inclination (0-180°)."); return; }
+                        if (!TryParseInv(marginInclText, out inclMargin))
+                            inclMargin = ContractCreation.DefaultMarginInclDeg;
+                        req.InclDeg = incl; req.MarginInclDeg = inclMargin;
+                    }
+                    req.OrbitTypes = new List<string>(rescueOrbitTypes);
                 }
                 else
                 {

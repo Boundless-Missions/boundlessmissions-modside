@@ -1,5 +1,6 @@
 /*
- * UI/Gui/Panels/ToolsPanel.cs – Quicksend, craft export and flag import, in uGUI.
+ * UI/Gui/Panels/ToolsPanel.cs – Quicksend, craft export, flag import and bug
+ * reports, in uGUI.
  *
  * WebUI/src/screens/Tools.tsx is the visual specification; ToolActions.cs is the
  * implementation, unchanged and shared — this panel calls exactly what /gk/actions/*
@@ -7,10 +8,13 @@
  * at once. The craft-state read moved into ToolActions with this slice for the same
  * reason: it used to be private to the bridge's routes.
  *
- * The one structural difference from the web screen: three cards, one status line.
+ * The one structural difference from the web screen: several cards, one status line.
  * SidebarPanel carries a single Status because only one action can be in flight at a
  * time anyway; `statusOwner` decides which card it is drawn under, so the result still
  * appears where the button that caused it is.
+ *
+ * The bug-report card is the exception to "ToolActions is shared with the web screen":
+ * it exists only here, because filing one needs KSP.log off this machine.
  */
 
 using UnityEngine;
@@ -24,6 +28,8 @@ namespace GeneKerman.UI.Gui
         private const int CardSend = 0;
         private const int CardExport = 1;
         private const int CardFlag = 2;
+        private const int CardBug = 3;
+        private const int CardRoster = 4;
 
         /// <summary>
         /// How often the craft situation is re-read. It changes when the player loads
@@ -44,6 +50,14 @@ namespace GeneKerman.UI.Gui
         private string flagUrl = "";
         private string flagName = "";
 
+        private string bugSummary = "";
+        private string bugDetails = "";
+        private bool bugAttachLog = true;
+
+        // How many kerbals have a profession no installed mod defines, as of the last
+        // time this panel was shown. -1 == not counted yet.
+        private int brokenCrew = -1;
+
         protected override void Rebuild()
         {
             var mod = GeneKermanMod.Instance;
@@ -58,6 +72,14 @@ namespace GeneKerman.UI.Gui
                 MarkDirty();
             });
 
+            // Above the link gate on purpose, and the only card there: every other tool
+            // talks to the server, while a broken roster is a local save problem that
+            // being unlinked neither causes nor excuses. It is also the second way in —
+            // the warning notification carries the same fix, and that one can be
+            // dismissed, leaving a save nobody can open the Astronaut Complex in.
+            if (brokenCrew > 0)
+                BuildRosterRepair(col);
+
             if (!mod.Api.IsLinked)
             {
                 UIF.Notice(col, "Not linked to a Discord account.",
@@ -71,6 +93,7 @@ namespace GeneKerman.UI.Gui
             BuildQuicksend(body, mod);
             BuildExport(body);
             BuildImportFlag(body, mod);
+            BuildBugReport(body, mod);
         }
 
         // ── Quicksend ───────────────────────────────────────────────────────
@@ -126,6 +149,35 @@ namespace GeneKerman.UI.Gui
         }
 
         // ── Export ──────────────────────────────────────────────────────────
+
+        // ── Roster repair ───────────────────────────────────────────────────
+
+        /// <summary>Only drawn when the roster actually holds a kerbal whose profession
+        /// nothing installed defines — a card that says "nothing is wrong" is a card that
+        /// teaches the player to ignore this one.</summary>
+        private void BuildRosterRepair(El parent)
+        {
+            var card = UIF.Card(parent, "RosterRepair").Column(Theme.Space2).Pad(Theme.Space3);
+            UIF.Label(card, "⚠ " + brokenCrew + " kerbal(s) with an unknown profession",
+                      Theme.FontSm).Bold();
+            UIF.Muted(card,
+                "A mod that added their profession is no longer installed. KSP throws while " +
+                "drawing any crew list they appear in, so the Astronaut Complex and crew " +
+                "assignment stay broken until this is dealt with. Fixing gives them a local " +
+                "profession and remembers the original — reinstall the mod and they get it back.")
+               .Body();
+
+            UIF.Button(card, "Fix professions", () =>
+            {
+                var done = Begin(CardRoster);
+                string message = TraitRepair.Repair();
+                ReadBrokenCrew();
+                done(brokenCrew == 0, message);
+                MarkDirty();
+            }, BtnStyle.Primary, 30).Interactable(!Busy);
+
+            if (statusOwner == CardRoster) DrawStatus(card);
+        }
 
         private void BuildExport(El parent)
         {
@@ -184,6 +236,57 @@ namespace GeneKerman.UI.Gui
             if (statusOwner == CardFlag) DrawStatus(card);
         }
 
+        // ── Bug report ──────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Report a bug without leaving the game, with KSP.log attached.
+        ///
+        /// It lives here rather than as a Discord command for one reason: the log.
+        /// Nearly every KSP bug is undiagnosable without it and nobody is going to
+        /// find, trim and upload a 200 MB file by hand — but only the mod can read it,
+        /// and only from inside the running game. The attach switch stays visible and
+        /// per-report because that file describes the player's machine, not just the
+        /// bug.
+        /// </summary>
+        private void BuildBugReport(El parent, GeneKermanMod mod)
+        {
+            var card = UIF.Card(parent, "BugReport").Column(Theme.Space2).Pad(Theme.Space3);
+            UIF.Label(card, "Report a bug", Theme.FontSm).Bold();
+            UIF.Muted(card, "Opens a private ticket in Discord. Replies come back to you there.")
+               .Body();
+
+            var summaryField = UIF.TextField(card, bugSummary, "One line: what went wrong");
+            summaryField.OnChanged(s => bugSummary = s);
+
+            var detailsField = UIF.TextField(card, bugDetails,
+                "What you did, what happened, what you expected…", 88, true);
+            detailsField.OnChanged(s => bugDetails = s);
+
+            UIF.Switch(card, "Attach KSP.log",
+                       "Your game log: mod list, install paths and system specs. Almost every " +
+                       "bug needs it to be fixable.",
+                       bugAttachLog,
+                       v => { bugAttachLog = v; MarkDirty(); });
+
+            bool ready = (bugSummary ?? "").Trim().Length > 0
+                      && (bugDetails ?? "").Trim().Length > 0 && !Busy;
+
+            UIF.Button(card, Busy ? "Sending…" : "Send report", () =>
+            {
+                var done = Begin(CardBug);
+                mod.RunCoroutine(ToolActions.SubmitBugReport(bugSummary, bugDetails, bugAttachLog,
+                    (ok, message) =>
+                    {
+                        // Same rule as the flag URL: clear on success only. A report the
+                        // server rejected is the text the player needs back to fix it.
+                        if (ok) { bugSummary = ""; bugDetails = ""; }
+                        done(ok, message);
+                    }));
+            }, BtnStyle.Secondary, 30).Interactable(ready);
+
+            if (statusOwner == CardBug) DrawStatus(card);
+        }
+
         // ── Plumbing ────────────────────────────────────────────────────────
 
         /// <summary>BeginAction, plus a note of which card the result belongs under.</summary>
@@ -225,6 +328,16 @@ namespace GeneKerman.UI.Gui
             statusOwner = -1;
             nextCraftRead = 0f;
             ReadCraft();
+            ReadBrokenCrew();
+        }
+
+        /// <summary>Count the kerbals with an unresolvable profession, once per showing
+        /// rather than per rebuild. A roster only breaks between sessions (a mod removed
+        /// while the game was closed), so opening the panel is exactly often enough, and
+        /// the scan does a config lookup per kerbal — not something to run at frame rate.</summary>
+        private void ReadBrokenCrew()
+        {
+            brokenCrew = TraitRepair.BrokenCrew().Count;
         }
 
         // The picker downloads avatars and owns those textures. Both of these are

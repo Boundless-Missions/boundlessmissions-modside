@@ -21,6 +21,13 @@
  * STATUS_STYLE rather than MainWindow's older IMGUI palette — visual parity with
  * the site is the whole point of this surface. See the note on Theme.ContractStatus.
  *
+ * The list carries the classic window's mail furniture as well: week groups that
+ * fold (ContractInbox.WeekKey, shared so both front ends file a contract under the
+ * same heading), a local bin, and a selection mode for acting on several at once.
+ * The bin is *local* — nothing is told to the server, the other party still sees the
+ * contract — which is why it only takes finished ones, and why it lives in
+ * ContractInbox next to the file it is stored in.
+ *
  * Deliberately not here: answering a settle / more-time request as the issuer — that
  * is browser-UI and Discord only today, and the panel says so rather than pretending
  * otherwise.
@@ -56,9 +63,38 @@ namespace GeneKerman.UI.Gui
         /// <summary>0 = All, 1 = Incoming, 2 = Outgoing — the same modes the IMGUI tab has.</summary>
         private int filterMode;
 
+        /// <summary>Showing the bin instead of the inbox. The bin is local — see ContractInbox.</summary>
+        private bool showTrash;
+
+        /// <summary>
+        /// Selection mode. Off by default and off again on the way out: a row is a
+        /// button that opens a contract, and a check box permanently in front of it
+        /// would make the common action the fiddly one.
+        /// </summary>
+        private bool selecting;
+        private readonly HashSet<string> selected = new HashSet<string>();
+
+        /// <summary>Bulk cancel is destructive, so it arms before it fires — as the per-contract one does.</summary>
+        private bool bulkCancelConfirm;
+
+        /// <summary>Week headings the player has folded away, plus which view they were computed for.</summary>
+        private readonly HashSet<string> collapsedWeeks = new HashSet<string>();
+        private string autoCollapsedFor;
+
+        /// <summary>
+        /// Contracts past which older weeks start folded. The classic window has the
+        /// same rule written down (MainWindow.AutoCollapseWeeks) but never calls it;
+        /// here it runs, because a sidebar column shows fewer rows than a 550px window
+        /// and an inbox that opens on last spring's contracts is not an inbox.
+        /// </summary>
+        private const int AutoCollapseAfter = 10;
+
         private int lastCount = -1;
         private bool lastLoading;
         private bool requested;
+
+        /// <summary>Which contract the editor's part filter is enforcing, as last drawn.</summary>
+        private string lastEnforcedId = "";
 
         /// <summary>Contract shown in the detail view, or null for the list.</summary>
         private string openId;
@@ -197,29 +233,313 @@ namespace GeneKerman.UI.Gui
             var shown = Filtered(contracts);
 
             // "N waiting on you", from the same predicate that decides whether a row
-            // gets its dot — so the count and the dots can never disagree.
+            // gets its dot — so the count and the dots can never disagree. Never in the
+            // bin: nothing in there is waiting on anybody.
             int waiting = 0;
-            foreach (var c in shown) if (NeedsAction(c)) waiting++;
+            if (!showTrash) foreach (var c in shown) if (NeedsAction(c)) waiting++;
             UIF.Grow(filters);
             if (waiting > 0)
                 UIF.Muted(filters, waiting + " waiting on you");
 
+            BuildViewRow(col, contracts);
+            if (selecting) BuildSelectionBar(col, shown);
+
             if (shown.Count == 0)
             {
-                UIF.Notice(col, "No contracts match the filter.", null);
+                UIF.Notice(col, showTrash ? "The bin is empty." : "No contracts match the filter.", null);
                 return;
             }
+
+            EnsureAutoCollapse(shown);
 
             El list;
             UIF.ScrollView(col, out list).Flex(1f, 1f);
 
-            // Rows live inside ONE card separated by dividers, as the web UI's
-            // `divide-y` list does — a card per row reads as a pile of tiles.
-            var card = UIF.Card(list, "Inbox").Column(0f);
-            for (int i = 0; i < shown.Count; i++)
+            BuildWeeks(list, shown);
+        }
+
+        /// <summary>
+        /// Inbox / bin, and the way into selection mode. A second row rather than more
+        /// buttons on the filter row: these two switch what the list *is*, where the
+        /// filters only narrow it, and mixing the two reads as six equal choices.
+        /// </summary>
+        private void BuildViewRow(El col, IList<object> contracts)
+        {
+            var row = UIF.Box(col, "Views").Row(Theme.Space1).H(24);
+
+            int binned = 0;
+            foreach (var obj in contracts)
             {
-                if (i > 0) UIF.Divider(card);
-                BuildRow(card, shown[i], this);
+                var c = obj as Dictionary<string, object>;
+                if (c != null && ContractInbox.IsTrashed(MiniJSON.GetString(c, "contract_id"))) binned++;
+            }
+
+            ViewButton(row, "Inbox", false);
+            ViewButton(row, binned > 0 ? "Bin (" + binned + ")" : "Bin", true);
+
+            UIF.Grow(row);
+
+            UIF.Button(row, selecting ? "Done" : "Select", () =>
+            {
+                selecting = !selecting;
+                selected.Clear();
+                bulkCancelConfirm = false;
+                ClearStatus();
+                MarkDirty();
+            }, selecting ? BtnStyle.Secondary : BtnStyle.Ghost, 24, Theme.Space2)
+               .E.PrefW(62);
+        }
+
+        private void ViewButton(El parent, string label, bool trash)
+        {
+            var b = UIF.Button(parent, label, () =>
+            {
+                if (showTrash == trash) return;
+                showTrash = trash;
+                // The selection belongs to the view it was made in: "cancel these" and
+                // "restore these" are different lists, and carrying one over would act
+                // on rows that are no longer on screen.
+                selected.Clear();
+                bulkCancelConfirm = false;
+                openId = null;
+                ClearStatus();
+                MarkDirty();
+            }, showTrash == trash ? BtnStyle.Secondary : BtnStyle.Ghost, 24, Theme.Space2);
+            b.Label.Size(Theme.FontXs);
+            b.E.PrefW(72);
+        }
+
+        /// <summary>
+        /// What can be done to the ticked rows. Cancel is the classic window's bulk
+        /// action and keeps its rule — pending only, since that is the one status where
+        /// cancelling is a withdrawal rather than a forfeit — and the bin actions are
+        /// the per-row ones applied to the whole selection.
+        /// </summary>
+        private void BuildSelectionBar(El col, List<Dictionary<string, object>> shown)
+        {
+            var card = UIF.Card(col, "Selection").Column(Theme.Space2).Pad(Theme.Space2);
+
+            var head = UIF.Box(card, "SelHead").Row(Theme.Space2).H(24);
+            bool allSelected = shown.Count > 0 && selected.Count >= shown.Count;
+            UIF.Checkbox(head, allSelected, on =>
+            {
+                selected.Clear();
+                if (on) foreach (var c in shown) selected.Add(MiniJSON.GetString(c, "contract_id"));
+                bulkCancelConfirm = false;
+                MarkDirty();
+            });
+            UIF.Label(head, allSelected ? "All selected" : "Select all", Theme.FontXs);
+            UIF.Grow(head);
+            UIF.Muted(head, selected.Count + " selected");
+
+            DrawStatus(card);
+
+            if (selected.Count == 0)
+            {
+                UIF.Muted(card, "Tick the contracts you want to act on.").Body();
+                return;
+            }
+
+            int cancellable = CountSelected(shown, c => MiniJSON.GetString(c, "status") == "pending");
+            int binnable = CountSelected(shown, c => ContractInbox.IsFinished(MiniJSON.GetString(c, "status")));
+
+            var actions = UIF.Box(card, "SelActions").Row(Theme.Space2).H(28);
+
+            if (showTrash)
+            {
+                UIF.Button(actions, "Restore " + selected.Count, () => BulkTrash(shown, false),
+                           BtnStyle.Secondary, 28).Interactable(!Busy).E.Flex(1f);
+            }
+            else
+            {
+                UIF.Button(actions, binnable > 0 ? "Bin " + binnable : "Bin",
+                           () => BulkTrash(shown, true), BtnStyle.Ghost, 28)
+                   .Interactable(!Busy && binnable > 0).E.Flex(1f);
+
+                if (bulkCancelConfirm)
+                {
+                    UIF.Button(actions, "Confirm", () => { bulkCancelConfirm = false; BulkCancel(shown); },
+                               BtnStyle.Destructive, 28).Interactable(!Busy).E.Flex(1f);
+                    UIF.Button(actions, "Keep", () => { bulkCancelConfirm = false; MarkDirty(); },
+                               BtnStyle.Ghost, 28).E.Flex(1f);
+                }
+                else
+                {
+                    UIF.Button(actions, cancellable > 0 ? "Cancel " + cancellable : "Cancel",
+                               () => { bulkCancelConfirm = true; MarkDirty(); },
+                               BtnStyle.Destructive, 28)
+                       .Interactable(!Busy && cancellable > 0).E.Flex(1f);
+                }
+            }
+
+            if (!showTrash && binnable < selected.Count)
+                UIF.Muted(card, "Only finished contracts can go in the bin; live ones stay put.").Body();
+        }
+
+        private int CountSelected(List<Dictionary<string, object>> shown,
+                                  Func<Dictionary<string, object>, bool> predicate)
+        {
+            int n = 0;
+            foreach (var c in shown)
+                if (selected.Contains(MiniJSON.GetString(c, "contract_id")) && predicate(c)) n++;
+            return n;
+        }
+
+        /// <summary>Bin or restore every ticked row the rule allows. Purely local — see ContractInbox.</summary>
+        private void BulkTrash(List<Dictionary<string, object>> shown, bool trash)
+        {
+            int moved = 0;
+            foreach (var c in shown)
+            {
+                string cid = MiniJSON.GetString(c, "contract_id");
+                if (!selected.Contains(cid)) continue;
+                // Restoring has no status rule: whatever is in the bin got there by
+                // passing the rule on the way in.
+                if (trash && !ContractInbox.IsFinished(MiniJSON.GetString(c, "status"))) continue;
+
+                ContractInbox.SetTrashed(cid, trash);
+                moved++;
+            }
+
+            selected.Clear();
+            var done = BeginAction();
+            done(moved > 0, moved == 0
+                ? "Nothing to move."
+                : moved + (trash ? " moved to the bin." : " restored."));
+        }
+
+        /// <summary>
+        /// Cancel every ticked pending contract, one request each, through the same
+        /// coroutine a single Withdraw runs — it stops the editor's part filter if it
+        /// was gating parts for that contract, and re-reads the list afterwards.
+        ///
+        /// The completion fires once, when the last reply lands: a status line that
+        /// rewrote itself per contract would settle on whichever request happened to
+        /// finish last rather than on what happened.
+        /// </summary>
+        private void BulkCancel(List<Dictionary<string, object>> shown)
+        {
+            var main = GeneKermanMod.Instance?.MainWindowRef;
+            if (main == null) return;
+
+            var ids = new List<string>();
+            foreach (var c in shown)
+            {
+                string cid = MiniJSON.GetString(c, "contract_id");
+                if (selected.Contains(cid) && MiniJSON.GetString(c, "status") == "pending")
+                    ids.Add(cid);
+            }
+
+            if (ids.Count == 0) return;
+
+            selected.Clear();
+            var done = BeginAction();
+
+            int outstanding = ids.Count;
+            int failed = 0;
+            foreach (string cid in ids)
+            {
+                main.RequestCancelContract(cid, (ok, msg) =>
+                {
+                    if (!ok) failed++;
+                    if (--outstanding > 0) return;
+
+                    int total = ids.Count;
+                    done(failed == 0, failed == 0
+                        ? total + " cancelled."
+                        : (total - failed) + " of " + total + " cancelled.");
+                });
+            }
+        }
+
+        /// <summary>
+        /// Fold away everything older than the newest <see cref="AutoCollapseAfter"/>
+        /// contracts, once per view. Once, and not on every rebuild: a refresh landing
+        /// must not re-fold a week the player has just opened.
+        /// </summary>
+        private void EnsureAutoCollapse(List<Dictionary<string, object>> shown)
+        {
+            if (shown.Count == 0) return;
+
+            string view = (showTrash ? "bin" : "inbox") + ":" + filterMode;
+            if (autoCollapsedFor == view) return;
+            autoCollapsedFor = view;
+
+            collapsedWeeks.Clear();
+
+            // Counted per week first, then folded week by week: the test is how many
+            // contracts came *before* a week, so a week that starts inside the first
+            // ten stays open even if it runs past them. Deciding row by row would fold
+            // it the moment its eleventh contract went by.
+            var order = new List<string>();
+            var counts = new Dictionary<string, int>();
+            foreach (var c in shown)
+            {
+                string week = ContractInbox.WeekKey(MiniJSON.GetString(c, "created_at"));
+                if (!counts.ContainsKey(week)) { counts[week] = 0; order.Add(week); }
+                counts[week]++;
+            }
+
+            int before = 0;
+            foreach (string week in order)
+            {
+                if (before >= AutoCollapseAfter) collapsedWeeks.Add(week);
+                before += counts[week];
+            }
+        }
+
+        /// <summary>
+        /// The list, in week groups. Grouping is what the classic window's mail list
+        /// does and it survives the move for the same reason: contracts arrive in
+        /// bursts, and an ungrouped column of forty is a wall.
+        /// </summary>
+        private void BuildWeeks(El list, List<Dictionary<string, object>> shown)
+        {
+            var order = new List<string>();
+            var groups = new Dictionary<string, List<Dictionary<string, object>>>();
+
+            // shown is already newest-first, so first-seen order is newest-week-first.
+            foreach (var c in shown)
+            {
+                string week = ContractInbox.WeekKey(MiniJSON.GetString(c, "created_at"));
+                if (!groups.ContainsKey(week))
+                {
+                    groups[week] = new List<Dictionary<string, object>>();
+                    order.Add(week);
+                }
+                groups[week].Add(c);
+            }
+
+            foreach (string week in order)
+            {
+                var items = groups[week];
+                bool collapsed = collapsedWeeks.Contains(week);
+
+                string key = week;
+                var head = UIF.ClickableRow(list, () =>
+                {
+                    if (!collapsedWeeks.Remove(key)) collapsedWeeks.Add(key);
+                    MarkDirty();
+                }, false, Theme.RadiusSm)
+                    .Row(Theme.Space2)
+                    .Pad(Theme.Space3, Theme.Space3, Theme.Space1, Theme.Space1)
+                    .ChildAlign(TextAnchor.MiddleLeft)
+                    .H(24);
+
+                UIF.Label(head, week, Theme.FontXs, Theme.MutedForeground).Bold();
+                UIF.Grow(head);
+                // No caret glyph: the font is KSP's and arrows are not a safe bet in it
+                // (see Theme.Font), so the state is said in words instead.
+                UIF.Muted(head, collapsed ? items.Count + " hidden" : items.Count.ToString());
+
+                if (collapsed) continue;
+
+                var card = UIF.Card(list, "Inbox").Column(0f);
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (i > 0) UIF.Divider(card);
+                    BuildRow(card, items[i]);
+                }
             }
         }
 
@@ -236,6 +556,10 @@ namespace GeneKerman.UI.Gui
             {
                 var c = obj as Dictionary<string, object>;
                 if (c == null) continue;
+
+                // The bin is a view, not a filter on top of one: a binned contract is
+                // absent from the inbox entirely, exactly as in the classic window.
+                if (ContractInbox.IsTrashed(MiniJSON.GetString(c, "contract_id")) != showTrash) continue;
 
                 bool isIncoming = !MiniJSON.GetBool(c, "is_outgoing");
                 if (filterMode == 1 && !isIncoming) continue;
@@ -290,28 +614,56 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>
         /// One inbox row. The whole row is the button — there is no "Open" affordance,
-        /// matching the web UI, where each list item is a full-width button.
+        /// matching the web UI, where each list item is a full-width button. The two
+        /// controls that sit inside it (the tick box, the bin button) are Buttons of
+        /// their own, and Unity gives a click to the innermost handler, so pressing
+        /// either does not also open the contract.
         /// </summary>
-        private static void BuildRow(El parent, Dictionary<string, object> c, ContractsPanel panel)
+        private void BuildRow(El parent, Dictionary<string, object> c)
         {
             string cid = MiniJSON.GetString(c, "contract_id");
             string status = MiniJSON.GetString(c, "status");
             bool isOutgoing = MiniJSON.GetBool(c, "is_outgoing");
 
-            var row = UIF.ClickableRow(parent, () => panel.Select(cid), panel.openId == cid)
+            var row = UIF.ClickableRow(parent, () => Select(cid), openId == cid)
                          .Row(Theme.Space2)
                          .Pad(Theme.Space3, Theme.Space3, Theme.Space2, Theme.Space2)
                          .ChildAlign(TextAnchor.UpperLeft);
 
-            // The "waiting on you" pip. Always present so the text column starts at
-            // the same x whether or not it is lit — an indented row reads as broken.
-            UIF.Box(row, "Pip")
-               .Dot(NeedsAction(c) ? Theme.Primary : Theme.Alpha(Theme.Primary, 0f), 8);
+            if (selecting)
+            {
+                bool ticked = selected.Contains(cid);
+                UIF.Checkbox(row, ticked, on =>
+                {
+                    if (on) selected.Add(cid); else selected.Remove(cid);
+                    bulkCancelConfirm = false;
+                    MarkDirty();
+                });
+            }
+            else
+            {
+                // The "waiting on you" pip. Always present so the text column starts at
+                // the same x whether or not it is lit — an indented row reads as broken.
+                UIF.Box(row, "Pip")
+                   .Dot(NeedsAction(c) ? Theme.Primary : Theme.Alpha(Theme.Primary, 0f), 8);
+            }
 
             var text = UIF.Box(row, "Text").Column(Theme.Space1).Flex(1f, 0f);
 
             var top = UIF.Box(text, "Top").Row(Theme.Space2).H(20);
             UIF.Badge(top, Fmt.Status(status), Theme.ContractStatus(status));
+
+            // Parts badge: this contract restricts what may be built. It goes red-hot
+            // while the editor is actually enforcing *this* contract's list, which is
+            // the classic window's [R] marker and the only on-screen sign that the part
+            // picker is short because of a contract rather than because of a bug.
+            if (IsRestricted(c))
+            {
+                bool enforcing = IsEnforcing(cid);
+                UIF.Badge(top, enforcing ? "Parts: enforced" : "Parts",
+                          enforcing ? Theme.Primary : Theme.Status("warning"));
+            }
+
             UIF.Label(top, isOutgoing
                         ? "to " + MiniJSON.GetString(c, "contractor_name")
                         : "from " + MiniJSON.GetString(c, "issuer_name"),
@@ -327,7 +679,33 @@ namespace GeneKerman.UI.Gui
             string due = MiniJSON.GetString(c, "due_date");
             if (!string.IsNullOrEmpty(due)) UIF.Muted(foot, "due " + due);
             UIF.Grow(foot);
+
+            // Per-row bin / restore, for the common case of tidying one line without
+            // going into selection mode. Only where the classic window offers it: a
+            // contract still in play cannot be hidden.
+            if (selecting || !(showTrash || ContractInbox.IsFinished(status))) return;
+
+            bool trashed = showTrash;
+            UIF.Button(row, trashed ? "Restore" : "Bin", () =>
+            {
+                ContractInbox.SetTrashed(cid, !trashed);
+                if (openId == cid) openId = null;
+                MarkDirty();
+            }, BtnStyle.Ghost, 22, Theme.Space2).E.PrefW(trashed ? 66 : 44);
         }
+
+        /// <summary>Does this contract restrict what the contractor may build?</summary>
+        private static bool IsRestricted(Dictionary<string, object> c)
+        {
+            if (!string.IsNullOrEmpty(MiniJSON.GetString(c, "modlist", ""))) return true;
+            return !ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints")).IsEmpty;
+        }
+
+        /// <summary>Is the editor's part filter currently gating parts for this contract?</summary>
+        private static bool IsEnforcing(string cid) =>
+            EditorPartEnforcer.Instance != null &&
+            EditorPartEnforcer.Instance.IsEnforcing() &&
+            EditorPartEnforcer.Instance.ActiveContractId == cid;
 
         /// <summary>Open a contract in the detail pane, resetting anything half-pressed.</summary>
         /// <summary>
@@ -364,6 +742,25 @@ namespace GeneKerman.UI.Gui
             moreTimeDate = DateTime.Now.Date.AddDays(7);
             moreTimePicker.Close();
             MarkDirty();
+        }
+
+        /// <summary>
+        /// Open a contract from outside this panel — a notification about one, via
+        /// SidebarController.ShowContract, which is what calls this. Switches to whichever view the contract is
+        /// actually in, since a binned contract opened from the inbox would show a
+        /// detail pane beside a list that does not contain it; and refetches, because
+        /// the id may name a contract that arrived after the last poll.
+        /// </summary>
+        internal void ShowContract(string cid)
+        {
+            if (string.IsNullOrEmpty(cid)) return;
+
+            showTrash = ContractInbox.IsTrashed(cid);
+            selecting = false;
+            selected.Clear();
+            Select(cid);
+
+            GeneKermanMod.Instance?.MainWindowRef?.RequestContractsRefresh();
         }
 
         // ── Detail view ─────────────────────────────────────────────────────
@@ -435,10 +832,28 @@ namespace GeneKerman.UI.Gui
                 var rtSpec = MiniJSON.GetDict(c, "rescue_target");
                 if (rtSpec != null)
                 {
+                    // Where they have to be delivered, and — when the issuer named one —
+                    // which orbit that is. Ap/Pe say how high, never which plane, and a
+                    // plane requirement changes what the job costs.
+                    string rBody = MiniJSON.GetString(rtSpec, "body", "?");
+                    if (MiniJSON.GetString(rtSpec, "mode", "orbit") == "surface")
+                        Section(card, "Deliver to",
+                                $"{rBody} surface at {MiniJSON.GetDouble(rtSpec, "lat"):F1}°, " +
+                                $"{MiniJSON.GetDouble(rtSpec, "lon"):F1}°");
+                    else
+                    {
+                        Section(card, "Deliver to",
+                                $"{rBody} orbit, Ap {MiniJSON.GetDouble(rtSpec, "ap") / 1000:F0} km / " +
+                                $"Pe {MiniJSON.GetDouble(rtSpec, "pe") / 1000:F0} km");
+                        string orbitReq = RescueTargetSpec.FromDict(rtSpec).DescribeOrbitRequirement();
+                        if (!string.IsNullOrEmpty(orbitReq))
+                            Section(card, "Required orbit", orbitReq);
+                    }
+
                     Section(card, "Recover",
                             MiniJSON.GetString(rtSpec, "recovery", "crew") == "vessel"
                                 ? "The crew and the stranded vessel itself"
-                                : "The crew — the wreck may be left behind");
+                                : "The crew (the wreck may be left behind)");
                     double minDv = MiniJSON.GetDouble(rtSpec, "min_dv", 0);
                     if (minDv > 0)
                         Section(card, "Δv on arrival", $"≥{minDv:F0} m/s left on the delivering craft");
@@ -452,6 +867,8 @@ namespace GeneKerman.UI.Gui
                 Section(card, "Mods allowed", modlist);
             }
 
+            BuildPartRules(card, c, cid, status, modlist);
+
             BuildSubmission(body, cid, status);
 
             // A dispute is the one state nothing else ends, so the server closes it on
@@ -464,6 +881,69 @@ namespace GeneKerman.UI.Gui
 
             DrawStatus(col);
             BuildActions(col, mod, main, c, cid, status, isOutgoing, mType);
+        }
+
+        /// <summary>
+        /// What this contract lets the contractor build, and — in the editor — the
+        /// switch that makes KSP's part picker obey it.
+        ///
+        /// The limits line is shown wherever the contract is read, because "no ion
+        /// engines" is something to know before accepting, not only while building.
+        /// The switch is the editor's alone: EditorPartEnforcer is an
+        /// [KSPAddon(EditorAny)] MonoBehaviour, so outside the VAB/SPH there is no
+        /// instance to talk to and nothing it could filter.
+        ///
+        /// Enforcement is one contract at a time by construction — the enforcer holds a
+        /// single ActiveContractId — so turning it on here takes it off whatever it was
+        /// on. That is the enforcer's rule, not this panel's, and the classic window's
+        /// toggle behaves the same way.
+        /// </summary>
+        private void BuildPartRules(El card, Dictionary<string, object> c, string cid,
+                                    string status, string modlist)
+        {
+            var limits = ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints"));
+            bool inEditor = HighLogic.LoadedSceneIsEditor && status == "active";
+
+            if (limits.IsEmpty && !inEditor) return;
+
+            UIF.Divider(card);
+
+            if (!limits.IsEmpty)
+                Section(card, "Mission limits", limits.Describe());
+
+            if (!inEditor) return;
+
+            if (string.IsNullOrEmpty(modlist) && limits.IsEmpty)
+            {
+                Section(card, "Parts", "No restriction: every part in your install is allowed.");
+                return;
+            }
+
+            lastEnforcedId = EnforcedId();
+            bool enforcing = IsEnforcing(cid);
+
+            UIF.Switch(card, "Enforce in the editor",
+                       "Hides every part this contract does not allow from the VAB/SPH picker.",
+                       enforcing, on =>
+                       {
+                           if (on) EditorPartEnforcer.Instance?.EnforceModlist(cid, modlist, limits);
+                           else EditorPartEnforcer.Instance?.StopEnforcing();
+                           MarkDirty();
+                       });
+
+            // Enforcement is global, so a player who armed it on another contract needs
+            // to be told why this switch is off while the picker is still short.
+            string other = EnforcedId();
+            if (!enforcing && !string.IsNullOrEmpty(other) && other != cid)
+                UIF.Muted(card, "Another contract's part filter is active; turning this on replaces it.")
+                   .Body();
+        }
+
+        /// <summary>The contract the editor's part filter is gating for, or "".</summary>
+        private static string EnforcedId()
+        {
+            var e = EditorPartEnforcer.Instance;
+            return (e != null && e.IsEnforcing()) ? (e.ActiveContractId ?? "") : "";
         }
 
         /// <summary>
@@ -850,7 +1330,7 @@ namespace GeneKerman.UI.Gui
                 }
 
                 UIF.Muted(box, "It spawns where the issuer left it, not at the delivery " +
-                               "target — finding it is the mission.").Body();
+                               "target; finding it is the mission.").Body();
                 // BeginAction, not Done: the contract stays open so the freeze status
                 // below replaces the button in place.
                 UIF.Button(box, "🛟 Spawn stranded vessel",
@@ -867,8 +1347,8 @@ namespace GeneKerman.UI.Gui
             var freeze = RescueImmunityGuardian.GetRecord(cid);
             if (freeze == null) return;
 
-            UIF.Muted(box, "🧊 " + freeze.Crew.Count + " kerbal(s) in emergency freeze — " +
-                           "they thaw when you get close.").Body();
+            UIF.Muted(box, "🧊 " + freeze.Crew.Count + " kerbal(s) in emergency freeze. " +
+                           "They thaw when you get close.").Body();
 
             // Only worth saying when the two installs actually differ: that is the case
             // where the wreck's own supplies are useless here.
@@ -945,6 +1425,16 @@ namespace GeneKerman.UI.Gui
                 MarkDirty();
             }
 
+            // The classic window and the submit gate arm and drop the editor's part
+            // filter too, and the row badge plus the detail's switch both draw its
+            // state — so notice when it moves under us.
+            string enforced = EnforcedId();
+            if (enforced != lastEnforcedId)
+            {
+                lastEnforcedId = enforced;
+                MarkDirty();
+            }
+
             // Kick the submission fetch here rather than in Rebuild: Rebuild runs on
             // every data change, and starting a download from it would re-download
             // the blueprints each time the list refreshed underneath.
@@ -962,6 +1452,15 @@ namespace GeneKerman.UI.Gui
         internal override void OnShown()
         {
             requested = false;
+
+            // Selection is a mode, and a mode left armed is one the player has to
+            // notice and leave before the list behaves normally again. The folded
+            // weeks are recomputed with it (autoCollapsedFor), so a session-old
+            // fold does not hide this morning's contracts.
+            selecting = false;
+            selected.Clear();
+            bulkCancelConfirm = false;
+            autoCollapsedFor = null;
 
             form.Attach(MarkDirty, Done, () =>
             {

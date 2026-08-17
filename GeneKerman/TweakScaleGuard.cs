@@ -14,6 +14,25 @@
  * TweakScale; on install we read it FIRST, compare against the locally installed
  * TweakScale version, warn on any mismatch, and strip the block so the craft loads
  * clean. Append-last / strip-first keeps it clear of FlagTransfer's GKFLAG blocks.
+ *
+ * RELATIONSHIP TO GeneKermanScale. ScaleBridge now BAKES a scaled craft — it copies the
+ * final computed scale into a dormant GeneKermanScale module and deletes the TweakScale
+ * node — so a baked craft needs no TweakScale at all and this guard must stay quiet
+ * about it. That is why the trigger below is "is anything actually rescaled", not "does
+ * this craft mention TweakScale". TweakScale attaches its module to every compatible
+ * part in the editor whether or not you scale it, and ScaleBridge only strips the ones
+ * it snapshots (parts within SCALE_EPSILON of 1x are left alone), so a fully baked craft
+ * still carries TweakScale modules — the majority of them, on a typical craft. Matching
+ * the bare module name warned every recipient of every baked craft about a version
+ * mismatch that could not affect them, while the same submission deliberately omits
+ * TweakScale from its dependency list (SubmitWindow.CollectUsedModFolders).
+ *
+ * So the guard is now aimed at what ScaleBridge does NOT cover:
+ *   • the export paths that never run it — marketplace listings, quicksend, export to
+ *     file, the blueprint that accompanies a vessel transfer — where crafts still carry
+ *     live TweakScale data and this is the recipient's only warning;
+ *   • a submission where SnapshotIntoCraftBytes bailed or threw, leaving a real scale
+ *     behind. This is the backstop for that.
  */
 
 using System;
@@ -26,9 +45,15 @@ namespace GeneKerman
     {
         private const string VER_NODE = "GKTSVER";
 
-        // A TweakScale-scaled part is written to the craft as a `name = TweakScale`
-        // PartModule line. ConfigNode serialises values with spaces around the '='.
-        private const string SCALE_MODULE_MARKER = "name = TweakScale";
+        // TweakScale is written to the craft as a `name = TweakScale` PartModule.
+        // ConfigNode serialises values with spaces around the '='.
+        private const string TWEAKSCALE_MODULE = "TweakScale";
+
+        // The scale TweakScale applied is currentScale / defaultScale; a part within this
+        // of 1x is unscaled. Same value and same meaning as ScaleBridge.SCALE_EPSILON —
+        // the two must agree, or this guard would warn about exactly the parts ScaleBridge
+        // considered unscaled and therefore left behind.
+        private const double SCALE_EPSILON = 0.001;
 
         /// <summary>Version of the locally installed TweakScale core, or null if it
         /// isn't installed. Resolves the CORE plugin only — its assembly is named "Scale"
@@ -71,9 +96,74 @@ namespace GeneKerman
             return null;
         }
 
+        /// <summary>Whether the craft carries a part TweakScale has actually rescaled —
+        /// not merely a part TweakScale is attached to. Both scales are persistent fields,
+        /// so the answer is in the craft text; a module whose currentScale equals its
+        /// defaultScale changes nothing and is no reason to warn anyone.
+        ///
+        /// "Can't tell" counts as rescaled: a module missing either field, or carrying an
+        /// unparseable one, is not PROOF of a no-op, and silence has to be earned. This is
+        /// the same stance the marketplace compatibility check takes — unknown must never
+        /// render as a green light.</summary>
         private static bool CraftTextUsesTweakScale(string text)
-            => !string.IsNullOrEmpty(text) &&
-               text.IndexOf(SCALE_MODULE_MARKER, StringComparison.Ordinal) >= 0;
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+
+            int depth = 0, moduleDepth = -1;
+            double cur = double.NaN, def = double.NaN;
+
+            foreach (var rawLine in text.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+
+                if (line == "{") { depth++; continue; }
+                if (line == "}")
+                {
+                    depth--;
+                    if (moduleDepth >= 0 && depth < moduleDepth)
+                    {
+                        if (IsRescaled(cur, def)) return true;
+                        moduleDepth = -1;
+                        cur = def = double.NaN;
+                    }
+                    continue;
+                }
+
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = line.Substring(0, eq).Trim();
+                string value = line.Substring(eq + 1).Trim();
+
+                if (moduleDepth < 0)
+                {
+                    if (key == "name" && value == TWEAKSCALE_MODULE) moduleDepth = depth;
+                    continue;
+                }
+                if (key == "currentScale") cur = ParseScale(value);
+                else if (key == "defaultScale") def = ParseScale(value);
+            }
+
+            // A block left open by a truncated file still counts if it proved a rescale.
+            return moduleDepth >= 0 && IsRescaled(cur, def);
+        }
+
+        /// <summary>Whether a TweakScale module's scale pair represents a real rescale.
+        /// Unreadable or absent values return true — see CraftTextUsesTweakScale.</summary>
+        private static bool IsRescaled(double currentScale, double defaultScale)
+        {
+            if (double.IsNaN(currentScale) || double.IsNaN(defaultScale)) return true;
+            if (Math.Abs(defaultScale) < 1e-6) return true; // no ratio to take
+            return Math.Abs(currentScale / defaultScale - 1.0) >= SCALE_EPSILON;
+        }
+
+        private static double ParseScale(string value)
+        {
+            double d;
+            return double.TryParse(value, System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out d)
+                ? d : double.NaN;
+        }
 
         // ── Submit: embed ────────────────────────────────────────────────────
 

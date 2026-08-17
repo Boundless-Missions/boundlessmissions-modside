@@ -91,7 +91,12 @@ namespace GeneKerman
                 }
 
                 byte[] craftBytes = File.ReadAllBytes(craftPath);
+                // Bake the scale FIRST: the file on disk carries raw TweakScale data, and
+                // a blueprint has no import-side scale step to fix it later.
+                craftBytes = ScaleBridge.BakeEditorCraft(craftBytes);
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes);
+                craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
                 craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes);
 
@@ -148,7 +153,12 @@ namespace GeneKerman
                     yield break;
                 }
                 byte[] craftBytes = File.ReadAllBytes(editorCraftPath);
-                payload = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                // Bake the scale FIRST — see ScaleBridge.BakeEditorCraft. Without this a
+                // quicksent craft arrives with raw TweakScale data and no way to repair it.
+                payload = ScaleBridge.BakeEditorCraft(craftBytes);
+                payload = FlagTransfer.EmbedFlagsInCraft(payload);
+                payload = TweakScaleGuard.EmbedVersionInCraft(payload);
+                payload = TextureTransfer.EmbedInCraft(payload);
                 payload = CkanGenerator.EmbedModsInCraft(payload);
                 payload = CraftThumb.EmbedThumbForCurrentCraft(payload);
                 fileName = SanitizeFileName(editorCraftName) + ".craft";
@@ -294,6 +304,242 @@ namespace GeneKerman
             }
 
             yield return Quicksend(recipientId, recipientName, kind, path, name, onDone);
+        }
+
+        // ── Bug report ──────────────────────────────────────────────────────
+
+        /// <summary>Caps mirroring the server's, so an over-long report is trimmed
+        /// where the player can still see what they wrote rather than silently on
+        /// arrival.</summary>
+        public const int MaxBugSummary = 200;
+        public const int MaxBugDetails = 1500;
+
+        /// <summary>
+        /// File a bug report against the mod. The server turns it into a private
+        /// Discord ticket the reporter can be replied to in.
+        ///
+        /// <paramref name="attachLog"/> reflects the switch in the Tools tab: KSP.log
+        /// is the one artefact that makes most KSP bugs diagnosable, and also the one
+        /// that carries the player's mod list, install paths and machine specs — so it
+        /// is their call, made every time, never a default that hides.
+        /// </summary>
+        public static IEnumerator SubmitBugReport(string summary, string details, bool attachLog,
+                                                  Action<bool, string> onDone)
+        {
+            var mod = GeneKermanMod.Instance;
+            if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
+            if (!mod.Api.IsLinked) { onDone(false, "Link this install to Discord first."); yield break; }
+            // Named rather than left to fail as a network error: a blocked send looks
+            // identical to an unreachable server from the callback, and this one the
+            // player can actually fix.
+            if (mod.Api.TransmissionBlocked)
+            {
+                onDone(false, "The mod isn't allowed to send anything — check the data-sharing " +
+                              "switch in Settings.");
+                yield break;
+            }
+
+            summary = (summary ?? "").Trim();
+            details = (details ?? "").Trim();
+            if (summary.Length < 5)
+            {
+                onDone(false, "Summarise the bug in one line first.");
+                yield break;
+            }
+            if (details.Length < 15)
+            {
+                onDone(false, "Add a few words on what you did and what happened.");
+                yield break;
+            }
+            if (summary.Length > MaxBugSummary) summary = summary.Substring(0, MaxBugSummary);
+            if (details.Length > MaxBugDetails) details = details.Substring(0, MaxBugDetails);
+
+            bool ok = false;
+            string message = null;
+            yield return mod.Api.SubmitBugReport(summary, details, attachLog, (success, resp, status) =>
+            {
+                if (success && !string.IsNullOrEmpty(resp))
+                {
+                    var d = MiniJSON.DeserializeDict(resp);
+                    ok = MiniJSON.GetBool(d, "success", false);
+                    message = MiniJSON.GetString(d, "message",
+                        ok ? "Bug reported. Thank you." : "Could not file the report.");
+                }
+                else if (status == 429)
+                {
+                    // The one failure the player can act on, so it is named rather
+                    // than folded into "could not send".
+                    message = "You've filed several reports already — try again later.";
+                }
+                else message = "Could not reach the server to file the report.";
+            });
+
+            onDone(ok, message ?? "Could not file the report.");
+        }
+
+        // ── Marketplace ─────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Mass (t) and full funds cost of the craft open in the editor.
+        ///
+        /// Separate from <see cref="ReadCraftState"/> because it walks every part and
+        /// asks each one's modules what they cost — fine when a screen wants to show
+        /// the figures, wasteful in the once-a-second poll that only needs to know
+        /// whether a craft is loaded at all.
+        /// </summary>
+        public static void ReadEditorValue(out float mass, out float cost)
+        {
+            mass = 0f;
+            cost = 0f;
+            try
+            {
+                var ship = EditorLogic.fetch?.ship;
+                if (ship?.parts == null) return;
+
+                foreach (var part in ship.parts)
+                {
+                    mass += part.mass + part.GetResourceMass();
+                    cost += VesselDataCollector.GetPartCost(part);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Could not value the editor craft: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// List the craft open in the editor on the marketplace.
+        ///
+        /// The whole payload is assembled here — the .craft with its flags, mod list
+        /// and thumbnail baked in, a rendered blueprint, a square listing thumbnail,
+        /// and the life-support flag the listing is filtered by. None of that is
+        /// reachable from a browser tab, which is why this is an action rather than
+        /// something a front end does for itself; and the price is parsed here so all
+        /// three front ends reject the same inputs.
+        ///
+        /// <paramref name="onProgress"/> carries the two long steps (the blueprint
+        /// render, then the upload) to whichever status line the caller has.
+        /// </summary>
+        public static IEnumerator SellCurrentCraft(string priceText, Action<string> onProgress,
+                                                   Action<bool, string> onDone)
+        {
+            var mod = GeneKermanMod.Instance;
+            if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
+
+            var state = ReadCraftState();
+            if (string.IsNullOrEmpty(state.EditorCraft))
+            {
+                onDone(false, "Open a craft in the VAB or SPH first.");
+                yield break;
+            }
+            if (!state.EditorSaved)
+            {
+                onDone(false, "Save your craft first: there is no file to list yet.");
+                yield break;
+            }
+            if (!int.TryParse((priceText ?? "").Trim(), out int price) || price <= 0)
+            {
+                onDone(false, "Enter a price above zero.");
+                yield break;
+            }
+
+            byte[] craftBytes;
+            string craftMods;
+            string craftParts;
+            try
+            {
+                craftBytes = File.ReadAllBytes(state.EditorPath);
+                // Bake the scale before anything reads these bytes — see
+                // ScaleBridge.BakeEditorCraft. A listing is bought by strangers on unknown
+                // installs, which is exactly the case an unbaked craft breaks on. Baking
+                // rewrites MODULE nodes and positions but never a part name, so the tags
+                // below are the same either way.
+                craftBytes = ScaleBridge.BakeEditorCraft(craftBytes);
+                // Tag the listing with the craft's mods (from the ORIGINAL bytes, before
+                // any GKMODS/flag/thumb blocks are appended) so the website can filter by mod.
+                // A recolour pack adds no parts, so the part walk above cannot see it and
+                // a Textures Unlimited craft would tag as stock. Resolve the paint job's
+                // packs separately and union them in, or the website's mod filter quietly
+                // lies about what this craft needs to look the way the screenshot does.
+                var modFolders = CkanGenerator.ModFoldersForCraft(craftBytes);
+                foreach (var f in TextureTransfer.TexturePackFoldersForCraft(craftBytes))
+                    if (!modFolders.Contains(f)) modFolders.Add(f);
+                craftMods = string.Join(",", modFolders.ToArray());
+                // And with its exact part names, so the server can tell a buyer which parts
+                // they're missing before they spend anything — a mod-folder tag can't, since
+                // owning the mod is no guarantee of owning the part (a DLC part vs its
+                // ReStock+ stand-in, say). Same ORIGINAL bytes, same reason.
+                craftParts = string.Join(",", CkanGenerator.PartNamesForCraft(craftBytes).ToArray());
+                craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes);
+                craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
+                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
+                craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Failed to read craft: {ex.Message}");
+                onDone(false, "Could not read the craft file.");
+                yield break;
+            }
+
+            ReadEditorValue(out float mass, out float cost);
+
+            onProgress?.Invoke("Rendering blueprint...");
+
+            // Rendered blueprint — shown publicly on the listing.
+            byte[] blueprintBytes = null;
+            try
+            {
+                string bpPath = VesselRenderer.CaptureVessel();
+                if (!string.IsNullOrEmpty(bpPath) && File.Exists(bpPath))
+                    blueprintBytes = File.ReadAllBytes(bpPath);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Blueprint render failed: {ex.Message}");
+            }
+
+            // Square NW-view thumbnail — the website shows this on the listing card
+            // (the full blueprint is reserved for the detail view).
+            byte[] thumbnailBytes = null;
+            try
+            {
+                thumbnailBytes = VesselRenderer.CaptureNWThumbnail();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Thumbnail render failed: {ex.Message}");
+            }
+
+            // Life-support flag: which LS mod the craft is provisioned for and how long
+            // it lasts, read from the live editor ship (tags as "none" if stock).
+            LifeSupportInfo ls = LifeSupportScan.FromEditor();
+
+            onProgress?.Invoke("Listing craft...");
+
+            bool ok = false;
+            string message = null;
+            yield return mod.Api.ListCraftForSale(
+                craftBytes, SanitizeFileName(state.EditorCraft) + ".craft",
+                state.EditorCraft, state.EditorType, state.EditorParts, mass, cost, price,
+                blueprintBytes, thumbnailBytes, craftMods, craftParts,
+                ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
+                (success, resp, status) =>
+                {
+                    if (success && !string.IsNullOrEmpty(resp))
+                    {
+                        var data = MiniJSON.DeserializeDict(resp);
+                        ok = MiniJSON.GetBool(data, "success", false);
+                        message = ok
+                            ? $"{state.EditorCraft} is listed for {price:N0} KCoins."
+                            : MiniJSON.GetString(data, "message", "Failed to list.");
+                    }
+                    else message = "Failed to list craft.";
+                });
+
+            onDone(ok, message ?? "Failed to list craft.");
         }
 
         // ── Guards ──────────────────────────────────────────────────────────

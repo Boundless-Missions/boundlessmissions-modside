@@ -39,9 +39,29 @@ namespace GeneKerman
         private const string MODS_NODE = "GKMODS";
 
         // Folders shipped with the game (or with this mod) — never a "missing" dependency.
+        // Note "SquadExpansion" here is the bare folder only: the DLCs *inside* it are
+        // real dependencies (see DlcMods) and are keyed by their two-segment path.
         private static readonly HashSet<string> StockFolders =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             { "Squad", "SquadExpansion", "BoundlessMissions" };
+
+        // The stock expansions. They are dependencies like any other — a paid add-on a
+        // large share of players don't own — but they are NOT mods: CKAN can detect a
+        // DLC and never install one, so they are reported separately from the modpack
+        // rather than written into it as a dependency CKAN would fail to resolve.
+        private static readonly Dictionary<string, ModEntry> DlcMods =
+            new Dictionary<string, ModEntry>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "SquadExpansion/MakingHistory", new ModEntry {
+                folder = "SquadExpansion/MakingHistory", ckan = "MakingHistory-DLC", name = "Making History" } },
+            { "SquadExpansion/Serenity", new ModEntry {
+                folder = "SquadExpansion/Serenity", ckan = "BreakingGround-DLC", name = "Breaking Ground" } },
+        };
+
+        private static bool IsDlc(ModEntry m)
+        {
+            return m != null && m.folder != null && DlcMods.ContainsKey(m.folder);
+        }
 
         private static string GameDataRoot =>
             Path.Combine(KSPUtil.ApplicationRootPath, "GameData");
@@ -52,15 +72,11 @@ namespace GeneKerman
 
         // .craft part lines look like `part = mk1pod_4294880972`; the trailing `_<id>`
         // is a per-instance suffix, not part of the part name.
-        private static readonly Regex PartLineRx =
-            new Regex(@"(?m)^\s*part\s*=\s*(.+?)\s*$", RegexOptions.Compiled);
-        // KIS records each stored item's part as `partName = <name>` (stock items in a
-        // .craft already ride the `part = ` lines above). Caught so inventory-only mods
-        // aren't dropped from the modpack.
-        private static readonly Regex PartNameLineRx =
-            new Regex(@"(?m)^\s*partName\s*=\s*(.+?)\s*$", RegexOptions.Compiled);
         private static readonly Regex InstanceSuffixRx =
             new Regex(@"_\d+$", RegexOptions.Compiled);
+        // A bare identifier on its own line opens a node (the `{` follows on the next).
+        private static readonly Regex NodeOpenRx =
+            new Regex(@"^[A-Za-z_][A-Za-z0-9_.\-]*$", RegexOptions.Compiled);
 
         /// <summary>A mod a craft depends on: its GameData folder, its CKAN identifier
         /// (falls back to the folder when unknown), and a human-readable name.</summary>
@@ -88,19 +104,51 @@ namespace GeneKerman
                 if (byFolder.ContainsKey(folder)) continue;
 
                 ModEntry e;
-                if (!registry.TryGetValue(folder, out e))
+                if (!DlcMods.TryGetValue(folder, out e) && !registry.TryGetValue(folder, out e))
                     e = new ModEntry { folder = folder, ckan = folder, name = folder };
                 byFolder[folder] = e;
             }
             return byFolder.Values.ToList();
         }
 
-        /// <summary>The GameData folder a part lives in (first path segment of its URL).</summary>
+        /// <summary>Resolve bare GameData folder names to ModEntries carrying their real
+        /// CKAN identifiers. The part walk above cannot reach a mod that adds no parts —
+        /// a shader/recolour pack, say — so a caller that discovered such a dependency by
+        /// other means (see <c>TextureTransfer</c>) needs this to hand it to
+        /// <see cref="GenerateCkanForMissing"/> as a proper dependency rather than as a
+        /// folder name CKAN has never heard of.</summary>
+        public static List<ModEntry> ResolveMods(IEnumerable<string> folders)
+        {
+            var list = new List<ModEntry>();
+            if (folders == null) return list;
+
+            var registry = LoadCkanRegistry();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var folder in folders)
+            {
+                if (string.IsNullOrEmpty(folder) || StockFolders.Contains(folder)) continue;
+                if (!seen.Add(folder)) continue;
+
+                ModEntry e;
+                if (!DlcMods.TryGetValue(folder, out e) && !registry.TryGetValue(folder, out e))
+                    e = new ModEntry { folder = folder, ckan = folder, name = folder };
+                list.Add(e);
+            }
+            return list;
+        }
+
+        /// <summary>The GameData folder a part lives in (first path segment of its URL) —
+        /// except under SquadExpansion, where the second segment is kept too. The two
+        /// DLCs are bought separately, so "SquadExpansion" alone says nothing about
+        /// whether the recipient can load the part; this is the same distinction
+        /// ModuleManager draws with <c>:NEEDS[SquadExpansion/MakingHistory]</c>.</summary>
         private static string GetModFolder(AvailablePart ap)
         {
             if (ap == null || string.IsNullOrEmpty(ap.partUrl)) return null;
-            int slash = ap.partUrl.IndexOf('/');
-            return slash > 0 ? ap.partUrl.Substring(0, slash) : ap.partUrl;
+            string[] seg = ap.partUrl.Split('/');
+            if (seg.Length > 1 && seg[0].Equals("SquadExpansion", StringComparison.OrdinalIgnoreCase))
+                return seg[0] + "/" + seg[1];
+            return seg[0];
         }
 
         /// <summary>Resolve part names (from a .craft) to their mods via PartLoader.</summary>
@@ -206,12 +254,7 @@ namespace GeneKerman
                 string text = Encoding.UTF8.GetString(craftBytes);
 
                 var names = new List<string>();
-                foreach (Match m in PartLineRx.Matches(text))
-                    names.Add(m.Groups[1].Value);
-                // KIS inventory items list their part as `partName = ` rather than a
-                // `part = ` line, so grab those too (non-parts resolve to null and drop).
-                foreach (Match m in PartNameLineRx.Matches(text))
-                    names.Add(m.Groups[1].Value);
+                CollectCraftPartNames(text, names);
                 if (names.Count == 0) return craftBytes;
 
                 var mods = CollectModsFromPartNames(names);
@@ -252,12 +295,8 @@ namespace GeneKerman
             if (craftBytes == null || craftBytes.Length == 0) return folders;
             try
             {
-                string text = Encoding.UTF8.GetString(craftBytes);
                 var names = new List<string>();
-                foreach (Match m in PartLineRx.Matches(text))
-                    names.Add(m.Groups[1].Value);
-                foreach (Match m in PartNameLineRx.Matches(text))
-                    names.Add(m.Groups[1].Value);
+                CollectCraftPartNames(Encoding.UTF8.GetString(craftBytes), names);
                 if (names.Count == 0) return folders;
 
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -276,6 +315,85 @@ namespace GeneKerman
                 Debug.LogWarning($"[GeneKerman] CkanGenerator.ModFoldersForCraft failed: {ex.Message}");
             }
             return folders;
+        }
+
+        /// <summary>The distinct part names a .craft references, for the server's pre-flight
+        /// check against a buyer's uploaded part catalog. Read straight out of the craft text
+        /// rather than resolved through PartLoader, so it is exactly the set of names the
+        /// recipient's game will go looking for — including any the SENDER is missing.
+        /// Run on the ORIGINAL craft bytes (before GKMODS/flag/thumb embedding).</summary>
+        public static List<string> PartNamesForCraft(byte[] craftBytes)
+        {
+            var names = new List<string>();
+            if (craftBytes == null || craftBytes.Length == 0) return names;
+            try
+            {
+                var raw = new List<string>();
+                CollectCraftPartNames(Encoding.UTF8.GetString(craftBytes), raw);
+
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var r in raw)
+                {
+                    string name = InstanceSuffixRx.Replace(r.Trim(), "");
+                    if (name.Length > 0 && seen.Add(name)) names.Add(name);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] CkanGenerator.PartNamesForCraft failed: {ex.Message}");
+            }
+            return names;
+        }
+
+        /// <summary>Every part name a .craft text references: each PART's own `part = ` line,
+        /// plus the `partName = ` of anything stashed in an inventory (stock STOREDPART, KIS
+        /// ITEM), so inventory-only mods aren't dropped.
+        ///
+        /// Which node a line sits in decides what it means, so this walks the node structure
+        /// instead of matching lines flat. `partName` is TWO different fields: on a PART node
+        /// it is the Unity component class — "Part" on literally every part, "CompoundPart" on
+        /// struts and fuel lines, and in pre-1.0 craft files legacy names like "Strut",
+        /// "Winglet", "ControlSurface" — while inside a stored-item node it is a real part
+        /// name. A flat scan cannot tell them apart, so it swept "Part" out of every PART node
+        /// in every craft and handed it to the buyer's compatibility check as a part nobody
+        /// could possibly have installed.</summary>
+        private static void CollectCraftPartNames(string text, List<string> into)
+        {
+            var stack = new List<string>();   // enclosing node names, innermost last
+            string pending = null;            // node name read, waiting for its `{`
+
+            foreach (var rawLine in text.Split('\n'))
+            {
+                string line = rawLine.Trim();
+                if (line.Length == 0) continue;
+
+                if (line == "{")
+                {
+                    stack.Add(pending ?? "");
+                    pending = null;
+                    continue;
+                }
+                if (line == "}")
+                {
+                    if (stack.Count > 0) stack.RemoveAt(stack.Count - 1);
+                    pending = null;
+                    continue;
+                }
+                if (NodeOpenRx.IsMatch(line)) { pending = line; continue; }
+                pending = null;
+
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = line.Substring(0, eq).Trim();
+                string value = line.Substring(eq + 1).Trim();
+                if (value.Length == 0) continue;
+
+                string node = stack.Count > 0 ? stack[stack.Count - 1] : "";
+                if (key == "part")
+                    into.Add(value);
+                else if (key == "partName" && (node == "STOREDPART" || node == "ITEM"))
+                    into.Add(value);
+            }
         }
 
         /// <summary>The marketplace mod label for a part: the stock DLCs as their own names,
@@ -368,7 +486,9 @@ namespace GeneKerman
         // ── CKAN modpack output ──────────────────────────────────────────────
 
         /// <summary>Write a CKAN metapackage (.ckan) for the subset of <paramref name="mods"/>
-        /// the recipient doesn't have in GameData. No-op when nothing is missing.</summary>
+        /// the recipient doesn't have in GameData. No-op when nothing is missing. A missing
+        /// stock expansion is reported but never written into the modpack — CKAN cannot
+        /// install a DLC, and listing one as a dependency only makes the pack unresolvable.</summary>
         public static void GenerateCkanForMissing(string context, List<ModEntry> mods)
         {
             if (mods == null || mods.Count == 0) return;
@@ -376,6 +496,20 @@ namespace GeneKerman
             var installed = InstalledFolders();
             var missing = mods.Where(m => !installed.Contains(m.folder)).ToList();
             if (missing.Count == 0) return;
+
+            var missingDlc = missing.Where(IsDlc).ToList();
+            missing = missing.Where(m => !IsDlc(m)).ToList();
+
+            // Nothing CKAN can help with — say what's needed and stop.
+            if (missing.Count == 0)
+            {
+                string dlcOnly = string.Join(" and ", missingDlc.Select(m => m.name).ToArray());
+                Post($"⚠ '{context}' needs the {dlcOnly} expansion",
+                     $"This craft uses parts from {dlcOnly}, which you don't have. "
+                     + "It is a paid expansion, so CKAN can't install it — the craft will not "
+                     + "load without it.");
+                return;
+            }
 
             try
             {
@@ -404,10 +538,15 @@ namespace GeneKerman
                 File.WriteAllText(outPath, MiniJSON.Serialize(doc), Encoding.UTF8);
                 Debug.Log($"[GeneKerman] CkanGenerator: wrote modpack for {missing.Count} missing mod(s) → {outPath}");
 
-                Post($"⚠ Missing {missing.Count} mod(s) for '{context}'",
+                string dlcNote = missingDlc.Count == 0 ? "" :
+                    $" It also needs the {string.Join(" and ", missingDlc.Select(m => m.name).ToArray())} "
+                    + "expansion, which is a paid add-on CKAN can't install for you.";
+
+                Post($"⚠ Missing {missing.Count + missingDlc.Count} requirement(s) for '{context}'",
                      $"Needs: {list}. A CKAN installer was saved to "
                      + $"GeneKerman_MissingMods/{Path.GetFileName(outPath)}. "
-                     + "Open it in CKAN (File ▸ Install from .ckan file).");
+                     + "Open it in CKAN (File ▸ Install from .ckan file)."
+                     + dlcNote);
             }
             catch (Exception ex)
             {
@@ -527,9 +666,18 @@ namespace GeneKerman
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                if (Directory.Exists(GameDataRoot))
-                    foreach (var dir in Directory.GetDirectories(GameDataRoot))
-                        set.Add(Path.GetFileName(dir));
+                if (!Directory.Exists(GameDataRoot)) return set;
+                foreach (var dir in Directory.GetDirectories(GameDataRoot))
+                {
+                    string folder = Path.GetFileName(dir);
+                    set.Add(folder);
+                    // Record the DLCs by their two-segment path as well, to match the
+                    // keys GetModFolder produces for expansion parts. Owning one DLC
+                    // must not read as owning the other.
+                    if (folder.Equals("SquadExpansion", StringComparison.OrdinalIgnoreCase))
+                        foreach (var sub in Directory.GetDirectories(dir))
+                            set.Add(folder + "/" + Path.GetFileName(sub));
+                }
             }
             catch { /* unreadable GameData → treat as nothing installed */ }
             return set;

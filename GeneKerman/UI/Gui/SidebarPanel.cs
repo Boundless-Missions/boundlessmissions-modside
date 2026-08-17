@@ -58,6 +58,13 @@ namespace GeneKerman.UI.Gui
 
         protected void CloseImages() => owner?.CloseImages();
 
+        /// <summary>
+        /// Switch to the inbox and open a contract there — for a panel holding a
+        /// reference to one it cannot show itself (a notification about a contract).
+        /// No-op when the inbox is not mounted.
+        /// </summary>
+        protected void OpenContract(string contractId) => owner?.ShowContract(contractId);
+
         internal void Detach()
         {
             Host = null;

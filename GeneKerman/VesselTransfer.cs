@@ -98,6 +98,11 @@ namespace GeneKerman
                 // recipient missing them gets a CKAN modpack to install them.
                 CkanGenerator.EmbedModsInNode(vesselNode, vessel);
 
+                // Carry the Textures Unlimited paint job the same way: the recolour data
+                // is already in the parts' modules, but which recolour PACK defines the
+                // sets they name is only knowable here, on the sender's install.
+                TextureTransfer.EmbedInNode(vesselNode);
+
                 // Snapshot the final values of any TweakScale-rescaled parts (absolute
                 // model scale / mass / stats) into each part's GeneKermanScale module, so
                 // the craft reconstructs identically for every receiver regardless of
@@ -180,16 +185,37 @@ namespace GeneKerman
             try
             {
                 string path = VesselDataCollector.FindCraftFile(v.vesselName);
-                if (string.IsNullOrEmpty(path)) return;
+                if (string.IsNullOrEmpty(path))
+                {
+                    // Matched strictly on "<vesselName>.craft", so a vessel renamed in
+                    // flight — or one that arrived from another player and was never a
+                    // blueprint here — has none to carry. Say so: the recipient gets the
+                    // vessel but nothing in their VAB/SPH, which otherwise looks like a bug.
+                    Debug.Log($"[GeneKerman] EmbedCraftBlueprint: no .craft named '{v.vesselName}' "
+                              + "on this install — sending the vessel without a blueprint.");
+                    return;
+                }
 
                 byte[] craftBytes = System.IO.File.ReadAllBytes(path);
+                // Bake the scale into the blueprint as well. The VESSEL node beside it is
+                // already baked (SnapshotIntoVesselNode, above), so without this the
+                // recipient gets a correct flying ship and a broken re-editable copy of the
+                // same ship — the worst possible split. Matched against the live vessel by
+                // craftID, exactly as the submission path does for a flight craft.
+                if (v.parts != null && v.parts.Count > 0)
+                    craftBytes = ScaleBridge.SnapshotIntoCraftBytes(craftBytes, v.parts);
                 // Carry custom mission flags inside the blueprint too.
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                // …a TweakScale-version backstop, in case the bake above found nothing…
+                craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes);
+                // …the Textures Unlimited paint job (which recolour packs it needs — no
+                // part walk can find a mod that adds no parts)…
+                craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
                 // …the mod list…
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
                 // …and an NW-view thumbnail rendered from this specific vessel (appended
                 // last so every strip stays a clean cut on import).
-                craftBytes = CraftThumb.EmbedThumbForVessel(craftBytes, v);
+                craftBytes = CraftThumb.EmbedThumbForVessel(craftBytes, v, path);
 
                 ConfigNode cn = vesselNode.AddNode("GKCRAFT");
                 cn.AddValue("name", System.IO.Path.GetFileName(path));
@@ -339,6 +365,16 @@ namespace GeneKerman
         public static string TagName(string ownerName, string originalName)
         {
             return ApplyOwnershipTag(originalName, ownerName, null);
+        }
+
+        /// <summary>True when a roster name still carries someone else's ownership tag,
+        /// i.e. the kerbal is only on loan to this save. Our own kerbals are never tagged
+        /// here — <see cref="ApplyOwnershipTag"/> strips the tag the moment they come
+        /// home — so this is the test for "not mine, do not keep".</summary>
+        public static bool IsBorrowedCrewName(string name)
+        {
+            return !string.IsNullOrEmpty(name) &&
+                   name.IndexOf("'s ", StringComparison.Ordinal) > 0;
         }
 
         // ── Import ───────────────────────────────────────────────────────────
@@ -581,6 +617,18 @@ namespace GeneKerman
             // recipient is missing (so they can install what this vessel needs).
             CkanGenerator.ExtractCheckAndStripMods(innerNode);
 
+            // Then the finer-grained pass: a part this install lacks under one name may
+            // be installed under another (a DLC part vs its ReStock+ stand-in), which the
+            // mod-folder check above cannot see. Swap those before the ProtoVessel is
+            // built, or the spawn drops the part.
+            PartAliases.ApplyToVesselNode(innerNode, innerNode.GetValue("name"));
+
+            // With the parts settled, reconcile the paint job: read + strip the GKTU node
+            // and drop the recolour modules this install's prefabs can't accept, so a
+            // vessel painted with a pack the recipient hasn't got spawns in stock colours
+            // instead of dragging orphan modules into a live ProtoVessel.
+            TextureTransfer.ExtractCheckAndStripFromNode(innerNode, innerNode.GetValue("name"));
+
             // For any part carrying a GeneKermanScale snapshot, strip its TweakScale
             // module so the receiver's TweakScale (if any) stays at 1× and our applicator
             // is the sole authority — making the scaled craft deterministic across versions.
@@ -776,6 +824,30 @@ namespace GeneKerman
             return "Your craft";
         }
 
+        /// <summary>
+        /// Whether a vessel with this pid is still in the current save. Lets a caller
+        /// ask "did that removal actually happen?" without going near Die() — the
+        /// reconciler uses it so it can be run repeatedly and stay a no-op once the
+        /// craft is gone. A vessel already dying this frame is treated as gone.
+        /// </summary>
+        public static bool VesselExists(string pid)
+        {
+            Guid g;
+            if (string.IsNullOrEmpty(pid) || !Guid.TryParse(pid, out g)) return false;
+            foreach (var v in FlightGlobals.Vessels)
+                if (v != null && v.id == g && v.state != Vessel.State.DEAD)
+                    return true;
+            return false;
+        }
+
+        /// <summary>Write the save out now. Never call this in flight — KSP would
+        /// serialize a half-torn-down vessel.</summary>
+        public static void SaveNow()
+        {
+            try { GamePersistence.SaveGame("persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE); }
+            catch (Exception saveEx) { Debug.LogWarning($"[GeneKerman] Save failed: {saveEx.Message}"); }
+        }
+
         /// <summary>Outcome of a <see cref="RemoveVesselFromSave"/> call, so the caller
         /// can tell a terminal result (the vessel is gone — stop trying) from a
         /// retry-later one (we're in flight and must defer to a safe scene).</summary>
@@ -787,13 +859,40 @@ namespace GeneKerman
             Failed,    // bad pid or an exception while removing
         }
 
+        /// <summary>What becomes of the crew aboard a vessel this save is giving up.
+        /// Removing the ship kills whoever is aboard (KSP's own Die()), so every value
+        /// here is also a decision about kerbals the player did not agree to lose.</summary>
+        public enum CrewFate
+        {
+            /// <summary>Everyone aboard goes with the craft. The issuer side of a rescue:
+            /// the stranded crew are the point of the contract, and they come back later
+            /// as an import with their tag stripped, not by staying here.</summary>
+            LeavesWithCraft,
+
+            /// <summary>Only borrowed kerbals ("{owner}'s {name}") go; our own are handed
+            /// back to the roster as Available. The rescuer side: the delivery ship is
+            /// normally flown by the player's own pilots, and handing the craft over must
+            /// not quietly cost them a crew they never sent anywhere.</summary>
+            BorrowedOnly,
+
+            /// <summary>Nobody leaves the roster; the craft alone is removed.</summary>
+            StaysInRoster,
+        }
+
         /// <summary>
-        /// Remove a vessel (by pid GUID) from the current save and drop its crew
-        /// from the roster, so the same kerbals don't exist in two saves. Refuses
-        /// to remove the focused active vessel in flight (caller must defer to a
+        /// Remove a vessel (by pid GUID) from the current save, disposing of its crew
+        /// per <paramref name="crewFate"/> so the same kerbals don't exist in two saves.
+        /// Refuses to remove the focused active vessel in flight (caller must defer to a
         /// Space Center / Tracking Station scene).
+        ///
+        /// <paramref name="persist"/> false leaves the save file alone — for a caller
+        /// removing several vessels, which wants one save at the end and, more to the
+        /// point, wants its own bookkeeping to be up to date before that save runs.
+        /// The removal itself is complete either way; only the write to disk is deferred.
         /// </summary>
-        public static RemovalResult RemoveVesselFromSave(string pid, bool dropCrew = true)
+        public static RemovalResult RemoveVesselFromSave(string pid,
+                                                         CrewFate crewFate = CrewFate.LeavesWithCraft,
+                                                         bool persist = true)
         {
             if (string.IsNullOrEmpty(pid))
             {
@@ -829,8 +928,10 @@ namespace GeneKerman
             try
             {
                 // Snapshot the crew before destroying the hull — Die() unassigns them, so
-                // there is nobody aboard to read afterwards.
-                var crew = dropCrew ? CrewOf(target) : new List<ProtoCrewMember>();
+                // there is nobody aboard to read afterwards. Always read them, whatever
+                // their fate: Die() marks everyone aboard Missing (or KIA), so even the
+                // crew we are keeping have to be found again and put back.
+                var crew = CrewOf(target);
 
                 // Destroy the hull FIRST. The old order removed crew from the roster
                 // before Die(), which let KSP's own crew handling inside Die() trip over
@@ -845,28 +946,47 @@ namespace GeneKerman
                 if (flightState != null && flightState.protoVessels != null)
                     flightState.protoVessels.RemoveAll(pv => pv != null && pv.vesselID == g);
 
-                if (dropCrew)
+                // Same null-tolerance as flightState above: the vessel is already gone by
+                // this point, so a missing game must not turn a completed removal into a
+                // Failed the caller retries forever.
+                var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
+                var kept = new List<string>();
+                var dropped = new List<string>();
+                foreach (var pcm in (roster != null ? crew : new List<ProtoCrewMember>()))
                 {
-                    var roster = HighLogic.CurrentGame.CrewRoster;
-                    foreach (var pcm in crew)
+                    if (pcm == null) continue;
+                    try
                     {
-                        try
+                        if (KeepsRoster(crewFate, pcm.name))
                         {
-                            pcm.rosterStatus = ProtoCrewMember.RosterStatus.Dead;
-                            roster.Remove(pcm);
+                            // They were never lost — the craft was. Undo the death Die()
+                            // just handed them, or they sit in the Astronaut Complex's
+                            // Lost tab (its Available tab lists Available crew only) and
+                            // still count against the hireable-crew limit.
+                            pcm.rosterStatus = ProtoCrewMember.RosterStatus.Available;
+                            kept.Add(pcm.name);
+                            continue;
                         }
-                        catch (Exception cex)
-                        {
-                            Debug.LogWarning($"[GeneKerman] RemoveVessel: could not drop crew {pcm.name}: {cex.Message}");
-                        }
+                        pcm.rosterStatus = ProtoCrewMember.RosterStatus.Dead;
+                        // Remove is keyed by name and answers whether it found anything.
+                        // A false here is how a kerbal ends up parked as Dead forever, so
+                        // say so rather than reporting a drop that didn't happen.
+                        if (roster.Remove(pcm)) dropped.Add(pcm.name);
+                        else Debug.LogWarning($"[GeneKerman] RemoveVessel: {pcm.name} was not in " +
+                                              "the roster to drop.");
+                    }
+                    catch (Exception cex)
+                    {
+                        Debug.LogWarning($"[GeneKerman] RemoveVessel: could not settle crew {pcm.name}: {cex.Message}");
                     }
                 }
+                if (kept.Count > 0 || dropped.Count > 0)
+                    Debug.Log($"[GeneKerman] RemoveVessel: crew fate {crewFate} — " +
+                              $"kept [{string.Join(", ", kept.ToArray())}], " +
+                              $"dropped [{string.Join(", ", dropped.ToArray())}].");
 
-                if (!HighLogic.LoadedSceneIsFlight)
-                {
-                    try { GamePersistence.SaveGame("persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE); }
-                    catch (Exception saveEx) { Debug.LogWarning($"[GeneKerman] RemoveVessel save failed: {saveEx.Message}"); }
-                }
+                if (persist && !HighLogic.LoadedSceneIsFlight)
+                    SaveNow();
 
                 Debug.Log($"[GeneKerman] (Ok) Removed vessel pid {pid} from save.");
                 return RemovalResult.Removed;
@@ -876,6 +996,109 @@ namespace GeneKerman
                 Debug.LogError($"[GeneKerman] RemoveVessel failed: {ex}");
                 return RemovalResult.Failed;
             }
+        }
+
+        /// <summary>Does this kerbal stay in the roster when their ship is given up?</summary>
+        private static bool KeepsRoster(CrewFate fate, string kerbalName)
+        {
+            switch (fate)
+            {
+                case CrewFate.StaysInRoster: return true;
+                case CrewFate.BorrowedOnly:  return !IsBorrowedCrewName(kerbalName);
+                default:                     return false;
+            }
+        }
+
+        /// <summary>
+        /// Drop borrowed kerbals ("{owner}'s {name}") that this save has left dead or
+        /// missing — the residue of a craft that left without a clean hand-over (the
+        /// common case: the ship was already gone by the time its removal ran, so
+        /// nothing ever settled its crew).
+        ///
+        /// They belong to another player and their ship isn't here, so they can do
+        /// nothing but harm: KSP counts Missing crew against the astronaut-complex
+        /// hire limit, and its applicant generator refuses any new name that appears
+        /// as a substring of an existing roster name — silently, so a polluted roster
+        /// shows up as an empty applicant list rather than an error. Anything the
+        /// emergency freeze is deliberately holding is left alone; it parks its crew
+        /// as Dead on purpose and thaws them itself.
+        ///
+        /// Returns how many were dropped. Nothing here is lost for good — a re-import
+        /// of their craft rebuilds them from its GKCREW nodes.
+        /// </summary>
+        public static int PurgeBorrowedGhostCrew()
+        {
+            var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
+            if (roster == null) return 0;
+
+            try
+            {
+                var frozen = new HashSet<string>(StringComparer.Ordinal);
+                var records = GKContractScenario.Instance != null
+                    ? GKContractScenario.Instance.Immunities : null;
+                if (records != null)
+                    foreach (var rec in records)
+                    {
+                        if (rec == null || rec.Crew == null) continue;
+                        foreach (var c in rec.Crew)
+                            if (c != null && !string.IsNullOrEmpty(c.Name)) frozen.Add(c.Name);
+                    }
+
+                // Materialise before removing: the roster is being iterated.
+                var statuses = new[]
+                {
+                    ProtoCrewMember.RosterStatus.Dead,
+                    ProtoCrewMember.RosterStatus.Missing,
+                };
+                var ghosts = new List<ProtoCrewMember>();
+                foreach (var pcm in roster.Kerbals(statuses))
+                {
+                    if (pcm == null || !IsBorrowedCrewName(pcm.name)) continue;
+                    if (frozen.Contains(pcm.name)) continue;
+                    ghosts.Add(pcm);
+                }
+
+                int removed = 0;
+                foreach (var pcm in ghosts)
+                {
+                    try { if (roster.Remove(pcm)) removed++; }
+                    catch (Exception rex)
+                    {
+                        Debug.LogWarning($"[GeneKerman] RosterSweep: could not drop {pcm.name}: {rex.Message}");
+                    }
+                }
+                if (removed > 0)
+                    Debug.Log($"[GeneKerman] RosterSweep: dropped {removed} borrowed kerbal(s) " +
+                              "left behind by craft that are no longer in this save.");
+                return removed;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] RosterSweep failed: {ex.Message}");
+                return 0;
+            }
+        }
+
+        /// <summary>
+        /// Kerbals in this save whose profession no installed mod defines, as
+        /// "Name (trait)" — the labels for the warning. This call is read-only: the trait
+        /// string is exactly what lets them resolve again if the mod that defines it comes
+        /// back, so nothing rewrites it behind the player's back. <see cref="TraitRepair"/>
+        /// is the deliberate, recorded, reversible way to overwrite one, and it only runs
+        /// from the button on that warning.
+        ///
+        /// Reporting it is worth doing at all because the way KSP fails here names
+        /// nothing: one of these anywhere in the roster throws a NullReference part-way
+        /// through building the Astronaut Complex (see <see cref="ApplyTrait"/>), and
+        /// what the player sees is a screen with one half-drawn applicant who cannot be
+        /// hired and three empty tabs.
+        /// </summary>
+        public static List<string> FindUnresolvableTraitCrew()
+        {
+            var found = new List<string>();
+            foreach (var pcm in TraitRepair.BrokenCrew())
+                found.Add($"{pcm.name} ({pcm.trait})");
+            return found;
         }
 
         // ── Crew Randomization ───────────────────────────────────────────────
@@ -961,6 +1184,30 @@ namespace GeneKerman
         /// </summary>
         private static void AddCrewToRoster(ConfigNode vesselNode)
         {
+            // Collect the professions this install has to refuse while the import runs
+            // and report them once at the end — one message per craft, not one per kerbal
+            // (the same shape as PartAliases' Report). This is the only entry point into
+            // ApplyTrait, so the accumulator's lifetime is exactly one import; the finally
+            // matters because a throw part-way through still leaves downgraded crew behind.
+            traitDowngrades = new List<TraitRepair.Downgrade>();
+            try { AddCrewToRosterInner(vesselNode); }
+            finally
+            {
+                var downgraded = traitDowngrades;
+                traitDowngrades = null;
+                // Write the originals down before saying anything about them: the message
+                // promises they come back if the mod is installed, and TraitRepair's record
+                // file is what makes that true.
+                TraitRepair.RememberDowngrades(downgraded);
+                // Read the name defensively: this runs on the way out of a throw too,
+                // and an NRE here would replace the real exception with a useless one.
+                PostTraitDowngrades(downgraded,
+                    vesselNode != null ? vesselNode.GetValue("name") : null);
+            }
+        }
+
+        private static void AddCrewToRosterInner(ConfigNode vesselNode)
+        {
             var roster = HighLogic.CurrentGame.CrewRoster;
             var addedNames = new HashSet<string>();
 
@@ -1002,13 +1249,122 @@ namespace GeneKerman
             }
         }
 
+        // Downgrades collected across one import, or null outside one. See
+        // AddCrewToRoster, which owns its lifetime. The record type is TraitRepair's
+        // because that is where they are persisted and undone from.
+        private static List<TraitRepair.Downgrade> traitDowngrades;
+
+        /// <summary>
+        /// Give an incoming kerbal the sender's profession, but only one this install
+        /// actually defines.
+        ///
+        /// `KerbalRoster.SetExperienceTrait` does **not** validate: an unknown name is
+        /// written straight into `pcm.trait`, and since no `EXPERIENCE_TRAIT` matches it,
+        /// `experienceTrait` is left null. That combination is a landmine for every stock
+        /// screen built out of `CrewListItem` — the Astronaut Complex and the crew
+        /// assignment dialog — because `SetXP` reads `pcm.experienceTrait.Title`. Its one
+        /// self-repair (`SetExperienceTrait(pcm, null)`) can't help: the fallback that
+        /// picks a valid trait only fires when `pcm.trait` is *empty*, and this one is
+        /// full of a name that will never resolve. The result is a NullReference thrown
+        /// mid-build, which takes out the rest of the list, the other three lists, and
+        /// leaves a half-drawn row that cannot be clicked — with nothing in the log
+        /// tying it to the kerbal that caused it.
+        ///
+        /// The sender's own trait is not lost by refusing it here: it stays in the GKCREW
+        /// node that travels with the craft, so the same kerbal resolves correctly again
+        /// in any save that has the mod defining it.
+        /// </summary>
+        private static void ApplyTrait(ProtoCrewMember pcm, string trait)
+        {
+            if (pcm == null || string.IsNullOrEmpty(trait)) return;
+
+            bool known;
+            try
+            {
+                var configs = GameDatabase.Instance != null
+                    ? GameDatabase.Instance.ExperienceConfigs : null;
+                known = configs != null && configs.GetExperienceTraitConfig(trait) != null;
+            }
+            catch { known = false; }
+
+            if (!known)
+            {
+                // Leave whatever GetNewKerbal generated — a real local profession.
+                Debug.LogWarning($"[GeneKerman] Crew import: '{trait}' is not a profession this " +
+                                 $"install defines — {pcm.name} keeps {pcm.trait} instead. " +
+                                 "(Install the mod that adds it to get the original back.)");
+                if (traitDowngrades != null)
+                    traitDowngrades.Add(new TraitRepair.Downgrade
+                    { Name = pcm.name, Original = trait, Given = pcm.trait });
+                return;
+            }
+            KerbalRoster.SetExperienceTrait(pcm, trait);
+        }
+
+        /// <summary>
+        /// Say out loud which incoming kerbals lost their profession, once per import.
+        ///
+        /// <see cref="ApplyTrait"/> refuses a trait this install can't define, which keeps
+        /// the roster safe but silently changes someone's job: a player who was told they
+        /// were getting an engineer finds a pilot, with nothing but a log line to explain
+        /// it. Every other import-side substitution reports itself (PartAliases, GKMODS,
+        /// GKTU) and this one has the same shape, so it says the same kind of thing.
+        ///
+        /// The original is not lost twice over: the *craft* keeps it in its GKCREW node,
+        /// and <see cref="TraitRepair.RememberDowngrades"/> keeps it for these roster
+        /// entries — so installing the mod later does hand these kerbals their job back,
+        /// on the next visit to the Space Center.
+        /// </summary>
+        private static void PostTraitDowngrades(List<TraitRepair.Downgrade> downgrades, string vesselName)
+        {
+            if (downgrades == null || downgrades.Count == 0) return;
+
+            string what = string.IsNullOrEmpty(vesselName) ? "this craft" : "'" + vesselName + "'";
+
+            // Who changed, and which mods would have covered them — deduped, because the
+            // point of the message is what to install and two Kolonists are one install.
+            var lines = new List<string>();
+            var mods = new List<string>();
+            foreach (var d in downgrades)
+            {
+                lines.Add($"{d.Name} ({d.Original} → {d.Given})");
+                string mod = ContractConstraints.TraitMod(d.Original);
+                if (mod != null && !mods.Contains(mod)) mods.Add(mod);
+            }
+
+            var sb = new StringBuilder();
+            sb.Append($"{downgrades.Count} kerbal(s) aboard {what} have a profession no installed ")
+              .Append("mod defines, and were given a local one instead: ")
+              .Append(string.Join("; ", lines.ToArray())).Append(". ");
+            if (mods.Count > 0)
+                sb.Append($"Those come from {string.Join(" / ", mods.ToArray())}. ");
+            sb.Append("Their original professions are remembered: install the mod that defines ")
+              .Append("them and they are handed back automatically.");
+
+            string title = "⚠ Crew arrived without their profession";
+            string body = sb.ToString();
+            Debug.LogWarning($"[GeneKerman] {title} — {body}");
+
+            var gk = GeneKermanMod.Instance;
+            if (gk != null)
+            {
+                try { gk.ShowNotification(title, body); return; }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning("[GeneKerman] Crew-trait notification failed, falling back " +
+                                     $"to screen message: {ex.Message}");
+                }
+            }
+
+            try { ScreenMessages.PostScreenMessage($"{title}: {body}", 12f, ScreenMessageStyle.UPPER_CENTER); }
+            catch { /* no screen (headless) — the log line is enough */ }
+        }
+
         /// <summary>Copy gender, profession/trait, courage and stupidity from a saved
         /// ProtoCrewMember node (KSP stores courage as "brave", stupidity as "dull").</summary>
         private static void ApplyKerbalAttributes(ProtoCrewMember pcm, ConfigNode kn)
         {
-            string trait = kn.GetValue("trait");
-            if (!string.IsNullOrEmpty(trait))
-                KerbalRoster.SetExperienceTrait(pcm, trait);
+            ApplyTrait(pcm, kn.GetValue("trait"));
 
             string gender = kn.GetValue("gender");
             if (!string.IsNullOrEmpty(gender))
@@ -1039,10 +1395,7 @@ namespace GeneKerman
             newCrew.ChangeName(name);
 
             // Copy traits from the original node if available
-            if (!string.IsNullOrEmpty(trait))
-            {
-                KerbalRoster.SetExperienceTrait(newCrew, trait);
-            }
+            ApplyTrait(newCrew, trait);
 
             // Set as assigned (in a vessel)
             newCrew.type = ProtoCrewMember.KerbalType.Crew;
@@ -1094,6 +1447,33 @@ namespace GeneKerman
         public string recovery = "crew";    // "crew" | "vessel"
         public double minDv;                // m/s, 0 = no requirement
 
+        // Orbit mode only: the plane and the regime the delivery orbit has to be in.
+        // Ap/Pe say nothing about either, so without these a craft in an equatorial
+        // orbit satisfies a rescue from a polar one. marginIncl <= 0 == any plane,
+        // no orbit types == any regime — which is every rescue issued before this.
+        public double incl;                 // target inclination, degrees (0..180)
+        public double marginIncl;           // ± degrees; <= 0 = no plane requirement
+        public List<string> orbitTypes = new List<string>();
+
+        /// <summary>The named-regime half of the requirement, as the shared checker
+        /// wants it. Empty when the issuer named no regime.</summary>
+        public OrbitConstraint OrbitTypeConstraint()
+        {
+            var o = new OrbitConstraint();
+            if (orbitTypes != null) o.Requirements.AddRange(orbitTypes);
+            return o;
+        }
+
+        /// <summary>One-line summary of the orbit requirement, or "" when there is none.</summary>
+        public string DescribeOrbitRequirement()
+        {
+            var bits = new List<string>();
+            var types = OrbitTypeConstraint();
+            if (!types.IsEmpty) bits.Add(types.LabelList());
+            if (marginIncl > 0) bits.Add($"inclination {incl:F1}° (±{marginIncl:F1}°)");
+            return string.Join(" · ", bits.ToArray());
+        }
+
         /// <summary>flightIDs of the wreck's parts as it was handed over. Only the
         /// rescuer's client is sent these, and only on a "vessel" recovery — nobody
         /// else has anything to check them against.</summary>
@@ -1118,7 +1498,19 @@ namespace GeneKerman
                 // all crew-only with no Δv floor — exactly what these defaults mean.
                 recovery = MiniJSON.GetString(d, "recovery", "crew"),
                 minDv = MiniJSON.GetDouble(d, "min_dv", 0),
+                // Absent on every rescue issued before the plane could be constrained;
+                // a 0 margin reads as "any plane", which is what those all meant.
+                incl = MiniJSON.GetDouble(d, "inc", 0),
+                marginIncl = MiniJSON.GetDouble(d, "margin_inc", 0),
             };
+
+            var types = MiniJSON.GetList(d, "orbit_types");
+            if (types != null)
+                foreach (var o in types)
+                {
+                    string t = o == null ? null : o.ToString().Trim().ToLowerInvariant();
+                    if (!string.IsNullOrEmpty(t)) spec.orbitTypes.Add(t);
+                }
 
             var parts = MiniJSON.GetList(d, "wreck_parts");
             if (parts != null)

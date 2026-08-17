@@ -1,10 +1,20 @@
 /*
  * UI/Gui/SidebarController.cs – The in-game uGUI sidebar.
  *
- * A left-edge tab that slides a panel in over the viewport. Built once at
- * Start() and parented to the mod's DontDestroyOnLoad GameObject, so the
+ * A centred panel that expands sideways out of the middle of the screen. Built
+ * once at Start() and parented to the mod's DontDestroyOnLoad GameObject, so the
  * hierarchy survives every scene change; only GPU resources die, and
  * Sprites.Refresh() puts those back.
+ *
+ * The toolbar button is the only way in — there is no pull-out tab. That removes
+ * the edge-docking the tab existed to serve: a centred panel has no near edge, so
+ * the VAB/SPH mirroring (KSP owns the left edge there) has nothing left to do.
+ *
+ * The open animation scales the panel's transform on X rather than animating its
+ * width. A width animation would re-run the whole layout every frame of the
+ * expand — and a layout squeezed to nearly zero makes every Ellipsis label render
+ * nothing at all, so the panel would flash empty on the way out. Scaling is one
+ * transform write and touches no layout.
  *
  * Five things here are load-bearing and easy to lose in a later refactor:
  *
@@ -21,7 +31,7 @@
  *     off, consent not accepted) is where *nothing else in the mod draws*. The
  *     sidebar has to observe it too; consent especially, since rule 8.1 means
  *     nothing happens before opt-in.
- *  5. The slide runs off Time.unscaledDeltaTime in Tick(), not a coroutine, so
+ *  5. The expand runs off Time.unscaledDeltaTime in Tick(), not a coroutine, so
  *     a scene load mid-animation cannot strand the panel half-open.
  */
 
@@ -48,19 +58,14 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         private const float PanelWideWidth = 880f;
 
-        private const float TabWidth = 26f;
-        private const float TabHeight = 88f;
         private const float VerticalMargin = 48f;
 
         /// <summary>
-        /// Top margin while the panel is on the right — enough to clear KSP's own
-        /// application launcher strip, which lives in that corner.
+        /// Long enough that the deceleration is actually visible. The old edge slide ran
+        /// in 0.18s, which an exponential ease would spend almost entirely at full
+        /// speed — the curve only reads as a curve if there is time to see it flatten.
         /// </summary>
-        private const float EditorTopMargin = 96f;
-
-        private const float SlideSeconds = 0.18f;
-        private const float PulseSeconds = 4f;
-        private const float PulseHz = 1f;
+        private const float ExpandSeconds = 0.25f;
 
         private const string LockId = "GK_Sidebar";
         private const string TextLockId = "GK_SidebarText";
@@ -92,11 +97,7 @@ namespace GeneKerman.UI.Gui
         // ── State ───────────────────────────────────────────────────────────
         private GameObject rootGo;
         private Canvas canvas;
-        private RectTransform slider;
         private RectTransform panelRect;
-        private RectTransform tabRect;
-        private Image tabGlow;
-        private Lbl tabCaret;
         private El contentHost;
         private readonly ImageViewer viewer = new ImageViewer();
 
@@ -104,7 +105,6 @@ namespace GeneKerman.UI.Gui
         private bool open;
         private float openAmount;       // 0 = closed, 1 = open
         private float currentWidth = PanelWidth;
-        private float pulseRemaining;
         private bool hiddenByGame;      // F2 / capture in progress
         private bool lockHeld;
         private bool textLockHeld;
@@ -112,9 +112,6 @@ namespace GeneKerman.UI.Gui
         private bool typing;            // a text box in the sidebar has focus
         private bool dragLatch;         // a drag that started on the panel
         private float lastCanvasScale = -1f;
-
-        /// <summary>Which edge the panel is docked to. Right in the editor. See UpdateEdge.</summary>
-        private bool onRight;
 
         /// <summary>Scene the labels were last rebuilt for. See RefreshTextAfterSceneChange.</summary>
         private GameScenes lastScene = GameScenes.LOADING;
@@ -186,7 +183,7 @@ namespace GeneKerman.UI.Gui
             BuildHierarchy();
 
             built = true;
-            ApplySlide();
+            ApplyExpand();
             // Remembered so a later frame can tell "this install has no TMP font" from
             // "the font we were using has just been destroyed" — see UpdateAssets.
             fontInUse = Theme.Font;
@@ -214,18 +211,7 @@ namespace GeneKerman.UI.Gui
         {
             var root = new El(rootGo).Stretch();
 
-            // One moving parent for both the panel and the tab, so the tab rides
-            // the panel's edge and the slide is a single transform write.
-            var sliderEl = UIF.Root("Slider", root.Rt);
-            slider = sliderEl.Rt;
-            slider.anchorMin = new Vector2(0f, 0f);
-            slider.anchorMax = new Vector2(0f, 1f);
-            slider.pivot = new Vector2(0f, 0.5f);
-            slider.sizeDelta = new Vector2(PanelWidth + TabWidth, 0f);
-            slider.anchoredPosition = Vector2.zero;
-
-            BuildPanel(sliderEl);
-            BuildTab(sliderEl);
+            BuildPanel(root);
 
             // Last child of the root, so it paints over the panel — a
             // ScreenSpaceOverlay canvas draws in hierarchy order, and there is no
@@ -233,13 +219,16 @@ namespace GeneKerman.UI.Gui
             viewer.Build(root);
         }
 
-        private void BuildPanel(El sliderEl)
+        private void BuildPanel(El parent)
         {
-            var panel = UIF.Root("Panel", sliderEl.Rt);
+            var panel = UIF.Root("Panel", parent.Rt);
             panelRect = panel.Rt;
-            panelRect.anchorMin = new Vector2(0f, 0f);
-            panelRect.anchorMax = new Vector2(0f, 1f);
-            panelRect.pivot = new Vector2(0f, 0.5f);
+            // Anchored to the screen's horizontal centre and stretched vertically, with
+            // the pivot in the middle: that pivot is what makes the X scale below grow
+            // the panel out of the centre in both directions rather than off one side.
+            panelRect.anchorMin = new Vector2(0.5f, 0f);
+            panelRect.anchorMax = new Vector2(0.5f, 1f);
+            panelRect.pivot = new Vector2(0.5f, 0.5f);
             panelRect.sizeDelta = new Vector2(PanelWidth, -VerticalMargin * 2f);
             panelRect.anchoredPosition = Vector2.zero;
 
@@ -263,8 +252,7 @@ namespace GeneKerman.UI.Gui
 
             UIF.Divider(panel);
 
-            // Panel switcher — only meaningful once there is more than one panel,
-            // which today means the dev gallery is on.
+            // Panel switcher — only meaningful once there is more than one panel.
             // A Column of rows, not one Row: past four panels the captions no longer
             // fit a single strip (see RebuildTabStrip). No fixed height — the group
             // reports whatever its rows come to, one line or two.
@@ -272,44 +260,6 @@ namespace GeneKerman.UI.Gui
 
             // Content fills whatever the header and switcher leave.
             contentHost = UIF.Box(panel, "Content").Column(0f).Flex(0f, 1f);
-        }
-
-        private void BuildTab(El sliderEl)
-        {
-            var tab = UIF.Root("Tab", sliderEl.Rt);
-            tabRect = tab.Rt;
-            tabRect.anchorMin = new Vector2(0f, 0.5f);
-            tabRect.anchorMax = new Vector2(0f, 0.5f);
-            tabRect.pivot = new Vector2(0f, 0.5f);
-            tabRect.sizeDelta = new Vector2(TabWidth, TabHeight);
-            tabRect.anchoredPosition = new Vector2(PanelWidth, 0f);
-
-            var img = tab.Go.AddComponent<Image>();
-            img.raycastTarget = true;
-            var btn = tab.Go.AddComponent<Button>();
-            Sprites.BindStates(
-                img, btn,
-                Sprites.Rounded(Theme.Alpha(Theme.Card, 0.94f), Theme.RadiusSm, Theme.Border),
-                Sprites.Rounded(Theme.Alpha(Theme.Secondary, 0.96f), Theme.RadiusSm, Theme.Border),
-                Sprites.Rounded(Theme.Alpha(Theme.Muted, 0.96f), Theme.RadiusSm, Theme.Border),
-                Sprites.Rounded(Theme.Alpha(Theme.Card, 0.5f), Theme.RadiusSm, Theme.Alpha(Theme.Border, 0.5f)));
-            btn.onClick.AddListener(Toggle);
-
-            // The pulse: an overlay carrying only a --primary outline, faded in and
-            // out by alpha. Animating the tint of a single Image is the cheap way to
-            // do this — the sprite colours are baked, so swapping sprites per frame
-            // to change a border colour would allocate a texture per step.
-            var glow = UIF.Root("Glow", tabRect).Stretch(-2, -2, -2, -2);
-            tabGlow = glow.Go.AddComponent<Image>();
-            tabGlow.raycastTarget = false;
-            Sprites.Bind(tabGlow, Sprites.Rounded(Theme.Alpha(Theme.Primary, 0f), Theme.RadiusSm, Theme.Primary, 2));
-            tabGlow.color = new Color(1f, 1f, 1f, 0f);
-
-            // Chevron. ASCII on purpose: KSP's font is borrowed, not shipped, so a
-            // typographic glyph is a bet on whatever face happens to be loaded.
-            var caret = UIF.Root("Caret", tabRect).Stretch();
-            tabCaret = UIF.Label(caret, ">", Theme.FontLg, Theme.MutedForeground).Align(TextAlign.Center);
-            tabCaret.E.Stretch();
         }
 
         // ── Panels ──────────────────────────────────────────────────────────
@@ -386,8 +336,6 @@ namespace GeneKerman.UI.Gui
         {
             if (open == value) return;
             open = value;
-            // The caret points at what pressing it does, not at where the panel is.
-            tabCaret?.Set(CaretGlyph());
             if (open) active?.MarkDirty();
         }
 
@@ -413,6 +361,28 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>Close the viewer — for a panel whose textures are about to go.</summary>
         internal void CloseImages() => viewer.Close();
+
+        /// <summary>
+        /// Show a contract, switching panels to get there — what a notification about
+        /// one is for. The controller does the switching rather than the feed reaching
+        /// across into the inbox itself, because selecting a panel is also what fires
+        /// its OnShown/OnHidden pair, and a panel opened behind the switcher's back
+        /// would never get either.
+        /// </summary>
+        internal void ShowContract(string contractId)
+        {
+            if (string.IsNullOrEmpty(contractId)) return;
+
+            foreach (var p in panels)
+            {
+                var inbox = p as ContractsPanel;
+                if (inbox == null) continue;
+
+                Select(inbox);
+                inbox.ShowContract(contractId);
+                return;
+            }
+        }
 
         internal bool ImagesOpen => viewer.IsOpen;
 
@@ -441,9 +411,7 @@ namespace GeneKerman.UI.Gui
 
             UpdatePixelDensity();
             UpdateAssets();
-            UpdateEdge();
-            AnimateSlide();
-            AnimatePulse();
+            AnimateExpand();
             viewer.Tick();
             UpdateInputLock();
             UpdateEscape();
@@ -493,87 +461,6 @@ namespace GeneKerman.UI.Gui
         /// comparisons; the expensive half (searching every loaded TMP asset) runs
         /// only when something is actually gone.
         /// </summary>
-        /// <summary>
-        /// Put the sidebar on the right in the VAB and SPH, and take the pull-out tab
-        /// away there.
-        ///
-        /// KSP owns the left edge in the editor — the part list, the category strip
-        /// and the sub-assembly flap are all under where the panel and its tab sit.
-        /// The right edge is empty apart from the stock toolbar, which the top margin
-        /// below clears. The tab can go because it is no longer the only way in: the
-        /// toolbar button opens the sidebar in every scene.
-        ///
-        /// Only the tab is hidden. A sidebar that is already open stays open, and the
-        /// header's X still closes it.
-        ///
-        /// Polled rather than hooked to a scene event, for the same reason as the rest
-        /// of Tick: this has to be right after a scene load *and* after a canvas
-        /// rebuild, and comparing a bool is cheaper than being sure of the ordering.
-        /// </summary>
-        private void UpdateEdge()
-        {
-            bool editor = HighLogic.LoadedSceneIsEditor;
-
-            if (onRight != editor)
-            {
-                onRight = editor;
-                ApplyEdge();
-            }
-
-            // The tab comes back whenever the panel is out, editor or not: it is the
-            // affordance that says this thing can be put away again, and it is the
-            // one control that is always in the same place. openAmount keeps it
-            // through the closing slide rather than blinking out at the first frame.
-            bool wantTab = !editor || open || openAmount > 0.001f;
-            if (tabRect != null && tabRect.gameObject.activeSelf != wantTab)
-                tabRect.gameObject.SetActive(wantTab);
-        }
-
-        /// <summary>
-        /// Mirror the three rects that make up the sidebar onto the other edge.
-        ///
-        /// Anchors and pivots only — every position is written by ApplySlide, which
-        /// reads <see cref="onRight"/> for its sign. Doing it any other way means two
-        /// copies of the slide arithmetic that have to agree.
-        /// </summary>
-        private void ApplyEdge()
-        {
-            float x = onRight ? 1f : 0f;
-
-            if (slider != null)
-            {
-                slider.anchorMin = new Vector2(x, 0f);
-                slider.anchorMax = new Vector2(x, 1f);
-                slider.pivot = new Vector2(x, 0.5f);
-            }
-
-            if (panelRect != null)
-            {
-                panelRect.anchorMin = new Vector2(x, 0f);
-                panelRect.anchorMax = new Vector2(x, 1f);
-                panelRect.pivot = new Vector2(x, 0.5f);
-            }
-
-            if (tabRect != null)
-            {
-                tabRect.anchorMin = new Vector2(x, 0.5f);
-                tabRect.anchorMax = new Vector2(x, 0.5f);
-                tabRect.pivot = new Vector2(x, 0.5f);
-            }
-
-            // The caret points at what pressing it does, and that reverses with the
-            // edge — see CaretGlyph.
-            tabCaret?.Set(CaretGlyph());
-            ApplySlide();
-        }
-
-        /// <summary>
-        /// Which way the tab's chevron points: at the motion the click causes, not at
-        /// where the panel is. On the left that is "&lt;" to close; on the right the
-        /// same action moves the panel the other way, so the glyph flips with it.
-        /// </summary>
-        private string CaretGlyph() => open == !onRight ? "<" : ">";
-
         /// <summary>
         /// Escape closes what is on top: the image viewer if it is up, otherwise the
         /// panel.
@@ -692,7 +579,7 @@ namespace GeneKerman.UI.Gui
             return true;
         }
 
-        private void AnimateSlide()
+        private void AnimateExpand()
         {
             // Unscaled throughout: the panel must still animate during a time-warp
             // pause or while the game is paused at the space centre.
@@ -703,63 +590,50 @@ namespace GeneKerman.UI.Gui
 
             if (!Mathf.Approximately(openAmount, target))
             {
-                openAmount = Mathf.MoveTowards(openAmount, target, dt / SlideSeconds);
+                openAmount = Mathf.MoveTowards(openAmount, target, dt / ExpandSeconds);
                 moved = true;
             }
 
             // The panel widens to make room for a detail pane and narrows back when
-            // the selection is cleared. Same duration as the slide, so a click that
-            // does both reads as one motion.
+            // the selection is cleared. Same duration as the expand, so a click that
+            // does both reads as one motion. This one *is* a width change rather than
+            // a scale: it is a change of resting size, so the layout has to re-run.
             float targetWidth = (active != null && active.WantsWide) ? PanelWideWidth : PanelWidth;
             if (!Mathf.Approximately(currentWidth, targetWidth))
             {
-                float speed = (PanelWideWidth - PanelWidth) / SlideSeconds;
+                float speed = (PanelWideWidth - PanelWidth) / ExpandSeconds;
                 currentWidth = Mathf.MoveTowards(currentWidth, targetWidth, speed * dt);
                 moved = true;
             }
 
-            if (moved) ApplySlide();
+            if (moved) ApplyExpand();
         }
 
-        private void ApplySlide()
+        /// <summary>
+        /// Exponential ease-out: full speed on the first frame, decaying by half every
+        /// tenth of the way through. 2^-10 leaves 0.1% at t=1, which is close enough to
+        /// arrived that the clamp at the end is invisible — and the clamp has to be
+        /// there, because the curve never actually reaches 1.
+        /// </summary>
+        private static float EaseOutExpo(float t)
+            => t >= 1f ? 1f : 1f - Mathf.Pow(2f, -10f * t);
+
+        private void ApplyExpand()
         {
-            if (slider == null) return;
+            if (panelRect == null) return;
 
-            // Smoothstep so the motion eases at both ends instead of stopping dead.
-            float t = openAmount * openAmount * (3f - 2f * openAmount);
+            panelRect.sizeDelta = new Vector2(currentWidth, -VerticalMargin * 2f);
+            panelRect.anchoredPosition = Vector2.zero;
 
-            // +1 on the left, -1 on the right: the tab rides the panel's inner edge
-            // and "closed" is off the screen's nearer side, and both reverse together.
-            float sign = onRight ? -1f : 1f;
-
-            // Asymmetric on the right, because that is where KSP puts the stock
-            // toolbar — and the toolbar button is how the sidebar is opened in the
-            // editor, so a panel covering it would be a door that locks behind you.
-            float top = onRight ? EditorTopMargin : VerticalMargin;
-            panelRect.sizeDelta = new Vector2(currentWidth, -(top + VerticalMargin));
-            panelRect.anchoredPosition = new Vector2(0f, (VerticalMargin - top) * 0.5f);
-
-            slider.sizeDelta = new Vector2(currentWidth + TabWidth, 0f);
-            tabRect.anchoredPosition = new Vector2(sign * currentWidth, 0f);
-            slider.anchoredPosition = new Vector2(-sign * currentWidth * (1f - t), 0f);
-        }
-
-        private void AnimatePulse()
-        {
-            if (tabGlow == null) return;
-
-            if (pulseRemaining <= 0f)
-            {
-                if (tabGlow.color.a != 0f) tabGlow.color = new Color(1f, 1f, 1f, 0f);
-                return;
-            }
-
-            pulseRemaining -= Time.unscaledDeltaTime;
-            float phase = Mathf.Abs(Mathf.Sin(Time.unscaledTime * Mathf.PI * PulseHz));
-            // Fade the whole pulse out over its last second so it ends on a stroke
-            // rather than snapping off mid-cycle.
-            float envelope = Mathf.Clamp01(pulseRemaining);
-            tabGlow.color = new Color(1f, 1f, 1f, phase * envelope);
+            // X only, from a pivot at the panel's centre, so it grows out of the middle
+            // of the screen in both directions at once. Y is left at 1: scaling both
+            // axes would be a zoom, which is a different gesture entirely.
+            //
+            // Closing replays the same curve backwards, which reads as an ease-*in* —
+            // it holds near full width and then collapses. That asymmetry is wanted:
+            // opening announces itself, closing gets out of the way.
+            float scale = EaseOutExpo(openAmount);
+            panelRect.localScale = new Vector3(scale, 1f, 1f);
         }
 
         /// <summary>
@@ -767,11 +641,16 @@ namespace GeneKerman.UI.Gui
         /// of any setting and regardless of whether the panel is already open, since
         /// a notification arriving while you are reading the feed is still news.
         /// Suppressed only while the game's UI is hidden, where nothing may draw.
+        ///
+        /// This used to also pulse a glow on the pull-out tab. With the tab gone there
+        /// is nothing on screen to pulse while the panel is closed — the toolbar button
+        /// is KSP's, not ours — so what survives is the part that was always the point:
+        /// the feed is up to date the moment it is opened. The in-game toast remains
+        /// the thing that actually tells a closed-panel player something happened.
         /// </summary>
         public void Pulse()
         {
             if (!built || hiddenByGame) return;
-            pulseRemaining = PulseSeconds;
             foreach (var p in panels) p.MarkDirty();
         }
 
@@ -793,9 +672,10 @@ namespace GeneKerman.UI.Gui
             // as long as the panel is open would take the whole game away from the
             // player over a 400px strip.
             //
-            // Deliberately not gated on the panel being open: the tab is on screen
-            // in every scene, and in the editor a click that reaches the game behind
-            // it places or deselects a part.
+            // With the tab gone, "on the sidebar" and "the panel is open" are the same
+            // question — PointerOverSidebar answers false outright while closed, since
+            // a scaled-to-nothing panel still has a rect that would otherwise take a
+            // lock over a sliver of screen showing nothing.
             bool want = over || dragLatch;
             if (want == lockHeld) return;
 
@@ -848,16 +728,18 @@ namespace GeneKerman.UI.Gui
             // pan-drag would rotate the camera behind the overlay.
             if (viewer.IsOpen) return true;
 
+            // Closed is closed. RectangleContainsScreenPoint answers for a rect whether
+            // or not anything is drawn, and a scaled-to-nothing panel still has one —
+            // so without this the mod would take a control lock over a sliver at the
+            // screen's centre with nothing visible there.
+            if (!open && openAmount <= 0.001f) return false;
+
+            // Null camera: correct for a ScreenSpaceOverlay canvas. The X scale is
+            // accounted for — the rect is transformed to screen space, so mid-expand
+            // the hit area matches what is actually on screen.
             Vector2 mouse = Input.mousePosition;
-            // Null camera: correct for a ScreenSpaceOverlay canvas.
-            //
-            // activeSelf on the tab is load-bearing: RectangleContainsScreenPoint
-            // answers for a rect whether or not the GameObject is drawn, so without
-            // it the hidden editor tab would still take a control lock over a strip
-            // of the VAB that shows nothing.
-            return (panelRect != null && RectTransformUtility.RectangleContainsScreenPoint(panelRect, mouse, null))
-                || (tabRect != null && tabRect.gameObject.activeSelf &&
-                    RectTransformUtility.RectangleContainsScreenPoint(tabRect, mouse, null));
+            return panelRect != null
+                && RectTransformUtility.RectangleContainsScreenPoint(panelRect, mouse, null);
         }
 
         /// <summary>

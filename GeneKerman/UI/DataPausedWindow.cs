@@ -77,8 +77,8 @@ namespace GeneKerman.UI
             GUILayout.Space(14);
 
             GUILayout.Label(
-                "Data sharing is turned OFF, so this add-on is currently inactive — " +
-                "it is not collecting or sending any information.\n\n" +
+                "Data sharing is turned OFF, so this add-on is currently inactive. " +
+                "It is not collecting or sending any information.\n\n" +
                 "Re-enable data sharing to use contracts, missions, notifications and " +
                 "everything else again.",
                 bodyStyle);

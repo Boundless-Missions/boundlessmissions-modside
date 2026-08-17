@@ -53,7 +53,7 @@ namespace GeneKerman
             }
 
             // Pull off the carried thumbnail FIRST of all: the GKTHUMB block is appended
-            // after every other side-channel block (GKFLAG / GKTSVER / GKMODS), so it must
+            // after every other side-channel block (GKFLAG / GKTSVER / GKTU / GKMODS), so it must
             // be stripped before any of them. The PNG is written to KSP's thumbs/ folder
             // after the craft lands on disk (we need its final name/facility for the path).
             byte[] thumbPng;
@@ -65,6 +65,13 @@ namespace GeneKerman
             System.Collections.Generic.List<CkanGenerator.ModEntry> requiredMods;
             rawData = CkanGenerator.CheckAndStripFromCraft(rawData, out requiredMods);
 
+            // Then the paint job's manifest: the GKTU block sits between GKMODS and
+            // GKTSVER, so it strips after the one and before the other (the TweakScale
+            // strip cuts everything from its block to end of file). Only the block comes
+            // off here — acting on it has to wait until the craft body has settled.
+            TextureTransfer.TuManifest tuManifest;
+            rawData = TextureTransfer.StripFromCraft(rawData, out tuManifest);
+
             // Warn the player if this craft uses TweakScale and theirs is missing or a
             // different version, then strip the GKTSVER block. Must run BEFORE the flag
             // strip: the version block is appended after the GKFLAG blocks, and the flag
@@ -74,6 +81,20 @@ namespace GeneKerman
             // Install any custom mission flags this craft carried and strip the
             // GKFLAG side-channel nodes so the blueprint written to disk is clean.
             rawData = FlagTransfer.StripAndInstallFlagsFromCraft(rawData);
+
+            // Every side-channel block is off by now, so what's left is the craft body:
+            // swap any part this install doesn't have for the equivalent it does have
+            // (e.g. Making History's InflatableAirlock ↔ ReStock+'s restock-airlock-1),
+            // and report whatever is still missing. Must run before the craft is written.
+            rawData = PartAliases.ApplyToCraft(rawData, craftFileName);
+
+            // Last, now that every part is the one this install will actually load: keep
+            // the recolour modules this install can accept (the paint job arrives intact)
+            // and drop the ones it can't. A substituted part is a different prefab with
+            // different modules, which is why this waits for PartAliases rather than
+            // running with the other strips. Without Textures Unlimited the craft simply
+            // comes out in stock colours — nothing about it fails to load.
+            rawData = TextureTransfer.ReconcileCraftBody(rawData, tuManifest, craftFileName);
 
             // Parse craft type from header
             string craftType = ParseCraftType(rawData);

@@ -117,7 +117,7 @@ namespace GeneKerman.UI
             }
             GUILayout.Space(2);
             GUILayout.Label(
-                "Keeps flag import/export and the Settings tab — including switching to " +
+                "Keeps flag import/export and the Settings tab, including switching to " +
                 "another server. Missions, contracts and the marketplace stay unavailable " +
                 "until you update.",
                 noteStyle);

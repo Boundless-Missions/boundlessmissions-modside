@@ -888,6 +888,36 @@ namespace GeneKerman.UI.Gui
         }
 
         /// <summary>
+        /// A square check box, for selecting rows in a list.
+        ///
+        /// Nested inside a ClickableRow on purpose, and safe there: Unity walks up from
+        /// whatever the raycast hit looking for the first handler, so this consumes the
+        /// click and the row underneath never sees it — ticking a row does not also open
+        /// it. The tick is an inset rounded square rather than a glyph, because the mark
+        /// has to be legible whether or not KSP lent us a font (see Theme.Font).
+        /// </summary>
+        public static Btn Checkbox(El parent, bool on, Action<bool> onChange, int size = 18)
+        {
+            bool next = !on;
+            var b = Button(parent, "", () => onChange?.Invoke(next),
+                           on ? BtnStyle.Primary : BtnStyle.Ghost, size, 0);
+            b.E.W(size);
+
+            if (on)
+            {
+                var mark = Root("Mark", b.E.Rt);
+                mark.Rt.anchorMin = new Vector2(0.5f, 0.5f);
+                mark.Rt.anchorMax = new Vector2(0.5f, 0.5f);
+                mark.Rt.pivot = new Vector2(0.5f, 0.5f);
+                mark.Rt.anchoredPosition = Vector2.zero;
+                mark.Rt.sizeDelta = new Vector2(size - 8, size - 8);
+                mark.Bg(Theme.PrimaryForeground, 2).Raycast(false);
+            }
+
+            return b;
+        }
+
+        /// <summary>
         /// One of a small set of mutually exclusive cards — the site's `Choice`.
         ///
         /// Selected is a --primary outline over --secondary rather than a filled

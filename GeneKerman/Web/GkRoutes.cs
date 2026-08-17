@@ -611,6 +611,19 @@ namespace GeneKerman.Web
                 req.Lat = MiniJSON.GetDouble(rescue, "lat", 0);
                 req.Lon = MiniJSON.GetDouble(rescue, "lon", 0);
                 req.MarginPosDeg = MiniJSON.GetDouble(rescue, "margin_pos_deg", ContractCreation.MinMarginSurfaceDeg);
+                // Orbital plane / regime. Absent == any orbit with the right Ap/Pe, which
+                // is what a page that predates these fields means by leaving them out.
+                req.RequireIncl = MiniJSON.GetBool(rescue, "require_incl", false);
+                req.InclDeg = MiniJSON.GetDouble(rescue, "incl_deg", 0);
+                req.MarginInclDeg = MiniJSON.GetDouble(rescue, "margin_incl_deg",
+                                                       ContractCreation.DefaultMarginInclDeg);
+                var types = MiniJSON.GetList(rescue, "orbit_types");
+                if (types != null)
+                    foreach (var o in types)
+                    {
+                        string t = o == null ? null : o.ToString().Trim().ToLowerInvariant();
+                        if (!string.IsNullOrEmpty(t)) req.OrbitTypes.Add(t);
+                    }
             }
 
             StartJob(ctx, onDone => ContractCreation.Create(req, onDone));
@@ -715,7 +728,7 @@ namespace GeneKerman.Web
                 rescueKerbals,
                 ContractConstraints.Parse(MiniJSON.GetDict(found, "constraints")));
 
-            onDone(true, "The submit window is open in KSP — switch to the game to finish.");
+            onDone(true, "The submit window is open in KSP. Switch to the game to finish.");
         }
 
         /// <summary>Starts a tracked job and answers 202 with its id.</summary>

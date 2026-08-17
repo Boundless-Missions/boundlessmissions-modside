@@ -17,6 +17,11 @@ namespace GeneKerman.UI
             public string title;
             public string message;
             public string contractId;
+            // Set when the notification carries a fix the player can press (see
+            // LocalNotifActions). The button itself lives in the feed, not here — a
+            // toast fades after 8 seconds and is the wrong place to put the only copy
+            // of an action — so this only decides where clicking the toast lands.
+            public string localAction;
             public float showTime;
             public float alpha;
         }
@@ -32,7 +37,8 @@ namespace GeneKerman.UI
         private GUIStyle messageStyle;
         private bool stylesReady;
 
-        public void Show(string title, string message, string contractId = null)
+        public void Show(string title, string message, string contractId = null,
+                         string localAction = null)
         {
             if (activeToasts.Count >= 5)
                 activeToasts.RemoveAt(0);
@@ -42,6 +48,7 @@ namespace GeneKerman.UI
                 title = title,
                 message = message,
                 contractId = contractId,
+                localAction = localAction,
                 showTime = Time.realtimeSinceStartup,
                 alpha = 1f
             });
@@ -101,6 +108,11 @@ namespace GeneKerman.UI
                         // Deep-link straight to the referenced contract when available.
                         if (!string.IsNullOrEmpty(toast.contractId))
                             mod.OpenContractDetail(toast.contractId);
+                        // No contract, but something to press: land on the feed, where
+                        // the button is. Clicking a toast about a problem and arriving
+                        // anywhere else means hunting for the fix it just offered.
+                        else if (!string.IsNullOrEmpty(toast.localAction))
+                            mod.OpenNotifications();
                     }
                     activeToasts.RemoveAt(i);
                 }

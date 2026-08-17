@@ -42,6 +42,11 @@ namespace GeneKerman
             public float totalMass;
             public float totalCost;
             public int crewCount;
+            // Crew aboard by profession ("Pilot" -> 2), for a contract that asks for
+            // particular ones. Keyed by ProtoCrewMember.trait rather than by anything
+            // this install resolved, so it still says "Kolonist" where the mod that
+            // defines Kolonists isn't installed.
+            public Dictionary<string, int> crewTraits = new Dictionary<string, int>();
 
             public Dictionary<string, object> ToDict()
             {
@@ -66,7 +71,18 @@ namespace GeneKerman
                     { "total_mass", (double)totalMass },
                     { "total_cost", (double)totalCost },
                     { "crew_count", crewCount },
+                    { "crew_traits", CrewTraitsForJson() },
                 };
+            }
+
+            /// <summary>MiniJSON serialises Dictionary&lt;string, object&gt;, so the counts
+            /// are boxed into one rather than handed over as ints.</summary>
+            private Dictionary<string, object> CrewTraitsForJson()
+            {
+                var o = new Dictionary<string, object>();
+                foreach (var kvp in (crewTraits ?? new Dictionary<string, int>()))
+                    o[kvp.Key] = kvp.Value;
+                return o;
             }
         }
 
@@ -93,6 +109,7 @@ namespace GeneKerman
                 altitude = vessel.altitude,
                 partCount = vessel.parts?.Count ?? 0,
                 crewCount = VesselTransfer.CrewCountOf(vessel),
+                crewTraits = ContractConstraints.CountCrewTraits(VesselTransfer.CrewOf(vessel)),
             };
 
             // Mass and cost

@@ -208,13 +208,21 @@ namespace GeneKerman
                 // LS mod's books would exempt them from life support for the rest of the
                 // save. Then free the record; the rescue can no longer complete.
                 LsFreeze.Thaw(names);
+                ReleaseParked(names);
                 GKContractScenario.Instance?.RemoveImmunity(rec.ContractId);
                 return;
             }
 
             int revived = 0;
+            var stranded = new List<string>();
             foreach (var c in rec.Crew)
+            {
                 if (AddCrewToWreck(wreck, c.Name, c.PartFlightId)) revived++;
+                else stranded.Add(c.Name);
+            }
+            // Anyone we couldn't seat is still holding the parked state this record was
+            // the only remaining note of. Release them here or they keep it forever.
+            ReleaseParked(stranded);
 
             // Hand them back to the local LS mod with a clean slate, and make sure the
             // wreck is carrying enough of that mod's resources to keep them alive while
@@ -360,6 +368,50 @@ namespace GeneKerman
                 Debug.LogWarning($"[GeneKerman] RescueStasis: failed to revive {kerbalName}: {ex.Message}");
             }
             return false;
+        }
+
+        /// <summary>
+        /// Take kerbals out of the parked (Dead) state when there is no wreck left to put
+        /// them back aboard. The freeze parks them as Dead so KSP's respawn timer can't
+        /// revive them behind our back; that is only safe while a record exists saying so,
+        /// so every path that drops a record without seating them has to come through here
+        /// — otherwise they stay KIA for the rest of the save, out of the Astronaut
+        /// Complex's Available list and still counted against the hire limit.
+        ///
+        /// Ours go back to Available (they were never lost, their ride was). Borrowed
+        /// kerbals leave the roster: they belong to another save, their craft isn't here,
+        /// and keeping them only pollutes the roster KSP generates new names against.
+        /// </summary>
+        private static void ReleaseParked(IEnumerable<string> names)
+        {
+            if (names == null) return;
+            var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
+            if (roster == null) return;
+
+            foreach (var name in names)
+            {
+                if (string.IsNullOrEmpty(name)) continue;
+                try
+                {
+                    ProtoCrewMember pcm = FindRosterCrew(name);
+                    if (pcm == null) continue;
+                    if (VesselTransfer.IsBorrowedCrewName(name))
+                    {
+                        roster.Remove(pcm);
+                        Debug.Log($"[GeneKerman] RescueFreeze: {name} was borrowed and their craft " +
+                                  "is gone — dropped from the roster.");
+                    }
+                    else
+                    {
+                        pcm.rosterStatus = ProtoCrewMember.RosterStatus.Available;
+                        Debug.Log($"[GeneKerman] RescueFreeze: {name} released to the roster.");
+                    }
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] RescueFreeze: could not release {name}: {ex.Message}");
+                }
+            }
         }
 
         /// <summary>Rebuild a loaded vessel's crew/portraits after a change (no-op when

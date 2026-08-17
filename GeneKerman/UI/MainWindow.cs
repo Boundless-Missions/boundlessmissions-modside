@@ -128,29 +128,10 @@ namespace GeneKerman.UI
         private Rect telemetryRect = new Rect(210, 110, 720, 480);
         private readonly int telemetryWindowId = "GKTelemetry".GetHashCode();
 
-        // Trash state
-        private HashSet<string> trashedContracts = new HashSet<string>();
+        // Trash state. The bin itself lives in ContractInbox, which the sidebar's
+        // inbox reads too — trashing something here has to hide it there as well.
         private bool showTrash = false;
         private HashSet<string> collapsedWeeks = new HashSet<string>();
-
-        private void LoadTrash()
-        {
-            string path = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "trashed_contracts.txt");
-            trashedContracts.Clear();
-            if (System.IO.File.Exists(path))
-            {
-                foreach (string line in System.IO.File.ReadAllLines(path))
-                {
-                    if (!string.IsNullOrEmpty(line)) trashedContracts.Add(line.Trim());
-                }
-            }
-        }
-
-        private void SaveTrash()
-        {
-            string path = System.IO.Path.Combine(GeneKermanMod.PluginDataPath, "trashed_contracts.txt");
-            System.IO.File.WriteAllLines(path, new List<string>(trashedContracts).ToArray());
-        }
 
         /// <summary>
         /// The client is behind the server's required version and the player chose
@@ -165,7 +146,6 @@ namespace GeneKerman.UI
 
         public void OnOpen()
         {
-            LoadTrash();
             if (LimitedMode)
             {
                 // Open on Settings — the reason to be here at all is usually to point
@@ -300,6 +280,33 @@ namespace GeneKerman.UI
         internal void RequestLogoutAllDevices()
             => GeneKermanMod.Instance.RunCoroutine(DoLogoutAllDevices());
 
+        /// <summary>Mark one notification read. The feed object is found here rather
+        /// than passed in, so a caller cannot hand us a dict that is not in the list
+        /// and leave the badge counting something that is no longer on screen.</summary>
+        internal void RequestMarkNotificationRead(string id, Action<bool, string> onDone)
+        {
+            var n = FindNotification(id);
+            if (n == null) { onDone?.Invoke(false, "That notification is gone."); return; }
+            DoMarkNotificationRead(n, id, onDone);
+        }
+
+        internal void RequestDismissNotification(string id, Action<bool, string> onDone)
+            => DoDismissNotification(id, onDone);
+
+        internal void RequestMarkAllNotificationsRead(Action<bool, string> onDone)
+            => DoMarkAllNotificationsRead(onDone);
+
+        private Dictionary<string, object> FindNotification(string id)
+        {
+            if (notifications == null || string.IsNullOrEmpty(id)) return null;
+            foreach (var o in notifications)
+            {
+                var d = o as Dictionary<string, object>;
+                if (d != null && MiniJSON.GetString(d, "id") == id) return d;
+            }
+            return null;
+        }
+
         public void AddNotification(Dictionary<string, object> n)
         {
             if (n == null) return;
@@ -332,6 +339,14 @@ namespace GeneKerman.UI
         private static bool IsLocalNotif(string id)
         {
             return id != null && id.StartsWith("local-");
+        }
+
+        /// <summary>Switch to the feed. Used when a toast has something to press rather
+        /// than a contract to open (see LocalNotifActions).</summary>
+        public void OpenNotifications()
+        {
+            selectedTab = NotifTab;
+            scrollPos = Vector2.zero;
         }
 
         /// <summary>Switch to the Contracts tab and open a specific contract's detail view.</summary>
@@ -719,7 +734,7 @@ namespace GeneKerman.UI
             var mod = GeneKermanMod.Instance;
 
             GUILayout.BeginVertical(boxDarkStyle);
-            GUILayout.Label("⚠ Limited mode — this version is out of date", new GUIStyle(valueStyle)
+            GUILayout.Label("⚠ Limited mode: this version is out of date", new GUIStyle(valueStyle)
             {
                 normal = { textColor = new Color(0.95f, 0.6f, 0.3f) }
             });
@@ -903,7 +918,7 @@ namespace GeneKerman.UI
                         if (c != null) 
                         {
                             string cid = MiniJSON.GetString(c, "contract_id");
-                            if (trashedContracts.Contains(cid) == showTrash)
+                            if (ContractInbox.IsTrashed(cid) == showTrash)
                                 selectedContracts.Add(cid);
                         }
                     }
@@ -947,7 +962,7 @@ namespace GeneKerman.UI
                 if (c == null) continue;
 
                 string cid = MiniJSON.GetString(c, "contract_id");
-                bool isTrashed = trashedContracts.Contains(cid);
+                bool isTrashed = ContractInbox.IsTrashed(cid);
                 if (showTrash != isTrashed) continue;
 
                 bool isIncoming = !MiniJSON.GetBool(c, "is_outgoing");
@@ -1072,22 +1087,20 @@ namespace GeneKerman.UI
                     string dateLabel = !string.IsNullOrEmpty(dueDate) && dueDate.Length >= 10 ? dueDate.Substring(5) : dueDate;
                     GUILayout.Label(dateLabel, mailDateStyle, GUILayout.Width(45));
 
-                    if (status == "completed" || status == "failed" || status == "declined" || status == "cancelled")
+                    if (ContractInbox.IsFinished(status))
                     {
                         if (!showTrash)
                         {
                             if (GUILayout.Button(gcDel, iconBtnStyle, GUILayout.Width(22), GUILayout.Height(20)))
                             {
-                                trashedContracts.Add(cid);
-                                SaveTrash();
+                                ContractInbox.SetTrashed(cid, true);
                             }
                         }
                         else
                         {
                             if (GUILayout.Button(gcRestore, iconBtnStyle, GUILayout.Width(22), GUILayout.Height(20)))
                             {
-                                trashedContracts.Remove(cid);
-                                SaveTrash();
+                                ContractInbox.SetTrashed(cid, false);
                             }
                         }
                     }
@@ -1101,18 +1114,9 @@ namespace GeneKerman.UI
             }
         }
 
-        private string GetWeekKey(string isoDate)
-        {
-            if (string.IsNullOrEmpty(isoDate) || isoDate.Length < 10) return "Unknown Date";
-            System.DateTime dt;
-            if (System.DateTime.TryParse(isoDate, out dt))
-            {
-                int diff = (7 + (dt.DayOfWeek - System.DayOfWeek.Monday)) % 7;
-                var monday = dt.AddDays(-1 * diff).Date;
-                return "Week of " + monday.ToString("MMM d, yyyy");
-            }
-            return "Unknown Date";
-        }
+        /// <summary>The week heading a contract is filed under. Shared with the
+        /// sidebar's inbox — see ContractInbox.WeekKey.</summary>
+        private string GetWeekKey(string isoDate) => ContractInbox.WeekKey(isoDate);
 
         private void AutoCollapseWeeks()
         {
@@ -1122,7 +1126,7 @@ namespace GeneKerman.UI
             foreach(var cObj in contracts) {
                 var c = cObj as Dictionary<string, object>;
                 if (c == null) continue;
-                if (trashedContracts.Contains(MiniJSON.GetString(c, "contract_id"))) continue;
+                if (ContractInbox.IsTrashed(MiniJSON.GetString(c, "contract_id"))) continue;
                 string w = GetWeekKey(MiniJSON.GetString(c, "created_at"));
                 if (!counts.ContainsKey(w)) { counts[w] = 0; order.Add(w); }
                 counts[w]++;
@@ -1196,7 +1200,13 @@ namespace GeneKerman.UI
                     if (rmode == "surface")
                         DrawDetailRow("Target", $"{rbody} surface @ {MiniJSON.GetDouble(rt, "lat"):F1}°,{MiniJSON.GetDouble(rt, "lon"):F1}°");
                     else
+                    {
                         DrawDetailRow("Target", $"{rbody} orbit Ap {MiniJSON.GetDouble(rt, "ap") / 1000:F0}km / Pe {MiniJSON.GetDouble(rt, "pe") / 1000:F0}km");
+                        // Which orbit, when the issuer named one. Ap/Pe alone don't say.
+                        string orbitReq = RescueTargetSpec.FromDict(rt).DescribeOrbitRequirement();
+                        if (!string.IsNullOrEmpty(orbitReq))
+                            DrawDetailRow("Orbit", orbitReq);
+                    }
                     if (MiniJSON.GetBool(rt, "is_modded"))
                         DrawDetailRow("⚠ Mod", $"Needs the {rbody} planet pack");
 
@@ -1216,45 +1226,60 @@ namespace GeneKerman.UI
 
             GUILayout.Space(8);
 
-            // Modlist VAB Enforcer Toggle (if in Editor). Always shown for active
-            // contracts in the editor so the absence of a restriction is explicit
-            // rather than the box silently vanishing.
-            if (HighLogic.LoadedSceneIsEditor && status == "active")
+            // What this contract restricts, and — in the editor — the toggle that makes
+            // the part picker obey it.
+            //
+            // The limits line is drawn wherever the contract is read, not only in the
+            // VAB/SPH. It used to be editor-only, which hid the one kind of limit the
+            // editor can never enforce: an orbit ("polar", "keostationary") is a flight
+            // state, so the player was told about it in the one scene they cannot be in
+            // when it applies. The enforcement toggle stays editor-only, because
+            // EditorPartEnforcer is an [KSPAddon(EditorAny)] MonoBehaviour and there is
+            // no instance to talk to anywhere else.
             {
                 string reqModlist = MiniJSON.GetString(c, "modlist", "");
                 ContractConstraints limits = ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints"));
-                GUILayout.BeginVertical(boxDarkStyle);
-                GUILayout.Label("🛠 Required Mods", headerStyle);
+                bool inEditor = HighLogic.LoadedSceneIsEditor && status == "active";
 
-                if (string.IsNullOrEmpty(reqModlist) && limits.IsEmpty)
+                if (inEditor || !limits.IsEmpty)
                 {
-                    GUILayout.Label("No part restriction; all parts allowed.", labelStyle);
-                }
-                else
-                {
-                    if (!string.IsNullOrEmpty(reqModlist))
-                        GUILayout.Label(reqModlist, labelStyle);
-                    // Mission part limits ("can't use the Thud", "nuclear only", ...).
-                    if (!limits.IsEmpty)
-                        GUILayout.Label("⚠ Mission limits: " + limits.Describe(), labelStyle);
-                    GUILayout.Space(5);
+                    GUILayout.BeginVertical(boxDarkStyle);
+                    GUILayout.Label("🛠 Required Mods", headerStyle);
 
-                    bool currentlyEnforcing = EditorPartEnforcer.Instance != null &&
-                                              EditorPartEnforcer.Instance.IsEnforcing() &&
-                                              EditorPartEnforcer.Instance.ActiveContractId == openContractId;
-
-                    bool enforce = GUILayout.Toggle(currentlyEnforcing, " Enforce VAB part limits for this contract", checkboxStyle);
-
-                    if (enforce != currentlyEnforcing)
+                    if (string.IsNullOrEmpty(reqModlist) && limits.IsEmpty)
                     {
-                        if (enforce)
-                            EditorPartEnforcer.Instance?.EnforceModlist(openContractId, reqModlist, limits);
-                        else
-                            EditorPartEnforcer.Instance?.StopEnforcing();
+                        GUILayout.Label("No part restriction; all parts allowed.", labelStyle);
                     }
+                    else
+                    {
+                        if (!string.IsNullOrEmpty(reqModlist))
+                            GUILayout.Label(reqModlist, labelStyle);
+                        // Mission limits: part rules ("can't use the Thud", "nuclear only")
+                        // and any orbit the mission text names.
+                        if (!limits.IsEmpty)
+                            GUILayout.Label("⚠ Mission limits: " + limits.Describe(), labelStyle);
+                        GUILayout.Space(5);
+
+                        if (inEditor)
+                        {
+                            bool currentlyEnforcing = EditorPartEnforcer.Instance != null &&
+                                                      EditorPartEnforcer.Instance.IsEnforcing() &&
+                                                      EditorPartEnforcer.Instance.ActiveContractId == openContractId;
+
+                            bool enforce = GUILayout.Toggle(currentlyEnforcing, " Enforce VAB part limits for this contract", checkboxStyle);
+
+                            if (enforce != currentlyEnforcing)
+                            {
+                                if (enforce)
+                                    EditorPartEnforcer.Instance?.EnforceModlist(openContractId, reqModlist, limits);
+                                else
+                                    EditorPartEnforcer.Instance?.StopEnforcing();
+                            }
+                        }
+                    }
+                    GUILayout.EndVertical();
+                    GUILayout.Space(8);
                 }
-                GUILayout.EndVertical();
-                GUILayout.Space(8);
             }
 
             // Rescue: spawn the stranded vessel on demand. Done here (a button) rather
@@ -1283,8 +1308,8 @@ namespace GeneKerman.UI
                     var freezeRec = RescueImmunityGuardian.GetRecord(rcid);
                     if (freezeRec != null)
                     {
-                        GUILayout.Label($"🧊 {freezeRec.Crew.Count} kerbal(s) in emergency freeze — " +
-                                        "they thaw when you get close.", labelStyle);
+                        GUILayout.Label($"🧊 {freezeRec.Crew.Count} kerbal(s) in emergency freeze. " +
+                                        "They thaw when you get close.", labelStyle);
                         // Only worth saying when the two installs actually differ: that is
                         // the case where the wreck's own supplies are useless here.
                         if (LsFreeze.IsCrossMod(freezeRec.BuiltWithLs))
@@ -1471,12 +1496,12 @@ namespace GeneKerman.UI
 
                     GUI.enabled = false;
                     if (reqKind == "settle")
-                        GUILayout.Button("They asked to settle — answer in the browser UI or Discord.",
+                        GUILayout.Button("They asked to settle. Answer in the browser UI or Discord.",
                                          submitBtnStyle, GUILayout.Height(30));
                     else if (reqKind == "more_time")
                         GUILayout.Button("They asked for more time (" +
                                          MiniJSON.GetString(pendingReq, "new_date") +
-                                         ") — answer in the browser UI or Discord.",
+                                         "). Answer in the browser UI or Discord.",
                                          submitBtnStyle, GUILayout.Height(30));
                     else
                         GUILayout.Button("Waiting for the contractor to resolve...", submitBtnStyle, GUILayout.Height(30));
@@ -1804,8 +1829,11 @@ namespace GeneKerman.UI
             }
 
             // Dismiss is deferred until after the loop — removing from `notifications`
-            // mid-iteration would throw.
+            // mid-iteration would throw. A local action is deferred for the same reason
+            // and it is not optional: running one raises a result notification, which
+            // prepends to this very list.
             string dismissId = null;
+            Dictionary<string, object> runAction = null;
 
             foreach (var nObj in notifications)
             {
@@ -1834,6 +1862,13 @@ namespace GeneKerman.UI
                 {
                     OpenContractDetail(contractId);
                 }
+                string action = LocalNotifActions.Of(n);
+                if (!string.IsNullOrEmpty(action)
+                    && GUILayout.Button(LocalNotifActions.LabelFor(action), tabStyle,
+                                        GUILayout.Height(22), GUILayout.Width(130)))
+                {
+                    runAction = n;
+                }
                 GUILayout.FlexibleSpace();
                 if (!read && GUILayout.Button("(Ok) Mark read", tabStyle, GUILayout.Height(22), GUILayout.Width(110)))
                 {
@@ -1849,41 +1884,37 @@ namespace GeneKerman.UI
                 GUI.color = prevColor;
             }
 
+            if (runAction != null)
+            {
+                LocalNotifActions.Run(runAction);
+                // The warning has been acted on, so it is no longer news. Marking it read
+                // here rather than leaving it unread keeps the badge honest: the player
+                // has seen it — they pressed its button.
+                DoMarkNotificationRead(runAction, MiniJSON.GetString(runAction, "id"));
+            }
+
             if (dismissId != null)
                 DoDismissNotification(dismissId);
 
             GUILayout.Space(5);
             GUILayout.BeginHorizontal();
             if (GUILayout.Button("(Ok) Mark All Read", GUILayout.Height(28)))
-            {
-                GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationsRead((ok, resp, status) =>
-                {
-                    if (ok)
-                    {
-                        if (notifications != null)
-                            foreach (var o in notifications)
-                            {
-                                var d = o as Dictionary<string, object>;
-                                if (d != null) d["read"] = true;
-                            }
-                        RecountUnread();
-                        SetStatus("(Ok) All notifications marked read.");
-                    }
-                }));
-            }
+                DoMarkAllNotificationsRead();
             if (GUILayout.Button(gcRefresh, GUILayout.Height(28)))
                 RefreshNotifications();
             GUILayout.EndHorizontal();
         }
 
-        private void DoMarkNotificationRead(Dictionary<string, object> n, string id)
+        private void DoMarkNotificationRead(Dictionary<string, object> n, string id,
+                                            Action<bool, string> onDone = null)
         {
-            if (string.IsNullOrEmpty(id)) return;
+            if (string.IsNullOrEmpty(id)) { onDone?.Invoke(false, "No notification."); return; }
             // Local notifications have no server record — mark them read in place.
             if (IsLocalNotif(id))
             {
                 n["read"] = true;
                 RecountUnread();
+                onDone?.Invoke(true, "Marked read.");
                 return;
             }
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationRead(id, (ok, resp, status) =>
@@ -1893,12 +1924,38 @@ namespace GeneKerman.UI
                     n["read"] = true;
                     RecountUnread();
                 }
+                onDone?.Invoke(ok, ok ? "Marked read." : "Could not mark it read.");
             }));
         }
 
-        private void DoDismissNotification(string id)
+        /// <summary>
+        /// Mark the whole feed read. Extracted from the notifications tab when the
+        /// sidebar grew the same button: the read flags, the unread badge and the
+        /// server call have to move together, and two copies of that is how a badge
+        /// ends up disagreeing with the list under it.
+        /// </summary>
+        private void DoMarkAllNotificationsRead(Action<bool, string> onDone = null)
         {
-            if (string.IsNullOrEmpty(id)) return;
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.MarkNotificationsRead((ok, resp, status) =>
+            {
+                if (ok)
+                {
+                    if (notifications != null)
+                        foreach (var o in notifications)
+                        {
+                            var d = o as Dictionary<string, object>;
+                            if (d != null) d["read"] = true;
+                        }
+                    RecountUnread();
+                    SetStatus("(Ok) All notifications marked read.");
+                }
+                onDone?.Invoke(ok, ok ? "All notifications marked read." : "Could not mark them read.");
+            }));
+        }
+
+        private void DoDismissNotification(string id, Action<bool, string> onDone = null)
+        {
+            if (string.IsNullOrEmpty(id)) { onDone?.Invoke(false, "No notification."); return; }
             // Local notifications have no server record — drop them from both lists.
             if (IsLocalNotif(id))
             {
@@ -1915,6 +1972,7 @@ namespace GeneKerman.UI
                     });
                 RecountUnread();
                 SetStatus("(Ok) Notification dismissed.");
+                onDone?.Invoke(true, "Notification dismissed.");
                 return;
             }
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.DismissNotification(id, (ok, resp, status) =>
@@ -1929,6 +1987,7 @@ namespace GeneKerman.UI
                     RecountUnread();
                     SetStatus("(Ok) Notification dismissed.");
                 }
+                onDone?.Invoke(ok, ok ? "Notification dismissed." : "Could not dismiss it.");
             }));
         }
 
@@ -2015,7 +2074,7 @@ namespace GeneKerman.UI
             {
                 GUILayout.BeginVertical(boxDarkStyle);
                 GUILayout.Label("📤 Quicksend to a Friend", valueStyle);
-                GUILayout.Label("Unavailable until you update — sending needs the server.",
+                GUILayout.Label("Unavailable until you update: sending needs the server.",
                     new GUIStyle(labelStyle) { wordWrap = true });
                 GUILayout.EndVertical();
                 return;
@@ -2132,7 +2191,10 @@ namespace GeneKerman.UI
                     return;
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
+                craftBytes = ScaleBridge.BakeEditorCraft(craftBytes);     // bake scale (first)
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
+                craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes); // backstop warning
+                craftBytes = TextureTransfer.EmbedInCraft(craftBytes);   // carry paint job
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
                 craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
 
@@ -2191,7 +2253,10 @@ namespace GeneKerman.UI
                     yield break;
                 }
                 byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
-                payload = FlagTransfer.EmbedFlagsInCraft(craftBytes); // carry custom flags
+                payload = ScaleBridge.BakeEditorCraft(craftBytes);   // bake scale (first)
+                payload = FlagTransfer.EmbedFlagsInCraft(payload);   // carry custom flags
+                payload = TweakScaleGuard.EmbedVersionInCraft(payload); // backstop warning
+                payload = TextureTransfer.EmbedInCraft(payload);     // carry paint job
                 payload = CkanGenerator.EmbedModsInCraft(payload);   // carry mod list
                 payload = CraftThumb.EmbedThumbForCurrentCraft(payload); // NW thumbnail (last)
                 fileName = editorCraftName + ".craft";
@@ -2313,7 +2378,7 @@ namespace GeneKerman.UI
             {
                 // Disabling closes this window, so confirm via the toolbar's paused panel.
                 GeneKermanMod.Instance.SetDataGatheringEnabled(newData);
-                SetStatus(newData ? "(Ok) Data sharing enabled." : "(Ok) Data sharing disabled — mod is now inactive.");
+                SetStatus(newData ? "(Ok) Data sharing enabled." : "(Ok) Data sharing disabled. The mod is now inactive.");
             }
             GUILayout.Label(
                 "When off, no information is collected or sent and the mod stops working " +
@@ -2519,7 +2584,7 @@ namespace GeneKerman.UI
             // Transient guard against a double-click while the download is in flight.
             if (!string.IsNullOrEmpty(contractId) && !spawnedRescueWrecks.Add(contractId))
             {
-                onDone?.Invoke(false, "Already spawning — give it a moment.");
+                onDone?.Invoke(false, "Already spawning, give it a moment.");
                 yield break;
             }
             string myName = GeneKermanMod.Instance.LinkedUsername;
@@ -2745,7 +2810,7 @@ namespace GeneKerman.UI
             // to it rather than duplicating the storefront in-game.
             GUILayout.BeginVertical(boxDarkStyle);
             GUILayout.Label("Browse & Buy", valueStyle);
-            GUILayout.Label("The full marketplace — browsing, filtering and buying crafts, plus managing your uploads — is on the website.", labelStyle);
+            GUILayout.Label("The full marketplace (browsing, filtering and buying crafts, plus managing your uploads) is on the website.", labelStyle);
             GUILayout.Space(4);
             if (GUILayout.Button("[>] Open Marketplace Website", acceptBtnStyle, GUILayout.Height(30)))
                 Application.OpenURL(GeneKermanMod.Instance.Api.MarketplaceUrl);
@@ -2769,15 +2834,10 @@ namespace GeneKerman.UI
 
                 editorCraftName = ship.shipName ?? "Untitled";
                 editorPartCount = ship.parts?.Count ?? 0;
-                if (ship.parts != null)
-                {
-                    foreach (var part in ship.parts)
-                    {
-                        editorCraftMass += part.mass + part.GetResourceMass();
-                        // Full funds cost (dry + module modifiers incl. TweakScale + fuel).
-                        editorCraftCost += VesselDataCollector.GetPartCost(part);
-                    }
-                }
+                // Mass and full funds cost (dry + module modifiers incl. TweakScale +
+                // fuel) — the same walk the listing itself uses, so the figures shown
+                // here and the ones uploaded cannot drift.
+                ToolActions.ReadEditorValue(out editorCraftMass, out editorCraftCost);
 
                 editorCraftType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
 
@@ -2803,94 +2863,20 @@ namespace GeneKerman.UI
             }
         }
 
+        /// <summary>
+        /// List the loaded craft. The whole payload — flags, mod list, blueprint,
+        /// thumbnail, life-support flag — is assembled by ToolActions.SellCurrentCraft,
+        /// which the sidebar's Market panel calls too; this window only supplies the
+        /// price box and the status line.
+        /// </summary>
         private System.Collections.IEnumerator DoSellCraft()
         {
-            if (string.IsNullOrEmpty(editorCraftPath) || !System.IO.File.Exists(editorCraftPath))
-            {
-                SetStatus("(No) Save your craft first.");
-                yield break;
-            }
-            if (!int.TryParse(sellPriceInput, out int price) || price <= 0)
-            {
-                SetStatus("(No) Enter a valid price.");
-                yield break;
-            }
-
-            byte[] craftBytes;
-            string craftMods = "";
-            try
-            {
-                craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
-                // Tag the listing with the craft's mods (from the ORIGINAL bytes, before
-                // any GKMODS/flag/thumb blocks are appended) so the website can filter by mod.
-                craftMods = string.Join(",", CkanGenerator.ModFoldersForCraft(craftBytes).ToArray());
-                // Carry the craft's custom mission flags so the buyer sees them.
-                craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
-                craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
-                craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning($"[GeneKerman] Failed to read craft: {ex.Message}");
-                SetStatus("(No) Could not read craft file.");
-                yield break;
-            }
-
             selling = true;
-            SetStatus("Rendering blueprint...");
-
-            // Render the craft's blueprint so it can be shown publicly on the listing.
-            byte[] blueprintBytes = null;
-            try
+            yield return ToolActions.SellCurrentCraft(sellPriceInput, SetStatus, (ok, message) =>
             {
-                string bpPath = VesselRenderer.CaptureVessel();
-                if (!string.IsNullOrEmpty(bpPath) && System.IO.File.Exists(bpPath))
-                    blueprintBytes = System.IO.File.ReadAllBytes(bpPath);
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning($"[GeneKerman] Blueprint render failed: {ex.Message}");
-            }
-
-            // Square NW-view thumbnail — the website shows this on the listing card
-            // (the full blueprint is reserved for the detail view).
-            byte[] thumbnailBytes = null;
-            try
-            {
-                thumbnailBytes = VesselRenderer.CaptureNWThumbnail();
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogWarning($"[GeneKerman] Thumbnail render failed: {ex.Message}");
-            }
-
-            // Life-support flag: which LS mod the craft is provisioned for and how long
-            // it lasts, read from the live editor ship (no-op tags as "none" if stock).
-            LifeSupportInfo ls = LifeSupportScan.FromEditor();
-
-            SetStatus("Listing craft...");
-            string fileName = editorCraftName + ".craft";
-            yield return GeneKermanMod.Instance.Api.ListCraftForSale(
-                craftBytes, fileName, editorCraftName, editorCraftType,
-                editorPartCount, editorCraftMass, editorCraftCost, price,
-                blueprintBytes, thumbnailBytes, craftMods,
-                ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
-                (ok, resp, status) =>
-                {
-                    selling = false;
-                    if (ok && !string.IsNullOrEmpty(resp))
-                    {
-                        var data = MiniJSON.DeserializeDict(resp);
-                        if (MiniJSON.GetBool(data, "success", false))
-                            SetStatus("(Ok) Craft listed for sale!");
-                        else
-                            SetStatus("(No) " + MiniJSON.GetString(data, "message", "Failed to list."));
-                    }
-                    else
-                    {
-                        SetStatus("(No) Failed to list craft.");
-                    }
-                });
+                selling = false;
+                SetStatus((ok ? "(Ok) " : "(No) ") + message);
+            });
         }
 
         // ── Craft Import Queue (auto-import) ─────────────────────────────────

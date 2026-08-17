@@ -43,6 +43,41 @@ namespace GeneKerman
         /// quietly mislead the issuer about how hard the contract is.</summary>
         public const double MinMarginOrbitKm = 5.0;
         public const double MinMarginSurfaceDeg = 0.5;
+        // Plane match. The default is what an issuer who asks for an inclination but
+        // not a tolerance gets; the floor is the same idea as the two above — a margin
+        // tighter than this makes the contract impossible rather than demanding.
+        // Mirrors RESCUE_INCL_MARGIN_DEFAULT / _MIN in settings.py.
+        public const double DefaultMarginInclDeg = 5.0;
+        public const double MinMarginInclDeg = 1.0;
+
+        /// <summary>The orbital regimes a rescue target can demand, in the order both
+        /// UIs offer them. Tokens are the canonical ones from
+        /// data/orbit_constraints.py — the server drops anything it doesn't know, so
+        /// this list and REQUIREMENTS there have to agree.</summary>
+        public static readonly string[] OrbitTypeTokens =
+        {
+            "polar", "equatorial", "prograde", "retrograde", "circular",
+            "elliptical", "stationary", "synchronous", "molniya", "tundra",
+        };
+
+        /// <summary>Player-facing name for an orbit-regime token.</summary>
+        public static string OrbitTypeLabel(string token)
+        {
+            switch (token)
+            {
+                case "polar": return "Polar";
+                case "equatorial": return "Equatorial";
+                case "prograde": return "Prograde";
+                case "retrograde": return "Retrograde";
+                case "circular": return "Circular";
+                case "elliptical": return "Elliptical";
+                case "stationary": return "Keostationary";
+                case "synchronous": return "Keosynchronous";
+                case "molniya": return "Molniya";
+                case "tundra": return "Tundra";
+                default: return token;
+            }
+        }
 
         /// <summary>What the rescuer has to bring back. Crew-only is the historical
         /// behaviour and stays the default; "vessel" additionally requires the wreck
@@ -218,6 +253,11 @@ namespace GeneKerman
             public List<string> Crew = new List<string>();
             public string Body = "";
             public double ApKm, PeKm, Lat, Lon;
+            /// <summary>Inclination of the vessel being handed over, in degrees. Offered
+            /// as the prefill for a plane requirement: the orbit the wreck is actually
+            /// in is the one a rescuer has to match to reach it.</summary>
+            public double InclDeg;
+            public bool InOrbit;   // false when the wreck isn't orbiting (landed/suborbital)
         }
 
         public static RescueContext ScanRescueContext()
@@ -253,6 +293,8 @@ namespace GeneKerman
                 {
                     ctx.ApKm = v.orbit.ApA / 1000.0;
                     ctx.PeKm = v.orbit.PeA / 1000.0;
+                    ctx.InclDeg = v.orbit.inclination;
+                    ctx.InOrbit = v.situation == Vessel.Situations.ORBITING;
                 }
                 ctx.Lat = v.latitude;
                 ctx.Lon = v.longitude;
@@ -286,6 +328,14 @@ namespace GeneKerman
             public string RescueBody = "";
             public double ApKm = 100, PeKm = 100, MarginAltKm = MinMarginOrbitKm;
             public double Lat, Lon, MarginPosDeg = MinMarginSurfaceDeg;
+
+            // Orbit mode only. RequireIncl off (the default) means any plane, which is
+            // what every rescue asked for before the field existed; OrbitTypes empty
+            // means any regime. Both are dropped for a surface target.
+            public bool RequireIncl;
+            public double InclDeg;
+            public double MarginInclDeg = DefaultMarginInclDeg;
+            public List<string> OrbitTypes = new List<string>();
         }
 
         /// <summary>
@@ -340,6 +390,18 @@ namespace GeneKerman
                     if (!Finite(r.ApKm) || !Finite(r.PeKm) || !Finite(r.MarginAltKm) ||
                         r.ApKm < 0 || r.PeKm < 0)
                     { error = "Enter a valid apoapsis and periapsis in km."; return false; }
+
+                    if (r.RequireIncl)
+                    {
+                        if (!Finite(r.InclDeg) || r.InclDeg < 0 || r.InclDeg > 180)
+                        { error = "Inclination must be between 0° and 180°."; return false; }
+                        if (!Finite(r.MarginInclDeg))
+                        { error = "Enter a valid inclination margin in degrees."; return false; }
+                    }
+
+                    foreach (var t in r.OrbitTypes ?? new List<string>())
+                        if (Array.IndexOf(OrbitTypeTokens, t) < 0)
+                        { error = "Unknown orbit type: " + t; return false; }
                 }
                 else if (!Finite(r.Lat) || !Finite(r.Lon) || !Finite(r.MarginPosDeg) ||
                          r.Lat < -90 || r.Lat > 90)
@@ -425,6 +487,10 @@ namespace GeneKerman
             if (!bodyExists) { onDone(false, "That body does not exist in this save."); yield break; }
 
             double ap = 0, pe = 0, lat = 0, lon = 0, marginAlt = 0, marginPos = 0;
+            // A plane/regime requirement belongs to an orbit; a surface target has none,
+            // so they are dropped here rather than sent for the server to ignore.
+            double incl = -1, marginIncl = 0;
+            string orbitTypes = "";
             if (r.RescueMode == "orbit")
             {
                 // The margin is a floor, not a validation error: too tight a tolerance
@@ -433,6 +499,15 @@ namespace GeneKerman
                 ap = r.ApKm * 1000.0;
                 pe = r.PeKm * 1000.0;
                 marginAlt = mk * 1000.0;
+
+                if (r.RequireIncl)
+                {
+                    incl = r.InclDeg;
+                    marginIncl = r.MarginInclDeg < MinMarginInclDeg
+                                 ? MinMarginInclDeg : r.MarginInclDeg;
+                }
+                if (r.OrbitTypes != null && r.OrbitTypes.Count > 0)
+                    orbitTypes = string.Join(",", r.OrbitTypes.ToArray());
             }
             else
             {
@@ -470,7 +545,7 @@ namespace GeneKerman
                 ap, pe, lat, lon, marginAlt, marginPos, isModded,
                 pid, MiniJSON.Serialize(taggedKerbals), node,
                 ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
-                r.RescueRecovery, r.MinDvMs,
+                r.RescueRecovery, r.MinDvMs, incl, marginIncl, orbitTypes,
                 (success, data, err) =>
                 {
                     ok = success;
@@ -481,7 +556,17 @@ namespace GeneKerman
 
             // Only once the server has it: the vessel is gone for the issuer, so losing
             // it on a failed send would destroy the ship and produce no contract.
-            if (ok) mod.QueueRescueVesselRemoval(pid, vesselName);
+            //
+            // A queue that doesn't take is not fatal any more — the contract now carries
+            // the vessel's pid, and ReconcileRescueVessels will find the ship still here
+            // on the next Space Center visit and finish the job. Say so rather than
+            // promising a removal that is about to look like it didn't happen.
+            // The stranded crew are the contract: they leave with the ship, and come back
+            // as an import (tag stripped) if and when the rescue is delivered.
+            if (ok && !mod.QueueRescueVesselRemoval(pid, vesselName,
+                                                    VesselTransfer.CrewFate.LeavesWithCraft))
+                message = $"Rescue sent to {who}. Your vessel will be removed the next " +
+                          "time you visit the Space Center.";
 
             onDone(ok, message);
         }

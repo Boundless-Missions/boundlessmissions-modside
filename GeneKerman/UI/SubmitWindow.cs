@@ -77,6 +77,17 @@ namespace GeneKerman.UI
         private List<string> screenshotPaths = new List<string>();
         private bool screenshotTaken;
 
+        // Render freshness. A render is a picture of a craft at one moment; the craft
+        // can be changed afterwards and the submission would then carry an image of
+        // something that was never sent. renderFingerprint is the structural signature
+        // of everything the renders show, taken at capture time; renderStale is set
+        // when the live craft no longer matches it, which blocks Submit until the
+        // player retakes them. nextStaleCheck throttles the comparison — it walks the
+        // part list, and OnGUI runs several times a frame.
+        private int renderFingerprint;
+        private bool renderStale;
+        private float nextStaleCheck;
+
         // Validation
         private bool sceneValid;       // Are we in the correct scene for this mission type?
         private bool vesselValid;      // Does the vessel match required situation/body?
@@ -110,7 +121,10 @@ namespace GeneKerman.UI
             isSubmitting = false;
             statusMsg = "";
             screenshotTaken = false;
-            
+            renderStale = false;
+            renderFingerprint = 0;
+            nextStaleCheck = 0f;
+
             requiredModlist = modlist;
             allowedMods = null;
             excludePaths = null;
@@ -227,6 +241,26 @@ namespace GeneKerman.UI
         }
 
         /// <summary>
+        /// Every orbit requirement on this contract in one line, or "" when it names no
+        /// particular orbit. Two sources, because there are two ways to ask: the regime
+        /// parsed out of the mission text (any contract), and the plane/regime an issuer
+        /// picked for a rescue target.
+        /// </summary>
+        private string DescribeOrbitRequirement()
+        {
+            var bits = new List<string>();
+            if (partLimits != null && partLimits.Orbit != null && !partLimits.Orbit.IsEmpty)
+                bits.Add(partLimits.Orbit.LabelList());
+            if (IsRescue && rescueTarget != null &&
+                (rescueTarget.mode ?? "orbit").ToLower() != "surface")
+            {
+                string t = rescueTarget.DescribeOrbitRequirement();
+                if (!string.IsNullOrEmpty(t)) bits.Add(t);
+            }
+            return string.Join(" · ", bits.ToArray());
+        }
+
+        /// <summary>
         /// Rescue checks: the active vessel must carry every stranded kerbal, be at the
         /// target orbit (Ap/Pe within margin) or surface spot (Lat/Lon within margin),
         /// and — on a "vessel" recovery — have the wreck itself aboard. A Δv floor, when
@@ -302,6 +336,22 @@ namespace GeneKerman.UI
                                    $"Pe {activeVessel.periapsis / 1000:F0}km, need " +
                                    $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
                     }
+
+                    // Plane and regime, when the issuer asked for them. Ap/Pe are the
+                    // cheap half of a rendezvous — the plane is the half that costs
+                    // delta-v, so a rescue that names one is a materially different job.
+                    string plane = OrbitConstraint.CheckInclination(
+                        rescueTarget.incl, rescueTarget.marginIncl, activeVessel.inclination);
+                    if (plane != null)
+                    {
+                        vesselValid = false;
+                        issues.Add("❌ " + plane);
+                    }
+                    foreach (var v in rescueTarget.OrbitTypeConstraint().CheckOrbit(activeVessel))
+                    {
+                        vesselValid = false;
+                        issues.Add(v);
+                    }
                 }
             }
         }
@@ -353,7 +403,7 @@ namespace GeneKerman.UI
             double dv = CraftDeltaV.TotalVacuum();
             if (dv < 0)
             {
-                issues.Add($"⚠ Δv unreadable — this rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
+                issues.Add($"⚠ Δv unreadable. This rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
                            "Turn on the stock Δv readout to check it here; the server checks it either way.");
                 return;
             }
@@ -435,6 +485,11 @@ namespace GeneKerman.UI
         private void DrawContent(int id)
         {
             InitStyles();
+
+            // Layout pass only — see RefreshRenderStale.
+            if (Event.current.type == EventType.Layout)
+                RefreshRenderStale();
+
             GUILayout.BeginVertical(windowStyle);
 
             // Header
@@ -772,6 +827,17 @@ namespace GeneKerman.UI
                 GUILayout.Space(3);
             }
 
+            // The orbit this contract asks for, drawn whether or not the craft is in it.
+            // A requirement only ever printed as a failure is one the player meets by
+            // accident or not at all — and the vessel readout below prints the live
+            // inclination/eccentricity right underneath, so the two can be compared.
+            string orbitReq = DescribeOrbitRequirement();
+            if (!string.IsNullOrEmpty(orbitReq))
+            {
+                GUILayout.Label("🛰 Required orbit: " + orbitReq, labelStyle);
+                GUILayout.Space(3);
+            }
+
             // Active vessel info
             GUILayout.Label("Active Vessel", headerStyle);
             GUILayout.BeginVertical(boxStyle);
@@ -868,7 +934,18 @@ namespace GeneKerman.UI
             else
                 GUILayout.Label("Orthographic vessel render will be captured automatically.", labelStyle);
 
-            if (screenshotTaken)
+            if (screenshotTaken && renderStale)
+            {
+                GUILayout.Label("⚠ The craft changed after these renders were taken.", errorStyle);
+                GUILayout.Label(
+                    HighLogic.LoadedSceneIsEditor
+                        ? "Renders must show the craft you submit. Retake them to continue."
+                        : "The vessel is no longer the one in these renders. Retake them to continue.",
+                    labelStyle);
+                if (GUILayout.Button("📸 Retake Renders", GUILayout.Height(30)))
+                    TakeScreenshot();
+            }
+            else if (screenshotTaken)
             {
                 GUILayout.Label($"✅ Captured {screenshotPaths.Count} render(s)", successStyle);
                 if (GUILayout.Button("🔄 Retake Renders", GUILayout.Height(26)))
@@ -887,6 +964,20 @@ namespace GeneKerman.UI
         /// image. Renders run synchronously — a deliberate one-tap action.</summary>
         private void TakeScreenshot()
         {
+            // Re-capture before rendering, so the picture and the payload are taken from
+            // the same craft. In the editor this re-saves the .craft to disk, which is
+            // the file SubmitCoroutine uploads — without it a retake would produce a
+            // fresh render of a craft still described on disk by a stale file.
+            if (missionType == "craft_build")
+            {
+                CaptureEditorCraft();
+            }
+            else if (HighLogic.LoadedSceneIsFlight)
+            {
+                CaptureFlightData();
+                ValidateVesselState();
+            }
+
             screenshotPaths = new List<string>();
 
             Vessel active = HighLogic.LoadedSceneIsFlight ? FlightGlobals.ActiveVessel : null;
@@ -904,9 +995,118 @@ namespace GeneKerman.UI
             }
 
             screenshotTaken = screenshotPaths.Count > 0;
+
+            // Pin what these renders show, so any later change to the craft is caught.
+            renderFingerprint = RenderSubjectFingerprint();
+            renderStale = false;
+            nextStaleCheck = Time.realtimeSinceStartup + 0.4f;
+
             statusMsg = screenshotPaths.Count > 1
                 ? $"📸 Captured {screenshotPaths.Count} renders! (may take a moment to save)"
                 : "📸 Captured! (may take a moment to save)";
+        }
+
+        // ── Render freshness ────────────────────────────────────────────────
+
+        /// <summary>
+        /// Re-check whether the captured renders still show the craft that would be
+        /// submitted. Throttled, and only ever called from the Layout pass — flipping
+        /// a flag that changes the window's contents between Layout and Repaint is what
+        /// produces GUILayout mismatch errors.
+        /// </summary>
+        private void RefreshRenderStale()
+        {
+            if (!screenshotTaken || isSubmitting) return;
+
+            float now = Time.realtimeSinceStartup;
+            if (now < nextStaleCheck) return;
+            nextStaleCheck = now + 0.4f;
+
+            renderStale = RenderSubjectFingerprint() != renderFingerprint;
+        }
+
+        /// <summary>
+        /// Signature of everything the renders depict: the craft being submitted plus
+        /// each extra craft currently ticked, since TakeScreenshot captures one image
+        /// per subject and changing the selection changes the image set.
+        /// Summed rather than chained, because the neighbour list is sorted by distance
+        /// and drifting craft reorder it without anything having actually changed.
+        /// </summary>
+        private int RenderSubjectFingerprint()
+        {
+            unchecked
+            {
+                int h = PartsFingerprint(GetSubmissionParts());
+                if (!IsRescue && nearbyEntries != null)
+                {
+                    foreach (var e in nearbyEntries)
+                    {
+                        if (!e.selected || e.vessel == null) continue;
+                        h += PartsFingerprint(e.vessel.parts) * 31 + 17;
+                    }
+                }
+                return h;
+            }
+        }
+
+        /// <summary>
+        /// A cheap structural signature of one craft: which parts it has, and — in the
+        /// editor only — where they sit and how big they are.
+        ///
+        /// Layout is deliberately excluded in flight. Nothing can be moved or rescaled
+        /// on a flying craft, so the part set alone catches every real change (staging,
+        /// docking, undocking, decoupling, a part being destroyed), while joints flex
+        /// under physics and a position-sensitive signature would report a wobbling
+        /// rocket as modified several times a second. Resource levels are excluded
+        /// everywhere: a blueprint does not show them, and in flight they change
+        /// continuously, which would make every render stale the moment it was taken.
+        /// </summary>
+        private static int PartsFingerprint(IEnumerable<Part> parts)
+        {
+            if (parts == null) return 0;
+
+            bool includeLayout = HighLogic.LoadedSceneIsEditor;
+
+            unchecked
+            {
+                int hash = 0;
+                int count = 0;
+
+                foreach (var p in parts)
+                {
+                    if (p == null) continue;
+                    count++;
+
+                    int h = 17;
+                    if (p.partInfo != null && p.partInfo.name != null)
+                        h = h * 31 + p.partInfo.name.GetHashCode();
+                    // 0 for every part in the editor, unique and stable in flight.
+                    h = h * 31 + (int)p.flightID;
+
+                    if (includeLayout && p.transform != null)
+                    {
+                        Vector3 lp = p.transform.localPosition;
+                        h = h * 31 + Mathf.RoundToInt(lp.x * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(lp.y * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(lp.z * 1000f);
+
+                        Quaternion lr = p.transform.localRotation;
+                        h = h * 31 + Mathf.RoundToInt(lr.x * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(lr.y * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(lr.z * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(lr.w * 1000f);
+
+                        Vector3 ls = p.transform.localScale;
+                        h = h * 31 + Mathf.RoundToInt(ls.x * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(ls.y * 1000f);
+                        h = h * 31 + Mathf.RoundToInt(ls.z * 1000f);
+                    }
+
+                    hash += h;
+                }
+
+                return hash * 31 + count;
+            }
         }
 
         private int CountSelectedExtras()
@@ -923,6 +1123,9 @@ namespace GeneKerman.UI
         {
             if (!sceneValid) return false;
             if (!screenshotTaken) return false;
+            // Renders that no longer match the craft are worse than none: the issuer
+            // would review a picture of something that was never submitted.
+            if (renderStale) return false;
 
             if (missionType == "craft_build")
                 // vesselValid carries the part-legality result from CaptureEditorCraft();
@@ -958,6 +1161,35 @@ namespace GeneKerman.UI
         {
             yield return new WaitForSeconds(1.5f);
 
+            // Last word on render freshness, unthrottled: the throttled Draw-time check
+            // can be up to 0.4s behind, and this coroutine then waits another 1.5s
+            // before reading anything — ample time to pull a part off.
+            if (screenshotTaken && RenderSubjectFingerprint() != renderFingerprint)
+            {
+                renderStale = true;
+                isSubmitting = false;
+                statusMsg = "❌ The craft changed after the renders were taken.\n" +
+                            "Retake the renders, then submit.";
+                yield break;
+            }
+
+            // Re-save the live editor ship so the .craft we upload is the craft on
+            // screen. The fingerprint above proves the shape still matches the renders,
+            // but a tweak a blueprint cannot show — a fuel level, an action group — is
+            // only on disk if the file was written after it.
+            if (missionType == "craft_build")
+            {
+                CaptureEditorCraft();
+                if (!vesselValid || string.IsNullOrEmpty(editorCraftPath))
+                {
+                    isSubmitting = false;
+                    statusMsg = string.IsNullOrEmpty(validationMsg)
+                        ? "❌ Could not read the craft. Save it and try again."
+                        : validationMsg;
+                    yield break;
+                }
+            }
+
             // Craft's vacuum Δv (editor = full-fuel design, flight = current). Read
             // once: used by the gate below and reported to the server for the
             // authoritative Δv check. -1 when unavailable (Δv limit then skipped).
@@ -968,11 +1200,16 @@ namespace GeneKerman.UI
             // but failing here is instant and explains exactly what's wrong.
             if (partLimits != null && !partLimits.IsEmpty)
             {
-                // Crew aboard for the crew-count limit (flight only; -1 elsewhere so it's
-                // skipped, matching the server which reads crew from submitted telemetry).
-                int crewAboard = (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null)
+                // Crew aboard for the crew-count and per-profession limits (flight only;
+                // -1 / null elsewhere so they're skipped, matching the server, which
+                // reads crew from the submitted telemetry).
+                bool inFlight = HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel != null;
+                int crewAboard = inFlight
                     ? VesselTransfer.CrewCountOf(FlightGlobals.ActiveVessel) : -1;
-                var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac, crewAboard);
+                var crewTraits = inFlight
+                    ? ContractConstraints.CountCrewTraits(VesselTransfer.CrewOf(FlightGlobals.ActiveVessel))
+                    : null;
+                var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac, crewAboard, crewTraits);
                 if (violations.Count > 0)
                 {
                     isSubmitting = false;
@@ -1118,6 +1355,13 @@ namespace GeneKerman.UI
             // TweakScale). Appended AFTER flags so the block sits last in the file.
             if (craftData != null)
                 craftData = TweakScaleGuard.EmbedVersionInCraft(craftData);
+
+            // Carry the Textures Unlimited paint job: which recolour packs it needs, so
+            // the recipient can be told (and a receiver without TU gets a clean, stock-
+            // coloured load rather than orphan recolour modules). After GKTSVER, before
+            // GKMODS — the strip order on the other side is the exact reverse.
+            if (craftData != null)
+                craftData = TextureTransfer.EmbedInCraft(craftData);
 
             // Record the craft's mods so a recipient missing any gets a CKAN modpack.
             // Appended after flags/TweakScale so the GKMODS block stays a clean strip.

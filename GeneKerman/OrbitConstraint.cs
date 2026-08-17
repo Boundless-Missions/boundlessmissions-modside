@@ -147,14 +147,44 @@ namespace GeneKerman
             return CheckPeriod(period, rot, periodFactor, periodFactor < 1 ? label + " (half-day)" : label + " (one-day)");
         }
 
-        /// <summary>One-line summary for the contract UI, or empty.</summary>
-        public string Describe()
+        /// <summary>
+        /// Plane match against an explicit target inclination, in degrees. Returns a
+        /// violation message, or null when it passes / can't be checked.
+        ///
+        /// Unlike everything else here this is not parsed from mission text — a rescue
+        /// target carries the number the issuer asked for (see RescueTargetSpec). A
+        /// margin &lt;= 0 means "any plane", which is what every rescue issued before the
+        /// field existed asked for. Inclination runs 0..180° (>90° is retrograde) and
+        /// the comparison deliberately doesn't wrap: 179° is not 1°, because opposite
+        /// directions in one plane are opposite rendezvous problems.
+        /// Mirrors check_inclination() in data/orbit_constraints.py.
+        /// </summary>
+        public static string CheckInclination(double target, double margin, double incl)
+        {
+            if (margin <= 0) return null;
+            if (double.IsNaN(target) || double.IsNaN(margin) || double.IsNaN(incl)) return null;
+            if (double.IsInfinity(target) || double.IsInfinity(incl)) return null;
+            if (Math.Abs(incl - target) > margin)
+                return $"Orbit must be inclined {target:F1}° (±{margin:F1}°); current is {incl:F1}°.";
+            return null;
+        }
+
+        /// <summary>Just the regime names ("polar, circular"), or empty. For callers
+        /// that supply their own heading — Describe() adds one.</summary>
+        public string LabelList()
         {
             if (IsEmpty) return "";
             if (!string.IsNullOrEmpty(Notes)) return Notes;
             var names = new List<string>();
             foreach (var r in Requirements) names.Add(Label(r));
-            return "Orbit: " + string.Join(", ", names.ToArray());
+            return string.Join(", ", names.ToArray());
+        }
+
+        /// <summary>One-line summary for the contract UI, or empty.</summary>
+        public string Describe()
+        {
+            if (IsEmpty) return "";
+            return "Orbit: " + LabelList();
         }
 
         private static string Label(string req)

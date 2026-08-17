@@ -53,7 +53,7 @@ namespace GeneKerman.UI.Gui
         private static readonly Option[] Recoveries =
         {
             new Option { Id = ContractCreation.RecoveryCrew,   Label = "Crew only",
-                         Desc = "They may strip or abandon this craft — only the kerbals have to arrive." },
+                         Desc = "They may strip or abandon this craft; only the kerbals have to arrive." },
             new Option { Id = ContractCreation.RecoveryVessel, Label = "Crew + this vessel",
                          Desc = "A salvage: they have to tow or fly this craft home too. Price it accordingly." },
         };
@@ -90,6 +90,13 @@ namespace GeneKerman.UI.Gui
         private string latText = "0", lonText = "0", marginPosText = "1";
         private string minDvText = "0";
         private bool rescueConfirmed;
+        // Orbit-mode plane/regime requirement. Off by default: Ap/Pe is what a rescue
+        // has always asked for, and turning a plane match on silently would make every
+        // rescue issued from this form a harder job than the issuer thought.
+        private bool requireIncl;
+        private string inclText = "0";
+        private string marginInclText = Round(ContractCreation.DefaultMarginInclDeg);
+        private readonly List<string> orbitTypes = new List<string>();
 
         private Action markDirty;
         private Func<Action<bool, string>> begin;
@@ -125,6 +132,10 @@ namespace GeneKerman.UI.Gui
             latText = "0"; lonText = "0"; marginPosText = "1";
             minDvText = "0";
             rescueConfirmed = false;
+            requireIncl = false;
+            inclText = "0";
+            marginInclText = Round(ContractCreation.DefaultMarginInclDeg);
+            orbitTypes.Clear();
 
             picker.Reset();
             bodyPicker.Reset();
@@ -144,6 +155,9 @@ namespace GeneKerman.UI.Gui
             peText = Round(rescue.PeKm);
             latText = Round(rescue.Lat);
             lonText = Round(rescue.Lon);
+            // Seeded, not switched on: the plane requirement stays off until the issuer
+            // asks for it, and this is the number they get when they do.
+            inclText = Round(rescue.InclDeg);
         }
 
         private static string Round(double v)
@@ -205,8 +219,8 @@ namespace GeneKerman.UI.Gui
                 UIF.Choice(parent, t.Label, t.Desc, type == t.Id, () =>
                 {
                     type = option.Id;
-                    // An auction needs bidders, and neither of the non-auctionable
-                    // types has anything to bid on.
+                    // A rescue cannot be auctioned, so switching to it drops the mode
+                    // rather than leaving it armed and ignored.
                     if (!Auctionable(type)) auction = false;
                     // Read the game when the type is picked rather than every rebuild:
                     // the scan walks every body and the active vessel's crew, and the
@@ -314,7 +328,7 @@ namespace GeneKerman.UI.Gui
             {
                 UIF.Notice(parent, "No crewed vessel to hand over.",
                            HighLogic.LoadedSceneIsFlight
-                           ? "Switch to a vessel with crew aboard — a rescue hands that ship and its kerbals to the rescuer."
+                           ? "Switch to a vessel with crew aboard. A rescue hands that ship and its kerbals to the rescuer."
                            : "A rescue hands over the vessel you are flying, so you have to be in flight on a crewed ship.");
                 UIF.Button(parent, "Rescan", () => { ScanRescue(); markDirty?.Invoke(); },
                            BtnStyle.Ghost, 28);
@@ -325,7 +339,7 @@ namespace GeneKerman.UI.Gui
             var who = UIF.Box(head, "Who").Column(0).PrefW(0).Flex(1f);
             UIF.Label(who, rescue.VesselName, Theme.FontSm).Ellipsis();
             UIF.Muted(who, string.Join(", ", rescue.Crew.ToArray()) +
-                           " — " + rescue.Crew.Count + " aboard").Ellipsis();
+                           " (" + rescue.Crew.Count + " aboard)").Ellipsis();
             UIF.Button(head, "Rescan", () => { ScanRescue(); markDirty?.Invoke(); }, BtnStyle.Ghost, 28);
 
             Caption(parent, "WHAT MUST COME BACK?");
@@ -355,7 +369,7 @@ namespace GeneKerman.UI.Gui
             Caption(parent, "BODY");
             bodyPicker.Build(parent);
             if (bodyPicker.SelectedIsModded)
-                UIF.Muted(parent, "Modded body — the rescuer is warned they need its planet pack.").Body();
+                UIF.Muted(parent, "Modded body: the rescuer is warned they need its planet pack.").Body();
 
             if (rescueMode == "orbit")
             {
@@ -365,6 +379,7 @@ namespace GeneKerman.UI.Gui
                 UIF.TextField(parent, peText, "100").OnChanged(s => peText = s);
                 Caption(parent, "MARGIN (KM, MIN " + ContractCreation.MinMarginOrbitKm + ")");
                 UIF.TextField(parent, marginAltText, "10").OnChanged(s => marginAltText = s);
+                BuildOrbitShape(parent);
             }
             else
             {
@@ -391,6 +406,58 @@ namespace GeneKerman.UI.Gui
                        rescue.VesselName + " and its crew leave my save and become the " +
                        "rescuer's problem. This cannot be undone.",
                        rescueConfirmed, v => { rescueConfirmed = v; markDirty?.Invoke(); });
+        }
+
+        /// <summary>
+        /// Which orbit, not just how high: the plane the rescuer has to be in, and any
+        /// named regime it has to be.
+        ///
+        /// Both are off by default and both are orbit-mode only. Ap/Pe is all a rescue
+        /// has ever asked for, and a plane match switched on by default would silently
+        /// turn every rescue issued here into a much more expensive job — matching a
+        /// plane is the half of a rendezvous that costs delta-v.
+        /// </summary>
+        private void BuildOrbitShape(El parent)
+        {
+            UIF.Switch(parent, "Require an orbital plane",
+                       "Ap and Pe don't say which orbit this is. A plane match is what makes "
+                       + "this a real intercept rather than a matching altitude.",
+                       requireIncl, v => { requireIncl = v; markDirty?.Invoke(); });
+
+            if (requireIncl)
+            {
+                Caption(parent, "INCLINATION (°, 0–180; OVER 90 IS RETROGRADE)");
+                UIF.TextField(parent, inclText, "0").OnChanged(s => inclText = s);
+                Caption(parent, "PLANE MARGIN (°, MIN " + ContractCreation.MinMarginInclDeg + ")");
+                UIF.TextField(parent, marginInclText, Round(ContractCreation.DefaultMarginInclDeg))
+                   .OnChanged(s => marginInclText = s);
+                if (rescue != null && rescue.InOrbit)
+                    UIF.Muted(parent, $"You are in a {rescue.InclDeg:F1}° orbit right now.").Body();
+            }
+
+            Caption(parent, "ORBIT TYPE (OPTIONAL)");
+            var tokens = ContractCreation.OrbitTypeTokens;
+            const int perRow = 3;
+            for (int i = 0; i < tokens.Length; i += perRow)
+            {
+                var row = UIF.Box(parent, "Types" + i).Row(Theme.Space1).H(24);
+                for (int j = i; j < i + perRow; j++)
+                {
+                    if (j >= tokens.Length) { UIF.Grow(row); break; }
+                    string tok = tokens[j];
+                    bool on = orbitTypes.Contains(tok);
+                    var b = UIF.Button(row, ContractCreation.OrbitTypeLabel(tok), () =>
+                    {
+                        if (orbitTypes.Contains(tok)) orbitTypes.Remove(tok);
+                        else orbitTypes.Add(tok);
+                        markDirty?.Invoke();
+                    }, on ? BtnStyle.Primary : BtnStyle.Ghost, 24, Theme.Space1);
+                    b.Label.Size(Theme.FontXs);
+                    b.E.PrefW(0).Flex(1f);
+                }
+            }
+            UIF.Muted(parent, "Checked against the rescuer's own orbit when they submit. "
+                              + "None selected = any orbit that meets the numbers above.").Body();
         }
 
         private void BuildSend(El parent, bool busy, int balance, string currency)
@@ -489,10 +556,17 @@ namespace GeneKerman.UI.Gui
             req.Lat = ParseDouble(latText, 0);
             req.Lon = ParseDouble(lonText, 0);
             req.MarginPosDeg = ParseDouble(marginPosText, 0);
+            req.RequireIncl = requireIncl;
+            req.InclDeg = ParseDouble(inclText, 0);
+            req.MarginInclDeg = ParseDouble(marginInclText, ContractCreation.DefaultMarginInclDeg);
+            req.OrbitTypes = new List<string>(orbitTypes);
             return req;
         }
 
-        private static bool Auctionable(string t) => t == "craft_build" || t == "active_vessel";
+        /// <summary>Which types can be put up for open bidding. Every type except a
+        /// rescue: sending one destroys the issuer's vessel, so it cannot be handed to
+        /// a contractor who is not decided yet.</summary>
+        private static bool Auctionable(string t) => t != "rescue";
 
         private static void Caption(El parent, string text)
             => UIF.Muted(parent, text);

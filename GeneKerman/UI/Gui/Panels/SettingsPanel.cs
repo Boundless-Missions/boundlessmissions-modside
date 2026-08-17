@@ -187,8 +187,8 @@ namespace GeneKerman.UI.Gui
             // issuing a rescue and spawning its wreck both live in the sidebar now, so
             // submission — which needs the HUD hidden for a screenshot — is what is left.
             UIF.Muted(card,
-                "The classic window has the flows this sidebar does not carry — " +
-                "submitting work.").Body();
+                "The classic window has the one flow this sidebar does not carry: " +
+                "submitting work, which needs the HUD hidden for a screenshot.").Body();
             UIF.Button(card, "Open the classic window", mod.OpenClassicWindow, BtnStyle.Ghost, 28);
         }
 

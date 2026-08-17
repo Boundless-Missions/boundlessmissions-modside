@@ -29,6 +29,13 @@ namespace GeneKerman
         public const string PrivacyPolicyUrl = "https://boundlessmissions.com/pp";
         public const string TermsOfServiceUrl = "https://boundlessmissions.com/tos";
 
+        /// <summary>How much of KSP.log a bug report carries: the first 2 MB (loaded
+        /// assemblies, mod list, system specs) and the last 7 MB (whatever just went
+        /// wrong). Matches _LOG_HEAD_BYTES / _LOG_TAIL_BYTES in the server's
+        /// api_server.py, which trims to the same shape as a backstop.</summary>
+        private const int LogHeadBytes = 2000000;
+        private const int LogTailBytes = 7000000;
+
         /// <summary>Default marketplace website, opened from the Market tab. Overridable
         /// via the <c>marketplaceProtocol</c> / <c>marketplaceAddress</c> keys in
         /// settings.cfg — split for the same reason serverHost/serverProtocol are,
@@ -50,10 +57,6 @@ namespace GeneKerman
         // fully functional fallback — single-monitor and Steam Deck players are better
         // served by it, and it is the only UI available if the bridge cannot start.
         private bool webUiEnabled;
-        // Dev-only: adds the widget gallery to the uGUI sidebar. Hand-edited into
-        // settings.cfg; deliberately has no toggle in any UI, and is written back
-        // on save only so a settings change doesn't silently drop it.
-        private bool guiGalleryEnabled;
         // Emergency freeze for rescue crew (see RescueImmunityGuardian). On by default:
         // without it a stranded crew starves in whatever time the rescuer takes, and a
         // wreck built for another life-support mod is unrescuable. Off leaves the crew
@@ -62,6 +65,17 @@ namespace GeneKerman
         // Days of the local LS mod's resources stowed aboard a rescue wreck, per rescued
         // kerbal. 0 disables the ration kit; the freeze itself is unaffected.
         private int emergencyRationDays = 3;
+        // Swap parts a received craft asks for but this install doesn't have for the
+        // equivalent it does have (see PartAliases). On by default: the swap only ever
+        // engages on a craft that would otherwise refuse to load, and every substitution
+        // is reported. Off keeps received crafts byte-for-byte as the sender built them.
+        private bool partSubstitutionEnabled = true;
+        // Carry a craft's Textures Unlimited paint job across, and drop the recolour
+        // modules this install can't accept so an unpainted load is a clean one (see
+        // TextureTransfer). On by default: it only ever engages on a craft that was
+        // painted, and never on the parts themselves. Off leaves the recolour modules
+        // exactly as the sender wrote them — KSP ignores the ones it can't match.
+        private bool textureTransferEnabled = true;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -105,12 +119,14 @@ namespace GeneKerman
         public bool DataGatheringEnabled => dataGatheringEnabled;
         /// <summary>Whether the UI opens in a browser (true) or as classic in-game windows (false).</summary>
         public bool WebUiEnabled => webUiEnabled;
-        /// <summary>Dev-only: show the uGUI sidebar's widget gallery. Off for players.</summary>
-        public bool GuiGalleryEnabled => guiGalleryEnabled;
         /// <summary>Whether stranded rescue crew are held in emergency freeze until reached.</summary>
         public bool EmergencyFreezeEnabled => emergencyFreezeEnabled;
         /// <summary>Days of local life support stowed aboard a rescue wreck per kerbal (0 = off).</summary>
         public int EmergencyRationDays => emergencyRationDays;
+        /// <summary>Whether a received craft's unavailable parts are swapped for installed equivalents.</summary>
+        public bool PartSubstitutionEnabled => partSubstitutionEnabled;
+        /// <summary>Whether a craft's Textures Unlimited paint job is carried across transfers.</summary>
+        public bool TextureTransferEnabled => textureTransferEnabled;
 
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
@@ -221,13 +237,14 @@ namespace GeneKerman
                         // Absent means classic: an existing install must never be moved
                         // to a different UI by a mod update.
                         bool.TryParse(gk.GetValue("enableWebUi") ?? "false", out webUiEnabled);
-                        bool.TryParse(gk.GetValue("enableGuiGallery") ?? "false", out guiGalleryEnabled);
                         bool.TryParse(gk.GetValue("enableEmergencyFreeze") ?? "true", out emergencyFreezeEnabled);
                         // Guarded rather than TryParse'd straight in: a hand-edited
                         // negative would size a ration kit backwards.
                         int rationDays;
                         if (int.TryParse(gk.GetValue("emergencyRationDays") ?? "3", out rationDays))
                             emergencyRationDays = rationDays < 0 ? 0 : rationDays;
+                        bool.TryParse(gk.GetValue("enablePartSubstitution") ?? "true", out partSubstitutionEnabled);
+                        bool.TryParse(gk.GetValue("enableTextureTransfer") ?? "true", out textureTransferEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -504,12 +521,10 @@ namespace GeneKerman
             gk.AddValue("enableCheckpointPhotos", checkpointPhotosEnabled);
             gk.AddValue("enableDataGathering", dataGatheringEnabled);
             gk.AddValue("enableWebUi", webUiEnabled);
-            // Written back rather than dropped: SaveSettings rewrites the whole
-            // node, so a hand-edited dev key would vanish the first time the player
-            // (or the Settings screen) saved anything.
-            gk.AddValue("enableGuiGallery", guiGalleryEnabled);
             gk.AddValue("enableEmergencyFreeze", emergencyFreezeEnabled);
             gk.AddValue("emergencyRationDays", emergencyRationDays);
+            gk.AddValue("enablePartSubstitution", partSubstitutionEnabled);
+            gk.AddValue("enableTextureTransfer", textureTransferEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -1147,6 +1162,49 @@ namespace GeneKerman
             }
         }
 
+        /// <summary>
+        /// File a bug report. The server opens a Discord ticket for it and pings the
+        /// bug-report role, so the reply comes back to the player in Discord.
+        ///
+        /// <paramref name="attachLog"/> is the player's explicit choice, made in the
+        /// Tools tab: KSP.log carries their mod list, install paths and system specs,
+        /// so it is never attached unless they leave the switch on. It is trimmed to
+        /// head+tail here (see DeviceId.GetKspLogCapped) because a modded log is far
+        /// larger than anything the API or Discord will accept whole.
+        /// </summary>
+        public IEnumerator SubmitBugReport(string summary, string details, bool attachLog,
+                                           ApiCallback callback)
+        {
+            if (TransmissionBlocked) { callback(false, null, 0); yield break; }
+            string url = serverUrl + "/api/v1/bugreport";
+            var form = new List<IMultipartFormSection>
+            {
+                new MultipartFormDataSection("summary", summary ?? ""),
+                new MultipartFormDataSection("details", details ?? ""),
+                new MultipartFormDataSection("mod_version", ModVersion.Current ?? ""),
+            };
+            if (attachLog)
+            {
+                byte[] logBytes = DeviceId.GetKspLogCapped(LogHeadBytes, LogTailBytes);
+                if (logBytes != null && logBytes.Length > 0)
+                    form.Add(new MultipartFormFileSection("ksp_log", logBytes, "KSP.log", "text/plain"));
+            }
+
+            using (var req = UnityWebRequest.Post(url, form))
+            {
+                ApplyHeaders(req);
+                // Generous: the log is the bulk of it and a player on a slow uplink
+                // still deserves to have the report land.
+                req.timeout = 120;
+                yield return req.SendWebRequest();
+                bool ok = !req.isNetworkError && !req.isHttpError;
+                callback?.Invoke(ok, req.downloadHandler?.text, req.responseCode);
+                HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
+                if (!ok)
+                    Debug.LogWarning($"[GeneKerman] Bug report failed: {req.error} ({req.responseCode})");
+            }
+        }
+
         // Handles the first link step. A token means we're linked (store it). An
         // "approval_required" status means the user must approve in Discord — the
         // response carries challenge_id and the caller polls via PollLoginApproval.
@@ -1416,6 +1474,10 @@ namespace GeneKerman
             string rescuePid, string kerbalsJson, string vesselNodeData,
             string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
             string recovery, double minDv,
+            // Orbit-mode plane/regime requirement. incl < 0 means the issuer asked for
+            // no particular plane, and the field is then left off entirely so the server
+            // stores its own "any plane" rather than a real 0° (equatorial).
+            double incl, double marginIncl, string orbitTypes,
             ApiCallback<Dictionary<string, object>> callback)
         {
             if (TransmissionBlocked) { callback(false, null, "Data sharing is off."); yield break; }
@@ -1445,6 +1507,13 @@ namespace GeneKerman
                 new MultipartFormDataSection("recovery", string.IsNullOrEmpty(recovery) ? "crew" : recovery),
                 new MultipartFormDataSection("min_dv", minDv.ToString("G17", inv)),
             };
+            if (incl >= 0)
+            {
+                form.Add(new MultipartFormDataSection("inc", incl.ToString("G17", inv)));
+                form.Add(new MultipartFormDataSection("margin_inc", marginIncl.ToString("G17", inv)));
+            }
+            if (!string.IsNullOrEmpty(orbitTypes))
+                form.Add(new MultipartFormDataSection("orbit_types", orbitTypes));
             if (!string.IsNullOrEmpty(modlist))
                 form.Add(new MultipartFormDataSection("modlist", modlist));
             if (!string.IsNullOrEmpty(rescuePid))
@@ -1497,7 +1566,7 @@ namespace GeneKerman
             byte[] craftFileData, string craftFileName,
             string craftName, string craftType, int partCount,
             float mass, float cost, int price,
-            byte[] blueprintData, byte[] thumbnailData, string mods,
+            byte[] blueprintData, byte[] thumbnailData, string mods, string parts,
             string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
             ApiCallback callback)
         {
@@ -1540,6 +1609,10 @@ namespace GeneKerman
             // Distinct GameData mod folders the craft uses (comma-separated), so the
             // website can filter listings by mod. Empty for stock-only crafts.
             AddText("mods", mods);
+            // The craft's exact part names, so the server can warn a buyer about parts
+            // they don't have before they pay. Skipped by older clients; the server
+            // simply reports "unknown" for a listing that carries none.
+            AddText("parts", parts);
 
             // Life-support flag: which LS mod the craft is provisioned for, how long it
             // lasts per kerbal, and its crew capacity (for the min/max endurance range).

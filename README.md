@@ -155,7 +155,7 @@ KSP Mod Side/
 | `CraftThumb.cs` | 161 | **Thumbnail carriage.** Embeds/extracts NW-view thumbnail PNGs for the KSP craft browser |
 | `CraftDeltaV.cs` | 56 | **Delta-V reader.** Reads stock VesselDeltaV for mission limit validation |
 | `ContractIntegration.cs` | 314 | **Stock contract bridge.** Injects API missions as stock contracts in Mission Control |
-| `ContractConstraints.cs` | 231 | **Mission limits.** Parses forbidden/required parts, propellants, categories, Δv limits |
+| `ContractConstraints.cs` | 260 | **Mission limits.** Parses forbidden/required parts, propellants, categories, Δv and crew-count limits |
 | `PartClassifier.cs` | 190 | **Part analysis.** Derives propellant types, engine categories, part categories from live modules |
 | `EditorPartEnforcer.cs` | 137 | **Editor filter.** Hides forbidden parts in VAB/SPH part list during active contract |
 | `CheckpointDetector.cs` | 348 | **Milestone detection.** Detects rendezvous, flyby, asteroid, EVA, staging, orbit, landing |

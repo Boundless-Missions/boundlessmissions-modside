@@ -119,7 +119,7 @@ namespace GeneKerman.UI.Gui
             int drawn = Math.Min(shown.Count, MaxRows);
             for (int i = 0; i < drawn; i++) Row(listHost, shown[i]);
             if (shown.Count > drawn)
-                UIF.Muted(listHost, (shown.Count - drawn) + " more — type to narrow.").Body();
+                UIF.Muted(listHost, (shown.Count - drawn) + " more; type to narrow.").Body();
         }
 
         private void Row(El parent, ContractCreation.BodyInfo b)

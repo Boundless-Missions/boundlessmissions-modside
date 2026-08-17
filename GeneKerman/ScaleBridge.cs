@@ -184,6 +184,28 @@ namespace GeneKerman
 
         // ── SEND: .craft blueprint path ──────────────────────────────────────────
 
+        /// <summary>Bake the ship currently open in the editor into a blueprint read off
+        /// disk. Every path that sends a .craft to another player MUST run this (or
+        /// <see cref="SnapshotIntoCraftBytes"/> directly) before embedding anything else —
+        /// a blueprint has no import-side scale step, so a craft that leaves unbaked
+        /// cannot be repaired on arrival.
+        ///
+        /// It exists because that step was missed on every export path except contract
+        /// submission — quicksend, marketplace listings, export-to-file and the blueprint
+        /// attached to a vessel transfer all shipped raw TweakScale data, and the crafts
+        /// arrived broken in three separate ways (unbaked scale, un-re-anchored surface
+        /// attachments, and no layout pin to re-assert against KSP's re-seat). One call
+        /// that finds its own parts is much harder to forget than a two-argument one.
+        ///
+        /// No-op outside the editor, on an empty ship, or on an unscaled craft.</summary>
+        public static byte[] BakeEditorCraft(byte[] craftBytes)
+        {
+            var parts = EditorLogic.fetch != null && EditorLogic.fetch.ship != null
+                ? EditorLogic.fetch.ship.parts : null;
+            if (parts == null || parts.Count == 0) return craftBytes;
+            return SnapshotIntoCraftBytes(craftBytes, parts);
+        }
+
         /// <summary>Snapshot the live editor/flight parts' TweakScale-computed scale into
         /// the matching PART nodes of a .craft blueprint, and neutralize TweakScale on those
         /// parts so the blueprint reconstructs identically for every receiver. Parts are

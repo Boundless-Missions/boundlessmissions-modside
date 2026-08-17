@@ -35,9 +35,69 @@ namespace GeneKerman
         public int MaxParts = -1;  // -1 == no limit
         public int MinParts = -1;
         // Crew-aboard limits (-1 == no limit). Whole-craft metric like Δv: can't be
-        // enforced by hiding parts, so it's only checked at submit time.
+        // enforced by hiding parts, so it's only checked at submit time. MaxCrew is
+        // the one bound where 0 is a real value — an uncrewed mission — which is why
+        // "no limit" is -1 here and null on the server, never 0.
         public int MaxCrew = -1;
         public int MinCrew = -1;
+        // Per-profession crew requirements, keyed by the exact trait name KSP stores
+        // in ProtoCrewMember.trait ("Pilot", "Kolonist"). Same shape as the crew band
+        // one level down: -1 == that bound is unset, and a Max of 0 is real ("no
+        // tourists"). Matching is by trait *string*, which is what makes a contract
+        // written on a modded install still mean something here — the name survives
+        // in a save even where the mod defining it doesn't (see ApplyTrait), so a
+        // profession this install can't field reads as "nobody aboard has it" rather
+        // than as an error.
+        public Dictionary<string, CrewTraitRule> CrewTraits = new Dictionary<string, CrewTraitRule>();
+
+        public class CrewTraitRule
+        {
+            public int Min = -1;
+            public int Max = -1;
+        }
+
+        // Canonical trait -> the mod that defines it. Stock's four are absent on
+        // purpose: a profession every install already has is not a dependency worth
+        // naming.
+        //
+        // This is the one dependency no part walk can find. Every mod-detection path
+        // in this project resolves parts to a GameData folder via AvailablePart.partUrl
+        // (see CkanGenerator.GetModFolder), and a profession requirement has no part to
+        // walk — the same blind spot TextureTransfer exists for. So it is written down.
+        //
+        // Deliberately coarse (one mod per profession, the one this community actually
+        // gets it from) and closed: an unlisted trait yields no mod name rather than a
+        // guessed one, because sending a player to install the wrong mod is worse than
+        // telling them only which profession is missing. Kept in sync with the bot's
+        // data/mission_constraints.py::_TRAIT_MODS — the two ends naming different mods
+        // for one profession would read as two different problems.
+        private static readonly Dictionary<string, string> TraitMods =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Kolonist", "USI/MKS" },
+            { "Miner", "USI/MKS" },
+            { "Mechanic", "USI/MKS" },
+            { "Technician", "USI/MKS" },
+            { "Medic", "USI/MKS" },
+            { "Quartermaster", "USI/MKS" },
+            { "Scout", "USI/MKS" },
+            { "Biologist", "USI/MKS" },
+            { "Geologist", "USI/MKS" },
+            { "Botanist", "USI/MKS" },
+            { "Chemist", "USI/MKS" },
+            { "Farmer", "USI/MKS" },
+        };
+
+        /// <summary>The mod that defines a profession, or null for stock's four and for
+        /// anything <see cref="TraitMods"/> doesn't know. Public because the crew-import
+        /// path needs the same answer (see <c>VesselTransfer.ApplyTrait</c>), and one
+        /// table beats two that can drift.</summary>
+        public static string TraitMod(string trait)
+        {
+            if (string.IsNullOrEmpty(trait)) return null;
+            string mod;
+            return TraitMods.TryGetValue(trait.Trim(), out mod) ? mod : null;
+        }
         // Vacuum delta-v limits in m/s (-1 == no limit). Whole-craft metric: can't
         // be enforced by hiding parts, so it's only checked at submit time.
         public double MaxDeltaV = -1;
@@ -53,7 +113,8 @@ namespace GeneKerman
             ForbiddenEngineCategories.Count == 0 && RequiredEngineCategories.Count == 0 &&
             ForbiddenPartCategories.Count == 0 && RequiredPartCategories.Count == 0 &&
             MaxParts <= 0 && MinParts <= 0 && MaxDeltaV <= 0 && MinDeltaV <= 0 &&
-            MaxCrew <= 0 && MinCrew <= 0 && (Orbit == null || Orbit.IsEmpty);
+            MaxCrew < 0 && MinCrew <= 0 && CrewTraits.Count == 0 &&
+            (Orbit == null || Orbit.IsEmpty);
 
         public bool HasForbidRules =>
             ForbiddenParts.Count > 0 || ForbiddenPartNames.Count > 0 ||
@@ -86,8 +147,41 @@ namespace GeneKerman
             c.MinDeltaV = dict.ContainsKey("min_dv") ? MiniJSON.GetDouble(dict, "min_dv", -1) : -1;
             c.MaxCrew = dict.ContainsKey("max_crew") ? MiniJSON.GetInt(dict, "max_crew", -1) : -1;
             c.MinCrew = dict.ContainsKey("min_crew") ? MiniJSON.GetInt(dict, "min_crew", -1) : -1;
+            c.CrewTraits = ParseCrewTraits(MiniJSON.GetDict(dict, "crew_traits"));
             c.Orbit = OrbitConstraint.Parse(MiniJSON.GetDict(dict, "orbit"));
             return c;
+        }
+
+        /// <summary>Read the `crew_traits` object: trait name → {min, max}. A bare
+        /// number instead of an object is read as a floor, matching the shorthand the
+        /// server accepts. Entries with neither bound are dropped rather than kept as
+        /// a rule that can never be broken.</summary>
+        private static Dictionary<string, CrewTraitRule> ParseCrewTraits(Dictionary<string, object> dict)
+        {
+            var rules = new Dictionary<string, CrewTraitRule>(StringComparer.OrdinalIgnoreCase);
+            if (dict == null) return rules;
+
+            foreach (var kvp in dict)
+            {
+                if (string.IsNullOrEmpty(kvp.Key) || kvp.Value == null) continue;
+                var rule = new CrewTraitRule();
+
+                var bounds = kvp.Value as Dictionary<string, object>;
+                if (bounds != null)
+                {
+                    rule.Min = bounds.ContainsKey("min") ? MiniJSON.GetInt(bounds, "min", -1) : -1;
+                    rule.Max = bounds.ContainsKey("max") ? MiniJSON.GetInt(bounds, "max", -1) : -1;
+                }
+                else
+                {
+                    var shorthand = new Dictionary<string, object> { { "min", kvp.Value } };
+                    rule.Min = MiniJSON.GetInt(shorthand, "min", -1);
+                }
+
+                if (rule.Min <= 0 && rule.Max < 0) continue;
+                rules[kvp.Key.Trim()] = rule;
+            }
+            return rules;
         }
 
         /// <summary>
@@ -113,17 +207,22 @@ namespace GeneKerman
         /// -1 when it couldn't be read, and the Δv limit is skipped rather than
         /// failed (the server skips a missing value too).
         /// </summary>
-        public List<string> CheckCraft(IEnumerable<Part> parts, double deltaVVac = -1, int crewCount = -1)
+        public List<string> CheckCraft(IEnumerable<Part> parts, double deltaVVac = -1, int crewCount = -1,
+                                       Dictionary<string, int> crewTraits = null)
         {
             var violations = new List<string>();
             if (IsEmpty || parts == null) return violations;
+
+            violations.AddRange(CheckCrewTraits(crewTraits));
 
             // Crew aboard (-1 == unavailable, so skip rather than fail — like Δv). The
             // server re-checks authoritatively from the submitted telemetry crew count.
             if (crewCount >= 0)
             {
-                if (MaxCrew > 0 && crewCount > MaxCrew)
-                    violations.Add($"Too many crew aboard: {crewCount} (max {MaxCrew}).");
+                if (MaxCrew >= 0 && crewCount > MaxCrew)
+                    violations.Add(MaxCrew == 0
+                        ? $"This mission must fly uncrewed: {crewCount} crew aboard."
+                        : $"Too many crew aboard: {crewCount} (max {MaxCrew}).");
                 if (MinCrew > 0 && crewCount < MinCrew)
                     violations.Add($"Too few crew aboard: {crewCount} (min {MinCrew}).");
             }
@@ -181,6 +280,78 @@ namespace GeneKerman
             return violations.Distinct().ToList();
         }
 
+        /// <summary>
+        /// Per-profession crew check, against the head count aboard by trait. Null (the
+        /// caller couldn't read the crew) skips it rather than failing it, like Δv.
+        ///
+        /// The messages match the server's word for word: this runs as a pre-flight so
+        /// the player is told before they submit, and the server re-checks the same
+        /// rule afterwards — the two disagreeing on wording would read as two different
+        /// problems. A profession this install doesn't even define is called out
+        /// separately, because "0 aboard" is true but useless advice when no kerbal in
+        /// the save could ever have been one.
+        /// </summary>
+        public List<string> CheckCrewTraits(Dictionary<string, int> crewTraits)
+        {
+            var violations = new List<string>();
+            if (CrewTraits.Count == 0 || crewTraits == null) return violations;
+
+            foreach (var kvp in CrewTraits)
+            {
+                string trait = kvp.Key;
+                CrewTraitRule rule = kvp.Value;
+                int aboard;
+                if (!crewTraits.TryGetValue(trait, out aboard)) aboard = 0;
+
+                if (rule.Min > 0 && aboard < rule.Min)
+                {
+                    violations.Add($"Too few {trait}s aboard: {aboard} (need {rule.Min}).");
+                    if (aboard == 0 && !TraitExistsHere(trait))
+                    {
+                        string mod = TraitMod(trait);
+                        violations.Add(mod == null
+                            ? $"No mod installed here defines the '{trait}' profession — " +
+                              "this contract was written on an install that has it."
+                            : $"No mod installed here defines the '{trait}' profession — it comes " +
+                              $"from {mod}, which the contract's author has installed.");
+                    }
+                }
+                if (rule.Max >= 0 && aboard > rule.Max)
+                    violations.Add(rule.Max == 0
+                        ? $"No {trait} may fly this mission: {aboard} aboard."
+                        : $"Too many {trait}s aboard: {aboard} (max {rule.Max}).");
+            }
+            return violations;
+        }
+
+        private static bool TraitExistsHere(string trait)
+        {
+            try
+            {
+                var configs = GameDatabase.Instance != null
+                    ? GameDatabase.Instance.ExperienceConfigs : null;
+                return configs != null && configs.GetExperienceTraitConfig(trait) != null;
+            }
+            catch { return true; }   // can't tell — don't add a second, wrong message
+        }
+
+        /// <summary>Head count aboard a vessel by profession, keyed the way
+        /// <see cref="CrewTraits"/> is. The key is `ProtoCrewMember.trait`, the same
+        /// string the contract names, so this works for professions this install has
+        /// no config for.</summary>
+        public static Dictionary<string, int> CountCrewTraits(IEnumerable<ProtoCrewMember> crew)
+        {
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            if (crew == null) return counts;
+            foreach (var pcm in crew)
+            {
+                if (pcm == null || string.IsNullOrEmpty(pcm.trait)) continue;
+                int n;
+                counts[pcm.trait] = counts.TryGetValue(pcm.trait, out n) ? n + 1 : 1;
+            }
+            return counts;
+        }
+
         /// <summary>First forbidden-rule violation for a single part, or null.</summary>
         private string ViolatesForbid(PartSummary s)
         {
@@ -222,10 +393,38 @@ namespace GeneKerman
             if (MinParts > 0) bits.Add($"≥{MinParts} parts");
             if (MaxDeltaV > 0) bits.Add($"≤{MaxDeltaV:F0} m/s Δv");
             if (MinDeltaV > 0) bits.Add($"≥{MinDeltaV:F0} m/s Δv");
-            if (MaxCrew > 0) bits.Add($"≤{MaxCrew} crew");
+            if (MaxCrew == 0) bits.Add("uncrewed");
+            else if (MaxCrew > 0) bits.Add($"≤{MaxCrew} crew");
             if (MinCrew > 0) bits.Add($"≥{MinCrew} crew");
+            foreach (var kvp in CrewTraits)
+            {
+                CrewTraitRule r = kvp.Value;
+                string phrase = null;
+                if (r.Max == 0) phrase = $"no {kvp.Key}";
+                else if (r.Min > 0 && r.Max > 0 && r.Min == r.Max) phrase = $"exactly {r.Min}× {kvp.Key}";
+                else if (r.Min > 0 && r.Max > 0) phrase = $"{r.Min}–{r.Max}× {kvp.Key}";
+                else if (r.Max > 0) phrase = $"≤{r.Max}× {kvp.Key}";
+                else if (r.Min > 0) phrase = $"{r.Min}× {kvp.Key}";
+                if (phrase != null) bits.Add(phrase + MissingTraitSuffix(kvp.Key, r));
+            }
             if (Orbit != null && !Orbit.IsEmpty) bits.Add(Orbit.Describe());
             return string.Join(" | ", bits.ToArray());
+        }
+
+        /// <summary>" (needs USI/MKS)" for a profession this install cannot field, or ""
+        /// — so the requirement names its mod while the contract is still being read,
+        /// not for the first time when the submit pre-flight refuses it.
+        ///
+        /// Quiet for a player who already has the mod, and quiet for a *ceiling* ("no
+        /// Kolonists aboard"), which is satisfied by not having the mod at all: naming
+        /// it there would read as advice to install something in order to obey a ban.
+        /// </summary>
+        private static string MissingTraitSuffix(string trait, CrewTraitRule rule)
+        {
+            if (rule == null || rule.Min <= 0) return "";
+            string mod = TraitMod(trait);
+            if (mod == null || TraitExistsHere(trait)) return "";
+            return $" (needs {mod})";
         }
 
         private static List<string> Concat(params List<string>[] lists)

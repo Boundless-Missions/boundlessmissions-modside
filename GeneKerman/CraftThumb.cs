@@ -37,11 +37,60 @@ namespace GeneKerman
             return EmbedThumbInCraft(craftBytes, VesselRenderer.CaptureNWThumbnail());
         }
 
-        /// <summary>As above, but render a specific loaded vessel (fleet-extra blueprints
-        /// in a multi-vessel submission).</summary>
-        public static byte[] EmbedThumbForVessel(byte[] craftBytes, Vessel vessel)
+        /// <summary>As above, but render a specific vessel (fleet-extra blueprints in a
+        /// multi-vessel submission). <paramref name="craftPath"/> is the blueprint this
+        /// thumbnail rides in, used for the fallback below — pass it when you have it.
+        ///
+        /// A vessel only has live geometry while it is loaded: outside physics range KSP
+        /// keeps it as a ProtoVessel and <c>vessel.parts</c> is empty, so the render
+        /// returns null and the craft used to ship with no thumbnail at all — the
+        /// recipient got KSP's placeholder with nothing in the log to say why. So fall
+        /// back to the thumbnail KSP itself drew for this craft: it is the picture the
+        /// sender's own craft browser is showing, and it costs no render.</summary>
+        public static byte[] EmbedThumbForVessel(byte[] craftBytes, Vessel vessel, string craftPath = null)
         {
-            return EmbedThumbInCraft(craftBytes, VesselRenderer.CaptureNWThumbnail(vessel));
+            byte[] png = VesselRenderer.CaptureNWThumbnail(vessel);
+            if (png == null || png.Length == 0)
+            {
+                png = ReadLocalThumbnail(craftPath);
+                if (png != null)
+                    Debug.Log($"[GeneKerman] CraftThumb: nothing to render for '{vessel?.vesselName}' "
+                              + "(unloaded?) — carrying KSP's own thumbnail instead.");
+                else
+                    Debug.LogWarning($"[GeneKerman] CraftThumb: no thumbnail for '{vessel?.vesselName}' — "
+                                     + "nothing rendered and none on disk; the recipient will see KSP's placeholder.");
+            }
+            return EmbedThumbInCraft(craftBytes, png);
+        }
+
+        /// <summary>The thumbnail KSP already keeps for a craft on THIS machine, or null if
+        /// it has never drawn one (KSP writes them in ShipConstruction.SaveShip and on open
+        /// via LoadShip — never merely from listing a craft in the browser, which is why a
+        /// craft that arrived from elsewhere and was never opened has none).</summary>
+        public static byte[] ReadLocalThumbnail(string craftPath)
+        {
+            if (string.IsNullOrEmpty(craftPath)) return null;
+            try
+            {
+                string craftName = Path.GetFileNameWithoutExtension(craftPath);
+                string facility = Path.GetFileName(Path.GetDirectoryName(craftPath)); // VAB | SPH
+                string thumbsDir = Path.Combine(KSPUtil.ApplicationRootPath, "thumbs");
+
+                // KSP keys the file on the save that was loaded when it drew the picture, so
+                // a blueprint in the shared <root>/Ships folder sits under whichever save
+                // that was — "default" being the usual one. Try this save, then that.
+                foreach (string save in new[] { HighLogic.SaveFolder, "default" })
+                {
+                    if (string.IsNullOrEmpty(save)) continue;
+                    string path = Path.Combine(thumbsDir, $"{save}_{facility}_{craftName}.png");
+                    if (File.Exists(path)) return File.ReadAllBytes(path);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] CraftThumb.ReadLocalThumbnail failed: {ex.Message}");
+            }
+            return null;
         }
 
         /// <summary>Append a GKTHUMB block carrying <paramref name="pngBytes"/> (base64) to

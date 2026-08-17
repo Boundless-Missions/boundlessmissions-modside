@@ -21,6 +21,37 @@ using UnityEngine;
 namespace GeneKerman
 {
     /// <summary>
+    /// One craft queued to leave this save: the name to show the player, and what
+    /// happens to the crew aboard when it goes.
+    ///
+    /// The fate is decided where the removal is *queued*, not where it runs, because
+    /// only the caller knows which side of the hand-over this is — and the removal
+    /// itself can run scenes, or sessions, later.
+    /// </summary>
+    public class PendingRescueRemoval
+    {
+        public string Name;
+        public VesselTransfer.CrewFate CrewFate = VesselTransfer.CrewFate.LeavesWithCraft;
+
+        /// <summary>Read a saved fate, falling back to the one that was implicit before
+        /// this field existed — so an entry queued by an older build still does what it
+        /// was queued to do.</summary>
+        public static VesselTransfer.CrewFate ParseFate(string saved)
+        {
+            if (!string.IsNullOrEmpty(saved))
+            {
+                try
+                {
+                    return (VesselTransfer.CrewFate)Enum.Parse(
+                        typeof(VesselTransfer.CrewFate), saved, true);
+                }
+                catch { /* unknown value — fall through */ }
+            }
+            return VesselTransfer.CrewFate.LeavesWithCraft;
+        }
+    }
+
+    /// <summary>
     /// ScenarioModule that manages the bridge between our API contracts
     /// and the stock contract system. Registered via a MODULE Manager config.
     /// </summary>
@@ -45,14 +76,36 @@ namespace GeneKerman
         // approves — even if the player quit and relaunched in between (the common case).
         private Dictionary<string, string> rescueSubmittedPids = new Dictionary<string, string>();
 
-        // Rescue craft queued for removal (pid → friendly name), persisted so a removal that
-        // couldn't run yet (player was in flight) survives a restart and fires at the next
+        // Rescue craft queued for removal (pid → what to do with it), persisted so a removal
+        // that couldn't run yet (player was in flight) survives a restart and fires at the next
         // Space Center / Tracking Station visit.
-        private Dictionary<string, string> pendingRescueRemovals = new Dictionary<string, string>();
+        private Dictionary<string, PendingRescueRemoval> pendingRescueRemovals =
+            new Dictionary<string, PendingRescueRemoval>();
 
         public override void OnAwake()
         {
             Instance = this;
+        }
+
+        /// <summary>
+        /// Clear the static handle when KSP tears this module down — it is registered
+        /// for SPACECENTER/FLIGHT/TRACKSTATION only, so in the editor (and mid scene
+        /// change) there is no live instance at all.
+        ///
+        /// Without this, `Instance` keeps pointing at the destroyed module, and
+        /// `Instance?.Something` does NOT catch it: `?.` is a plain reference-null
+        /// check, not UnityEngine.Object's overloaded ==. Callers would then read and
+        /// write the dead module's dictionaries, which nothing will ever serialize —
+        /// a queued rescue removal written there is simply lost. Nulling the field
+        /// makes `?.` and `== null` agree again everywhere.
+        /// </summary>
+        private void OnDestroy()
+        {
+            // ReferenceEquals, not ==: whether KSP builds the next scene's module before
+            // or after tearing this one down, we must only clear the handle when it is
+            // still pointing at *us*, and Unity's == would blur a destroyed object into
+            // null on both sides of that test.
+            if (ReferenceEquals(Instance, this)) Instance = null;
         }
 
         public override void OnLoad(ConfigNode node)
@@ -64,7 +117,8 @@ namespace GeneKerman
             if (importedVessels == null) importedVessels = new HashSet<string>();
             if (immunities == null) immunities = new List<RescueImmunityRecord>();
             if (rescueSubmittedPids == null) rescueSubmittedPids = new Dictionary<string, string>();
-            if (pendingRescueRemovals == null) pendingRescueRemovals = new Dictionary<string, string>();
+            if (pendingRescueRemovals == null)
+                pendingRescueRemovals = new Dictionary<string, PendingRescueRemoval>();
             activeContracts.Clear();
             importedVessels.Clear();
             immunities.Clear();
@@ -117,8 +171,14 @@ namespace GeneKerman
                     foreach (ConfigNode rec in pend.GetNodes("RECORD"))
                     {
                         string pid = rec.GetValue("pid");
-                        if (!string.IsNullOrEmpty(pid))
-                            pendingRescueRemovals[pid] = rec.GetValue("name") ?? pid;
+                        if (string.IsNullOrEmpty(pid)) continue;
+                        pendingRescueRemovals[pid] = new PendingRescueRemoval
+                        {
+                            Name = rec.GetValue("name") ?? pid,
+                            // Absent on records queued before the fate was recorded: keep
+                            // what those records meant when they were written.
+                            CrewFate = PendingRescueRemoval.ParseFate(rec.GetValue("crewFate")),
+                        };
                     }
                 }
             }
@@ -154,11 +214,13 @@ namespace GeneKerman
                 }
 
                 var pend = node.AddNode("RESCUE_PENDING_REMOVALS");
-                foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, string>()))
+                foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, PendingRescueRemoval>()))
                 {
+                    if (kvp.Value == null) continue;
                     var rec = pend.AddNode("RECORD");
                     rec.AddValue("pid", kvp.Key);
-                    rec.AddValue("name", kvp.Value);
+                    rec.AddValue("name", kvp.Value.Name ?? kvp.Key);
+                    rec.AddValue("crewFate", kvp.Value.CrewFate.ToString());
                 }
             }
             catch (Exception ex)
@@ -206,18 +268,36 @@ namespace GeneKerman
                 rescueSubmittedPids[contractId] = pid;
         }
 
-        /// <summary>Look up (and forget) the submitted rescue craft pid for a contract.</summary>
-        public bool TakeRescueSubmission(string contractId, out string pid)
+        /// <summary>Look up the submitted rescue craft pid for a contract, without
+        /// forgetting it. Deliberately non-destructive: the record is the only thing
+        /// that ties a contract to a craft in this save, so it must survive until the
+        /// removal has actually been queued (see ForgetRescueSubmission). Reading and
+        /// forgetting in one step meant a queue that failed — no scenario, no save —
+        /// dropped the craft's identity on the floor with it.</summary>
+        public bool PeekRescueSubmission(string contractId, out string pid)
         {
             pid = null;
             if (string.IsNullOrEmpty(contractId)) return false;
-            if (!rescueSubmittedPids.TryGetValue(contractId, out pid)) return false;
-            rescueSubmittedPids.Remove(contractId);
-            return true;
+            return rescueSubmittedPids.TryGetValue(contractId, out pid);
         }
 
-        /// <summary>Live map of craft (pid → friendly name) queued for removal.</summary>
-        public IDictionary<string, string> PendingRescueRemovals => pendingRescueRemovals;
+        /// <summary>Drop the submission record for a contract, once its craft is either
+        /// queued for removal or known to be irrelevant (the contract never completed).</summary>
+        public void ForgetRescueSubmission(string contractId)
+        {
+            if (!string.IsNullOrEmpty(contractId))
+                rescueSubmittedPids.Remove(contractId);
+        }
+
+        /// <summary>Contracts with a craft still awaiting hand-over, newest state as of
+        /// the last save. Copied, so a caller can forget entries while iterating.</summary>
+        public List<string> OutstandingRescueSubmissions()
+        {
+            return new List<string>(rescueSubmittedPids.Keys);
+        }
+
+        /// <summary>Live map of craft (pid → queued removal) awaiting a safe scene.</summary>
+        public IDictionary<string, PendingRescueRemoval> PendingRescueRemovals => pendingRescueRemovals;
 
         /// <summary>
         /// Inject a mission from our API as a stock contract.

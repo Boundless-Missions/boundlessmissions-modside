@@ -53,17 +53,23 @@ namespace GeneKerman
             }
 
             // Pull off the carried thumbnail FIRST of all: the GKTHUMB block is appended
-            // after every other side-channel block (GKFLAG / GKTSVER / GKTU / GKMODS), so it must
-            // be stripped before any of them. The PNG is written to KSP's thumbs/ folder
+            // after every other side-channel block (GKFLAG / GKTSVER / GKTU / GKRF /
+            // GKMODS), so it must be stripped before any of them. The PNG is written to KSP's thumbs/ folder
             // after the craft lands on disk (we need its final name/facility for the path).
             byte[] thumbPng;
             rawData = CraftThumb.CheckAndStripFromCraft(rawData, out thumbPng);
 
-            // Then the carried mod list: the GKMODS block sits after the GKFLAG and GKTSVER
-            // blocks, so it must be stripped before either of those strips runs. The parsed
-            // list is used after the craft is written.
+            // Then the carried mod list: the GKMODS block sits after the GKFLAG, GKTSVER,
+            // GKTU and GKRF blocks, so it must be stripped before any of those strips
+            // runs. The parsed list is used after the craft is written.
             System.Collections.Generic.List<CkanGenerator.ModEntry> requiredMods;
             rawData = CkanGenerator.CheckAndStripFromCraft(rawData, out requiredMods);
+
+            // Then the fuel/engine configuration manifest: the GKRF block sits between
+            // GKTU and GKMODS, so it strips after GKMODS and before GKTU. Acting on it
+            // waits until the craft body has settled, like the paint job's.
+            RealFuelsTransfer.RfManifest rfManifest;
+            rawData = RealFuelsTransfer.StripFromCraft(rawData, out rfManifest);
 
             // Then the paint job's manifest: the GKTU block sits between GKMODS and
             // GKTSVER, so it strips after the one and before the other (the TweakScale
@@ -96,6 +102,14 @@ namespace GeneKerman
             // comes out in stock colours — nothing about it fails to load.
             rawData = TextureTransfer.ReconcileCraftBody(rawData, tuManifest, craftFileName);
 
+            // And the fuel/engine configuration: on a RealFuels install, check the
+            // craft's tank types / engine configs / RO environment against what is
+            // defined here; without RealFuels, drop the RF modules and any propellant
+            // this install doesn't define so the parts fill from their local prefabs.
+            // Same placement rationale as the paint job — after PartAliases has settled
+            // what each part actually is.
+            rawData = RealFuelsTransfer.ReconcileCraftBody(rawData, rfManifest, craftFileName);
+
             // Parse craft type from header
             string craftType = ParseCraftType(rawData);
             if (string.IsNullOrEmpty(craftType))
@@ -114,10 +128,12 @@ namespace GeneKerman
 
             Directory.CreateDirectory(saveDir);
 
-            // Sanitize filename
-            string safeName = craftFileName;
-            if (string.IsNullOrEmpty(safeName))
-                safeName = "received_craft.craft";
+            // Sanitize filename. craftFileName is server-supplied (it originates from
+            // whatever name another player uploaded), so it must be reduced to a bare
+            // basename before it touches Path.Combine: a "../" segment or a rooted path
+            // would otherwise escape saveDir and let a shared craft write arbitrary bytes
+            // outside the Ships folder.
+            string safeName = SanitizeCraftFileName(craftFileName);
             if (!safeName.EndsWith(".craft"))
                 safeName += ".craft";
 
@@ -152,6 +168,31 @@ namespace GeneKerman
             }
 
             return finalPath;
+        }
+
+        /// <summary>
+        /// Reduce a server-supplied craft filename to a safe basename. Strips any
+        /// directory components (handling both '/' and '\', since KSP's Mono runtime
+        /// treats only one as a separator per platform), drops leading dots so ".."
+        /// can't survive, replaces anything outside a conservative charset, and caps
+        /// the length. Falls back to a default when nothing usable remains.
+        /// </summary>
+        private static string SanitizeCraftFileName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return "received_craft.craft";
+            name = name.Replace('\\', '/');
+            int slash = name.LastIndexOf('/');
+            if (slash >= 0)
+                name = name.Substring(slash + 1);           // basename only
+            var sb = new StringBuilder(name.Length);
+            foreach (char c in name)
+                sb.Append((char.IsLetterOrDigit(c) || c == '.' || c == '_' ||
+                           c == '-' || c == ' ') ? c : '_');
+            name = sb.ToString().TrimStart('.').Trim();      // no leading dots / stray edges
+            if (name.Length > 128)
+                name = name.Substring(0, 128);
+            return string.IsNullOrEmpty(name) ? "received_craft.craft" : name;
         }
 
         /// <summary>

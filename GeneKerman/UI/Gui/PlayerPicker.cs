@@ -42,7 +42,19 @@ namespace GeneKerman.UI.Gui
         private bool favoritesOnly;
 
         private El listHost;
+        private El chosenHost;
         private Action onSelectionChanged;
+
+        /// <summary>
+        /// Names this picker's own scroll offset (see ScrollMemory). Per instance and
+        /// not per class: quicksend and contract creation each hold a picker, and
+        /// they are two different lists that happen to be built from the same code —
+        /// sharing a key would have one of them opening at the other's position.
+        /// A picker outlives every rebuild of the panel holding it, so the instance
+        /// is exactly the right lifetime for the key.
+        /// </summary>
+        private readonly string scrollKey = "player-picker#" + (++instances);
+        private static int instances;
 
         /// <summary>
         /// Downloaded avatars, keyed by user id. A null value means "tried and
@@ -100,6 +112,9 @@ namespace GeneKerman.UI.Gui
             requested = false;
             query = "";
             favoritesOnly = false;
+            // A fresh visit is a fresh list: resuming the last one's scroll position
+            // would open a cleared picker part-way down someone else's roster.
+            ScrollMemory.Forget(scrollKey);
             ClearSelection();
         }
 
@@ -135,6 +150,7 @@ namespace GeneKerman.UI.Gui
         {
             SelectedId = null;
             SelectedName = null;
+            RefreshChosen();
         }
 
         // ── Build ───────────────────────────────────────────────────────────
@@ -142,6 +158,13 @@ namespace GeneKerman.UI.Gui
         public void Build(El parent, string emptyLabel = "No other players found.")
         {
             var box = UIF.Box(parent, "Picker").Column(Theme.Space2);
+
+            // Above the search box, not below the list: this is the answer, and the
+            // two rows under it are the machinery for changing it. Its own host so
+            // that selecting somebody refills it in place — rebuilding the panel
+            // would destroy the search box mid-keystroke (see the file header).
+            chosenHost = UIF.Box(box, "Chosen").Column(0);
+            RefreshChosen();
 
             var head = UIF.Box(box, "Search").Row(Theme.Space2).H(28);
             var field = UIF.TextField(head, query, "Search players…", 28);
@@ -166,6 +189,24 @@ namespace GeneKerman.UI.Gui
         }
 
         private string emptyText = "No other players found.";
+
+        /// <summary>Refill the "who is chosen" line in place. Safe when the host is
+        /// gone, for the same reason RefreshList is.</summary>
+        private void RefreshChosen()
+        {
+            if (chosenHost == null || chosenHost.Go == null) return;
+
+            chosenHost.ClearChildren();
+            // Deactivated rather than left empty: a layout group counts its spacing
+            // between children whatever their height, so an empty host is still 8px
+            // of gap above the search box. An inactive one is skipped outright.
+            chosenHost.Active(HasSelection);
+            if (!HasSelection) return;
+
+            UIF.Selection(chosenHost, "Selected",
+                          string.IsNullOrEmpty(SelectedName) ? SelectedId : SelectedName,
+                          () => Select(null, null));
+        }
 
         /// <summary>
         /// Refill the list in place. Safe to call when the host is gone — a rebuild
@@ -200,7 +241,7 @@ namespace GeneKerman.UI.Gui
             }
 
             El content;
-            UIF.ScrollView(listHost, out content).Flex(1f, 1f);
+            UIF.ScrollView(listHost, out content, scrollKey).Flex(1f, 1f);
             foreach (var c in shown) Row(content, c);
         }
 
@@ -273,7 +314,11 @@ namespace GeneKerman.UI.Gui
             Avatar(row, p);
 
             var text = UIF.Box(row, "Text").Column(0).PrefW(0).Flex(1f);
-            UIF.Label(text, p.Name, Theme.FontSm).Ellipsis();
+            // The name goes accent-green on the chosen row. The row's tint and edge
+            // bar are behind the avatar and easy to read past when the eye is on the
+            // names, which is where it is while picking one.
+            UIF.Label(text, p.Name, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null)
+               .Bold(selected).Ellipsis();
             if (!string.IsNullOrEmpty(p.Corp)) UIF.Muted(text, p.Corp).Ellipsis();
 
             if (p.Level > 0) UIF.Badge(row, "Lv " + p.Level, Theme.MutedForeground);
@@ -402,6 +447,7 @@ namespace GeneKerman.UI.Gui
             SelectedId = id;
             SelectedName = name;
             RefreshList();
+            RefreshChosen();
             onSelectionChanged?.Invoke();
         }
 

@@ -76,6 +76,13 @@ namespace GeneKerman
         // painted, and never on the parts themselves. Off leaves the recolour modules
         // exactly as the sender wrote them — KSP ignores the ones it can't match.
         private bool textureTransferEnabled = true;
+        // Carry a craft's RealFuels/RO fuel-and-engine configuration manifest, and for a
+        // recipient without RealFuels drop the RF modules plus locally-undefined
+        // propellants so the craft loads in local fuels (see RealFuelsTransfer). On by
+        // default for the same reason as part substitution: it only engages on a craft
+        // that would otherwise arrive broken or misleading. Off leaves the nodes exactly
+        // as the sender wrote them; warnings still post.
+        private bool fuelConfigTransferEnabled = true;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -127,6 +134,9 @@ namespace GeneKerman
         public bool PartSubstitutionEnabled => partSubstitutionEnabled;
         /// <summary>Whether a craft's Textures Unlimited paint job is carried across transfers.</summary>
         public bool TextureTransferEnabled => textureTransferEnabled;
+        /// <summary>Whether a craft's RealFuels/RO fuel-and-engine configuration is carried
+        /// (and reconciled away for a recipient without RealFuels).</summary>
+        public bool FuelConfigTransferEnabled => fuelConfigTransferEnabled;
 
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
@@ -245,6 +255,7 @@ namespace GeneKerman
                             emergencyRationDays = rationDays < 0 ? 0 : rationDays;
                         bool.TryParse(gk.GetValue("enablePartSubstitution") ?? "true", out partSubstitutionEnabled);
                         bool.TryParse(gk.GetValue("enableTextureTransfer") ?? "true", out textureTransferEnabled);
+                        bool.TryParse(gk.GetValue("enableFuelConfigTransfer") ?? "true", out fuelConfigTransferEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -525,6 +536,7 @@ namespace GeneKerman
             gk.AddValue("emergencyRationDays", emergencyRationDays);
             gk.AddValue("enablePartSubstitution", partSubstitutionEnabled);
             gk.AddValue("enableTextureTransfer", textureTransferEnabled);
+            gk.AddValue("enableFuelConfigTransfer", fuelConfigTransferEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -677,12 +689,13 @@ namespace GeneKerman
                 req.SetRequestHeader("Authorization", "Bearer " + sessionToken);
         }
 
-        /// Post-response gate hook. Handles both the server-enforced version block
-        /// (426 update_required) and the device-binding block (403 device_unverified).
-        /// Returns true if the response was one of those gates.
+        /// Post-response gate hook. Handles the server-enforced version block
+        /// (426 update_required), the dead-session drop (401) and the device-binding
+        /// block (403 device_unverified). Returns true if the response was a gate.
         private bool HandleDeviceGate(long status, string body)
         {
             if (HandleVersionGate(status, body)) return true;
+            if (HandleSessionGate(status)) return true;
             if (status != 403 || string.IsNullOrEmpty(body)) return false;
             var data = MiniJSON.DeserializeDict(body);
             // FastAPI wraps the payload under "detail".
@@ -697,6 +710,30 @@ namespace GeneKerman
                 return true;
             }
             return false;
+        }
+
+        /// If a response is a 401, this PC's session is finished: the server answers
+        /// 401 from one place only (its bearer-token check), so it never means "wrong
+        /// code" or "wrong device" — the token is expired, or was revoked by the
+        /// user's own "log out of all devices", which invalidates tokens minted before
+        /// it. No retry can fix that, so drop straight to the link screen. Left
+        /// unhandled, the client sits in a zombie linked state where every action
+        /// fails with a generic transport error and the notification socket
+        /// reconnects forever, with nothing telling the player to link again.
+        /// Returns true if it was a 401.
+        private bool HandleSessionGate(long status)
+        {
+            if (status != 401) return false;
+            // Already dropped. A burst of in-flight requests all come back 401
+            // together, and IsLinked goes false on the first one, so this is what
+            // keeps the unlink (and its popup) to one.
+            if (!IsLinked) return true;
+            Debug.LogWarning("[GeneKerman] Session rejected by the server (401) — unlinking this PC.");
+            if (GeneKermanMod.Instance != null)
+                GeneKermanMod.Instance.OnSessionRevoked();
+            else
+                ClearToken();   // no UI to drive (early startup) — still drop the dead token
+            return true;
         }
 
         /// If a response is the server-enforced version block (426 update_required),
@@ -1308,7 +1345,8 @@ namespace GeneKerman
         {
             yield return Get("/api/v1/user/profile", (ok, resp, status) =>
             {
-                if (status == 401) { ClearToken(); }
+                // A 401 here used to be cleared by hand. It is HandleSessionGate's
+                // job now, for every endpoint rather than only this one.
                 if (ok && !string.IsNullOrEmpty(resp))
                     callback(true, MiniJSON.DeserializeDict(resp), null);
                 else
@@ -1643,10 +1681,12 @@ namespace GeneKerman
         /// "vessel" (a live ConfigNode the recipient spawns in-save) or "craft" (a
         /// .craft blueprint installed to their Ships folder). The payload is gzip
         /// compressed before upload; the server decompresses and stores it raw.
+        /// <paramref name="blueprintPng"/> is the rendered preview the recipient
+        /// judges the offer by — optional, since a render can fail.
         /// </summary>
         public IEnumerator SendCraftToFriend(
             string recipientId, string kind, string craftName,
-            byte[] fileData, string fileName, ApiCallback callback)
+            byte[] fileData, string fileName, byte[] blueprintPng, ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/craft/send";
@@ -1655,6 +1695,9 @@ namespace GeneKerman
             byte[] compressed = GzipCompress(fileData);
             form.Add(new MultipartFormFileSection("file", compressed,
                 fileName ?? "payload.dat", "application/gzip"));
+            if (blueprintPng != null && blueprintPng.Length > 0)
+                form.Add(new MultipartFormFileSection("blueprint", blueprintPng,
+                    "blueprint.png", "image/png"));
             form.Add(new MultipartFormDataSection("recipient_id", recipientId ?? ""));
             form.Add(new MultipartFormDataSection("kind", kind ?? "craft"));
             form.Add(new MultipartFormDataSection("craft_name", craftName ?? "Craft"));

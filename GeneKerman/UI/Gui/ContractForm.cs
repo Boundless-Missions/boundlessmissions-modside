@@ -111,9 +111,14 @@ namespace GeneKerman.UI.Gui
             bodyPicker.Attach(onMarkDirty);
         }
 
+        /// <summary>Names this form's scroll offset across rebuilds — see ScrollMemory.</summary>
+        private const string ScrollKey = "contract-form";
+
         /// <summary>Back to a blank form. Called whenever it is opened.</summary>
         internal void Reset()
         {
+            ScrollMemory.Forget(ScrollKey);
+
             type = "craft_build";
             auction = false;
             mission = "";
@@ -183,7 +188,13 @@ namespace GeneKerman.UI.Gui
             int balance = profile == null ? -1 : MiniJSON.GetInt(profile, "balance");
 
             El body;
-            UIF.ScrollView(parent, out body).Flex(1f, 1f);
+            // Keyed, because this form is the worst case for a rebuild resetting the
+            // scroll: it is the tallest screen in the sidebar and almost every answer
+            // on it — the type cards, the recipient, the date, every switch — marks
+            // the panel dirty, so without this each answer threw the player back to
+            // the first question. Reset() forgets it, so a new contract starts at the
+            // top.
+            UIF.ScrollView(parent, out body, ScrollKey).Flex(1f, 1f);
 
             BuildTypes(body);
             BuildRecipient(body);

@@ -103,6 +103,11 @@ namespace GeneKerman
                 // sets they name is only knowable here, on the sender's install.
                 TextureTransfer.EmbedInNode(vesselNode);
 
+                // And the RealFuels/RO fuel-and-engine configuration: also already in the
+                // parts' modules, also from a mod no part walk can see. Which pack
+                // defines each tank type is likewise only knowable on the sender's install.
+                RealFuelsTransfer.EmbedInNode(vesselNode);
+
                 // Snapshot the final values of any TweakScale-rescaled parts (absolute
                 // model scale / mass / stats) into each part's GeneKermanScale module, so
                 // the craft reconstructs identically for every receiver regardless of
@@ -211,6 +216,8 @@ namespace GeneKerman
                 // …the Textures Unlimited paint job (which recolour packs it needs — no
                 // part walk can find a mod that adds no parts)…
                 craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
+                // …the RealFuels/RO fuel-and-engine configuration (same blind spot)…
+                craftBytes = RealFuelsTransfer.EmbedInCraft(craftBytes);
                 // …the mod list…
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
                 // …and an NW-view thumbnail rendered from this specific vessel (appended
@@ -628,6 +635,13 @@ namespace GeneKerman
             // vessel painted with a pack the recipient hasn't got spawns in stock colours
             // instead of dragging orphan modules into a live ProtoVessel.
             TextureTransfer.ExtractCheckAndStripFromNode(innerNode, innerNode.GetValue("name"));
+
+            // Likewise the fuel/engine configuration: read + strip the GKRF node, check
+            // tank types / engine configs / the RO environment against this install, and
+            // for a recipient without RealFuels drop the RF modules and any propellant
+            // this install doesn't define, so the spawned vessel carries local fuels
+            // instead of resources KSP has no definition for.
+            RealFuelsTransfer.ExtractCheckAndStripFromNode(innerNode, innerNode.GetValue("name"));
 
             // For any part carrying a GeneKermanScale snapshot, strip its TweakScale
             // module so the receiver's TweakScale (if any) stays at 1× and our applicator

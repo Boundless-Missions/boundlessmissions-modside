@@ -148,6 +148,14 @@ namespace GeneKerman.UI.Gui
         /// <summary>Take the leftover space along the parent's axis.</summary>
         public El Flex(float w = 0, float h = 0) { Le.flexibleWidth = w; Le.flexibleHeight = h; return this; }
 
+        /// <summary>
+        /// Hide this element from the parent's layout group, so it keeps whatever
+        /// anchors it was given instead of being placed in the flow. The overlay
+        /// case: an accent bar pinned to a row's edge, which must not become a
+        /// column of its own or shift the row's real children sideways.
+        /// </summary>
+        public El IgnoreLayout() { Le.ignoreLayout = true; return this; }
+
         // ── Paint ───────────────────────────────────────────────────────────
 
         /// <summary>Rounded background with an optional outline.</summary>
@@ -725,15 +733,57 @@ namespace GeneKerman.UI.Gui
             var btn = e.Go.AddComponent<Button>();
             btn.onClick.AddListener(new UnityAction(onClick ?? (() => { })));
 
-            Color rest = selected ? Theme.Alpha(Theme.Muted, 0.6f) : Theme.Alpha(Theme.Muted, 0f);
+            // Selected is --primary, not a darker grey.
+            //
+            // It used to be --muted at 0.6 with hover at 0.4 and 0.7, which put the
+            // chosen row a sixth of an alpha step away from the row the pointer
+            // happened to be over — on a list whose own ground is already --muted at
+            // 0.35. Three greys that close together is not a state anyone can read at
+            // a glance, and picking a player from a list you then scroll away from is
+            // exactly where it mattered. So the selected row changes hue rather than
+            // brightness, and gets the outline and the edge bar below on top of it.
+            Color rest = selected ? Theme.Alpha(Theme.Primary, 0.14f) : Theme.Alpha(Theme.Muted, 0f);
+            Color? edge = selected ? Theme.Alpha(Theme.Primary, 0.85f) : (Color?)null;
+
             Sprites.BindStates(
                 img, btn,
-                Sprites.Rounded(rest, radius, null, 0),
-                Sprites.Rounded(Theme.Alpha(Theme.Muted, selected ? 0.7f : 0.4f), radius, null, 0),
-                Sprites.Rounded(Theme.Alpha(Theme.Muted, 0.8f), radius, null, 0),
-                Sprites.Rounded(rest, radius, null, 0));
+                Sprites.Rounded(rest, radius, edge),
+                Sprites.Rounded(selected ? Theme.Alpha(Theme.Primary, 0.22f) : Theme.Alpha(Theme.Muted, 0.4f),
+                                radius, edge),
+                Sprites.Rounded(selected ? Theme.Alpha(Theme.Primary, 0.30f) : Theme.Alpha(Theme.Muted, 0.8f),
+                                radius, edge),
+                Sprites.Rounded(rest, radius, edge));
 
+            if (selected) SelectionBar(e);
             return e;
+        }
+
+        /// <summary>
+        /// The 3px --primary strip down a selected row's left edge.
+        ///
+        /// Carries the state in *position and shape* rather than in colour alone, so
+        /// it survives the two things a tint does not: the row scrolled half out of
+        /// its clip rect, and the row sitting inside a card whose fill is already
+        /// tinted. Flat-filled rather than Sprites.Rounded — a 9-slice sprite carries
+        /// slice margins of radius+1 per side, so a rounded 3px-wide rect asks uGUI
+        /// to fit 14px of non-stretchable corner into 3px and smears (the note on
+        /// Sprites.Circle is the same problem).
+        ///
+        /// IgnoreLayout, because the row's own layout group would otherwise treat it
+        /// as a first child and push everything else across by 3px plus a spacing —
+        /// selecting a row would visibly re-indent it.
+        /// </summary>
+        private static void SelectionBar(El row)
+        {
+            var bar = Root("SelBar", row.Rt);
+            bar.Rt.anchorMin = new Vector2(0f, 0f);
+            bar.Rt.anchorMax = new Vector2(0f, 1f);
+            bar.Rt.pivot = new Vector2(0f, 0.5f);
+            // x pair is left/right against the left edge (so: 3px wide); y pair insets
+            // it from the row's top and bottom so it reads as a marker, not a border.
+            bar.Rt.offsetMin = new Vector2(0f, 3f);
+            bar.Rt.offsetMax = new Vector2(3f, -3f);
+            bar.IgnoreLayout().Fill(Theme.Primary).Raycast(false);
         }
 
         /// <summary>
@@ -920,9 +970,14 @@ namespace GeneKerman.UI.Gui
         /// <summary>
         /// One of a small set of mutually exclusive cards — the site's `Choice`.
         ///
-        /// Selected is a --primary outline over --secondary rather than a filled
+        /// Selected is a --primary outline over --accent rather than a filled
         /// --primary button: two filled buttons side by side read as two things to
-        /// press, when only the unselected one is actually an action.
+        /// press, when only the unselected one is actually an action. --accent rather
+        /// than the neutral --secondary it started as, because a 12% grey behind a
+        /// green outline reads as "this card is slightly lighter" instead of as the
+        /// answer; the tinted ground, the accent title and the edge bar all say the
+        /// same thing, which is what it takes for a card in a stack of four to be
+        /// obviously the chosen one.
         /// </summary>
         public static El Choice(El parent, string title, string subtitle, bool selected, Action onClick)
         {
@@ -938,17 +993,20 @@ namespace GeneKerman.UI.Gui
             var btn = e.Go.AddComponent<Button>();
             btn.onClick.AddListener(new UnityAction(onClick ?? (() => { })));
 
-            Color fill = selected ? Theme.Secondary : Theme.Alpha(Theme.Card, 0f);
+            Color fill = selected ? Theme.Accent : Theme.Alpha(Theme.Card, 0f);
             Color stroke = selected ? Theme.Primary : Theme.Border;
             Sprites.BindStates(
                 img, btn,
                 Sprites.Rounded(fill, Theme.RadiusSm, stroke),
-                Sprites.Rounded(selected ? Theme.Lighten(Theme.Secondary, 0.12f) : Theme.Alpha(Theme.Muted, 0.5f),
+                Sprites.Rounded(selected ? Theme.Lighten(Theme.Accent, 0.10f) : Theme.Alpha(Theme.Muted, 0.5f),
                                 Theme.RadiusSm, stroke),
-                Sprites.Rounded(Theme.Alpha(Theme.Muted, 0.8f), Theme.RadiusSm, stroke),
+                Sprites.Rounded(selected ? Theme.Lighten(Theme.Accent, 0.18f) : Theme.Alpha(Theme.Muted, 0.8f),
+                                Theme.RadiusSm, stroke),
                 Sprites.Rounded(fill, Theme.RadiusSm, Theme.Alpha(stroke, 0.4f)));
 
-            Label(e, title, Theme.FontSm).Bold();
+            if (selected) SelectionBar(e);
+
+            Label(e, title, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null).Bold();
             // Ellipsis, not overflow: the subtitle is a host name in a ~170px card,
             // and nothing clips a layout child on its own.
             Muted(e, subtitle).Ellipsis();
@@ -967,6 +1025,42 @@ namespace GeneKerman.UI.Gui
             if (onRefresh != null)
                 Button(head, "Refresh", onRefresh, BtnStyle.Ghost, 24).E.PrefW(74);
             return head;
+        }
+
+        /// <summary>
+        /// What the list above this one is currently answering with, said in words.
+        ///
+        /// A highlighted row only reports a selection while that row is on screen,
+        /// and both pickers are short scrolling lists inside a much longer form —
+        /// choose someone, scroll on to the payment, and the only record of who the
+        /// contract is for is four sections back up. So the state is also stated
+        /// outside the list, where it stays put, and <paramref name="onClear"/> gives
+        /// it the way back to "nobody" that used to require finding the row again to
+        /// click it a second time.
+        /// </summary>
+        public static El Selection(El parent, string label, string value, Action onClear = null)
+        {
+            var row = Box(parent, "Selection").Row(Theme.Space2)
+                      .Pad(Theme.Space2, Theme.Space1, Theme.Space1, Theme.Space1)
+                      .ChildAlign(TextAnchor.MiddleLeft)
+                      .Bg(Theme.Accent, Theme.RadiusSm, Theme.Primary)
+                      // MinH, never H: a fixed height squeezes the labels, and a
+                      // squeezed Ellipsis label renders nothing (see Lbl.Ellipsis).
+                      .MinH(28);
+
+            Label(row, label, Theme.FontXs, Theme.MutedForeground);
+            // PrefW(0) with Flex(1): asks for nothing and takes the remainder, which
+            // is what keeps a long name from pushing Clear off the right edge.
+            Label(row, value, Theme.FontSm, Theme.AccentForeground).Bold().Ellipsis()
+                .E.PrefW(0).Flex(1f);
+
+            // W, not PrefW: a Row hands out minimum widths before preferred ones, and
+            // a button with no minimum is the first thing squeezed to nothing when a
+            // long name is beside it.
+            if (onClear != null)
+                Button(row, "Clear", onClear, BtnStyle.Ghost, 22, Theme.Space1).E.W(54);
+
+            return row;
         }
 
         /// <summary>
@@ -1059,7 +1153,14 @@ namespace GeneKerman.UI.Gui
         /// because Mask needs a stencil-capable material and RectMask2D is both
         /// cheaper and immune to whatever material state KSP leaves around.
         /// </summary>
-        public static El ScrollView(El parent, out El content)
+        /// <param name="key">
+        /// Names this list so its scroll offset survives the panel rebuild that
+        /// destroys it — see ScrollMemory, and pass one for anything taller than the
+        /// panel. It identifies the list *logically*, so it must be the same string
+        /// on every rebuild of the same list and a different one for a list the
+        /// player would read as another (a different contract's detail view).
+        /// </param>
+        public static El ScrollView(El parent, out El content, string key = null)
         {
             var view = Node(parent, "Scroll");
             var sr = view.Go.AddComponent<ScrollRect>();
@@ -1094,6 +1195,11 @@ namespace GeneKerman.UI.Gui
 
             sr.viewport = viewport.Rt;
             sr.content = body.Rt;
+
+            // Last, so the component's Awake finds a ScrollRect that is already wired
+            // to its viewport and content.
+            if (!string.IsNullOrEmpty(key))
+                view.Go.AddComponent<ScrollMemory>().Bind(key);
 
             content = body;
             return view;

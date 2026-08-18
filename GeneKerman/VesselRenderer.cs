@@ -6,7 +6,9 @@
  *
  * Vessel isolation: temporarily moves all part renderers to layer 30,
  * renders with cullingMask = 1<<30, uses magenta chroma key for clean
- * background removal, then restores original layers.
+ * background removal, then restores original layers. Anything drawn without a
+ * Renderer can't be moved that way and needs redrawing on the isolation layer —
+ * see DecalCapture for ConformalDecals.
  *
  * Works in Editor (VAB/SPH) and Flight scenes.
  */
@@ -32,6 +34,45 @@ namespace GeneKerman
         const int THUMB_SIZE = 256 * SCALE;     // Craft-thumbnail render resolution (KSP browser tile)
         const int ISOLATION_LAYER = 30;
         const float PADDING = 1.35f;
+
+        // ── Deferred (blackrack) compatibility ──────────────────────────────
+        // Deferred rewrites every stock part/suit shader for its own pipeline and
+        // prepares only the cameras it knows about (flight/near/scaled/editor/
+        // internal). A third-party camera rendering those shaders in *forward*
+        // draws nothing in the flight scene — clears run, zero fragments
+        // rasterize — which is exactly the blank-blueprint failure the screenshot
+        // fallback catches. The fix is to render the capture camera on the
+        // deferred path: Deferred installs its deferred shading shader
+        // project-wide, so any camera on that path shades the replaced shaders
+        // correctly. Two knock-on effects are handled where they occur: the
+        // deferred path ignores MSAA (render at SUPERSAMPLE× and box-filter down
+        // instead), and it silently reverts an orthographic camera to forward
+        // (the six ortho views become narrow-FOV perspective, FAKE_ORTHO_FOV).
+        // Without Deferred the capture keeps its stock forward + MSAA path,
+        // untouched.
+        const float FAKE_ORTHO_FOV = 2f;  // degrees; near-telecentric, so the
+                                          // foreshortening error hides in PADDING
+        const int SUPERSAMPLE = 2;        // resolution multiplier standing in for MSAA
+
+        static bool? _deferredPresent;
+        static bool DeferredPresent
+        {
+            get
+            {
+                if (_deferredPresent == null)
+                {
+                    try
+                    {
+                        _deferredPresent = AssemblyLoader.loadedAssemblies
+                            .Any(a => a.assembly != null && a.assembly.GetName().Name == "Deferred");
+                    }
+                    catch { _deferredPresent = false; }
+                    if (_deferredPresent == true)
+                        Debug.Log("[GeneKerman] Deferred detected — capture cameras will use the deferred rendering path.");
+                }
+                return _deferredPresent.Value;
+            }
+        }
 
         // Monotonic counter to keep render filenames unique within a process.
         static int _renderSeq;
@@ -185,10 +226,16 @@ namespace GeneKerman
             RenderSettings.ambientLight = new Color(0.35f, 0.35f, 0.35f);
             var fillLightObjects = CreateBlueprintLights(layerMask);
 
-            var rt = new RenderTexture(THUMB_SIZE, THUMB_SIZE, 24, RenderTextureFormat.ARGB32);
-            rt.antiAliasing = 4;
+            // Same Deferred handling as RenderBlueprint: deferred path instead of
+            // forward (which draws nothing under Deferred's replaced shaders), and
+            // supersampling standing in for the MSAA the deferred path ignores.
+            int ss = DeferredPresent ? SUPERSAMPLE : 1;
+            int renderSize = THUMB_SIZE * ss;
+            var rt = new RenderTexture(renderSize, renderSize, 24,
+                DeferredPresent ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32);
+            rt.antiAliasing = DeferredPresent ? 1 : 4;
             rt.Create();
-            var resolveRt = new RenderTexture(THUMB_SIZE, THUMB_SIZE, 0, RenderTextureFormat.ARGB32);
+            var resolveRt = new RenderTexture(renderSize, renderSize, 0, RenderTextureFormat.ARGB32);
             resolveRt.antiAliasing = 1;
             resolveRt.Create();
 
@@ -198,10 +245,17 @@ namespace GeneKerman
             cam.cullingMask = layerMask;
             cam.nearClipPlane = 0.01f;
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.allowHDR = false;
-            cam.allowMSAA = true;
+            cam.allowHDR = DeferredPresent;
+            cam.allowMSAA = !DeferredPresent;
+            if (DeferredPresent)
+                cam.renderingPath = RenderingPath.DeferredShading;
 
-            var readTex = new Texture2D(THUMB_SIZE, THUMB_SIZE, TextureFormat.ARGB32, false);
+            // ConformalDecals decals have no Renderer to isolate — the module draws
+            // them per-camera on layer 0, which this camera doesn't see. Redraw them
+            // on the isolation layer for as long as the capture runs.
+            DecalCapture.BeginCapture(cam, ISOLATION_LAYER, isolationParts);
+
+            var readTex = new Texture2D(renderSize, renderSize, TextureFormat.ARGB32, false);
 
             // NW view (index 3), rotated into the craft's own frame.
             ViewDef v = VIEWS[3];
@@ -213,19 +267,20 @@ namespace GeneKerman
             cam.Render();
             Graphics.Blit(rt, resolveRt);
             RenderTexture.active = resolveRt;
-            readTex.ReadPixels(new Rect(0, 0, THUMB_SIZE, THUMB_SIZE), 0, 0);
+            readTex.ReadPixels(new Rect(0, 0, renderSize, renderSize), 0, 0);
             readTex.Apply();
-            Color32[] black = readTex.GetPixels32();
+            Color32[] black = Downsample(readTex.GetPixels32(), renderSize, ss);
 
             cam.backgroundColor = Color.white;
             cam.Render();
             Graphics.Blit(rt, resolveRt);
             RenderTexture.active = resolveRt;
-            readTex.ReadPixels(new Rect(0, 0, THUMB_SIZE, THUMB_SIZE), 0, 0);
+            readTex.ReadPixels(new Rect(0, 0, renderSize, renderSize), 0, 0);
             readTex.Apply();
-            Color32[] white = readTex.GetPixels32();
+            Color32[] white = Downsample(readTex.GetPixels32(), renderSize, ss);
             RenderTexture.active = null;
 
+            DecalCapture.EndCapture();  // unhook before the camera it draws for goes away
             UnityEngine.Object.DestroyImmediate(readTex);
             UnityEngine.Object.DestroyImmediate(camObj);
             rt.Release();
@@ -397,15 +452,30 @@ namespace GeneKerman
             var fillLightObjects = CreateBlueprintLights(layerMask);
 
             // ── Set up shared render resources ──
-            var rt = new RenderTexture(RENDER_SIZE, RENDER_SIZE, 24, RenderTextureFormat.ARGB32);
-            rt.antiAliasing = 4;
+            // Under Deferred the deferred path ignores MSAA, so render at
+            // SUPERSAMPLE× and box-filter down after readback — that restores the
+            // fractional edge coverage the dual-pass alpha math turns into soft
+            // edges, same as the MSAA resolve does on the forward path.
+            int ss = DeferredPresent ? SUPERSAMPLE : 1;
+            int renderSize = RENDER_SIZE * ss;
+            // The deferred path must run HDR: Deferred forces HDR on the cameras it
+            // manages and its replacement lighting shaders assume it, so an LDR
+            // camera takes the logLuv-encoded lighting branch and resolves every
+            // lit fragment to black (geometry and alpha survive — the blueprint
+            // comes out as unlit silhouettes). Render to an HDR target and let the
+            // resolve blit below clamp back down to ARGB32 for readback.
+            var rt = new RenderTexture(renderSize, renderSize, 24,
+                DeferredPresent ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32);
+            rt.antiAliasing = DeferredPresent ? 1 : 4;
             rt.Create();
 
             // ReadPixels cannot read directly from an MSAA RenderTexture on many
             // GPUs/drivers — it returns only the clear color, so every view comes
             // back blank while the CPU-drawn grid/labels still appear. Resolve the
             // MSAA target into this plain (non-MSAA) texture before reading back.
-            var resolveRt = new RenderTexture(RENDER_SIZE, RENDER_SIZE, 0, RenderTextureFormat.ARGB32);
+            // (For the non-MSAA deferred path the blit is a plain copy — harmless,
+            // and it keeps the two paths' readback chains identical.)
+            var resolveRt = new RenderTexture(renderSize, renderSize, 0, RenderTextureFormat.ARGB32);
             resolveRt.antiAliasing = 1;
             resolveRt.Create();
 
@@ -415,10 +485,17 @@ namespace GeneKerman
             cam.cullingMask = layerMask;
             cam.nearClipPlane = 0.01f;
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.allowHDR = false;
-            cam.allowMSAA = true;
+            cam.allowHDR = DeferredPresent;
+            cam.allowMSAA = !DeferredPresent;
+            if (DeferredPresent)
+                cam.renderingPath = RenderingPath.DeferredShading;
 
-            var readTex = new Texture2D(RENDER_SIZE, RENDER_SIZE, TextureFormat.ARGB32, false);
+            // ConformalDecals decals have no Renderer to isolate — the module draws
+            // them per-camera on layer 0, which this camera doesn't see. Redraw them
+            // on the isolation layer for as long as the capture runs.
+            DecalCapture.BeginCapture(cam, ISOLATION_LAYER, parts);
+
+            var readTex = new Texture2D(renderSize, renderSize, TextureFormat.ARGB32, false);
 
             // ── Capture all 8 views (dual-pass: black + white background) ──
             // Rendering against two known backgrounds lets us recover exact alpha:
@@ -443,18 +520,18 @@ namespace GeneKerman
                 cam.Render();
                 Graphics.Blit(rt, resolveRt);  // resolve MSAA → plain so ReadPixels works
                 RenderTexture.active = resolveRt;
-                readTex.ReadPixels(new Rect(0, 0, RENDER_SIZE, RENDER_SIZE), 0, 0);
+                readTex.ReadPixels(new Rect(0, 0, renderSize, renderSize), 0, 0);
                 readTex.Apply();
-                blackPass[i] = readTex.GetPixels32();
+                blackPass[i] = Downsample(readTex.GetPixels32(), renderSize, ss);
 
                 // White pass
                 cam.backgroundColor = Color.white;
                 cam.Render();
                 Graphics.Blit(rt, resolveRt);
                 RenderTexture.active = resolveRt;
-                readTex.ReadPixels(new Rect(0, 0, RENDER_SIZE, RENDER_SIZE), 0, 0);
+                readTex.ReadPixels(new Rect(0, 0, renderSize, renderSize), 0, 0);
                 readTex.Apply();
-                whitePass[i] = readTex.GetPixels32();
+                whitePass[i] = Downsample(readTex.GetPixels32(), renderSize, ss);
 
                 RenderTexture.active = null;
 
@@ -467,6 +544,7 @@ namespace GeneKerman
             }
 
             // ── Cleanup render resources ──
+            DecalCapture.EndCapture();  // unhook before the camera it draws for goes away
             UnityEngine.Object.DestroyImmediate(readTex);
             UnityEngine.Object.DestroyImmediate(camObj);
             rt.Release();
@@ -487,7 +565,8 @@ namespace GeneKerman
             // normal in-game screenshot so a submission is never empty.
             if (!HasVesselContent(blackPass, whitePass))
             {
-                Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot.");
+                Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot."
+                    + (DeferredPresent ? " Deferred is installed and its compatibility path still drew nothing." : ""));
                 return VesselDataCollector.CaptureScreenshot();
             }
 
@@ -561,8 +640,33 @@ namespace GeneKerman
             float depth = Mathf.Abs(ext.x * forward.x) + Mathf.Abs(ext.y * forward.y) + Mathf.Abs(ext.z * forward.z);
             float dist = Mathf.Max(viewSize, depth) * 4f;
 
+            // The fake-ortho branch below sets a per-view near plane on the shared
+            // camera; reset it here so the views configured after it don't inherit
+            // one large enough to clip them out entirely.
+            cam.nearClipPlane = 0.01f;
+
             if (!view.perspective)
             {
+                if (DeferredPresent)
+                {
+                    // Unity's deferred path silently reverts an orthographic camera
+                    // to forward — under Deferred's replaced shaders, exactly the
+                    // path that draws nothing. Stand a narrow-FOV perspective camera
+                    // far back instead: at FAKE_ORTHO_FOV the foreshortening across
+                    // the craft's depth stays inside the PADDING margin, so the
+                    // framing matches the true ortho cell it replaces. The tight
+                    // near/far pair keeps depth precision despite the distance.
+                    cam.orthographic = false;
+                    cam.fieldOfView = FAKE_ORTHO_FOV;
+                    float fakeDist = viewSize * PADDING
+                                     / Mathf.Tan(FAKE_ORTHO_FOV * 0.5f * Mathf.Deg2Rad);
+                    cam.transform.position = center + view.direction * fakeDist;
+                    cam.transform.LookAt(center, view.up);
+                    cam.nearClipPlane = Mathf.Max(0.05f, fakeDist - depth * 2f);
+                    cam.farClipPlane = fakeDist + depth * 2f + 1f;
+                    return;
+                }
+
                 // Orthographic: the AABB centre projects exactly to the image centre
                 // and viewSize is the exact projected half-extent, so a single LookAt
                 // + orthographicSize frames it tight and centred.
@@ -890,6 +994,37 @@ namespace GeneKerman
                     }
                 }
             }
+        }
+
+        /// <summary>Box-filter a square Color32 buffer down by an integer factor —
+        /// the CPU stand-in for the MSAA resolve the deferred path can't provide.
+        /// A factor of 1 returns the buffer unchanged (the forward/MSAA path).</summary>
+        private static Color32[] Downsample(Color32[] src, int srcSize, int factor)
+        {
+            if (factor <= 1) return src;
+            int dstSize = srcSize / factor;
+            var dst = new Color32[dstSize * dstSize];
+            int samples = factor * factor;
+            for (int y = 0; y < dstSize; y++)
+            {
+                for (int x = 0; x < dstSize; x++)
+                {
+                    int r = 0, g = 0, b = 0, a = 0;
+                    for (int sy = 0; sy < factor; sy++)
+                    {
+                        int srcRow = (y * factor + sy) * srcSize + x * factor;
+                        for (int sx = 0; sx < factor; sx++)
+                        {
+                            Color32 c = src[srcRow + sx];
+                            r += c.r; g += c.g; b += c.b; a += c.a;
+                        }
+                    }
+                    dst[y * dstSize + x] = new Color32(
+                        (byte)(r / samples), (byte)(g / samples),
+                        (byte)(b / samples), (byte)(a / samples));
+                }
+            }
+            return dst;
         }
 
         /// <summary>

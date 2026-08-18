@@ -30,6 +30,7 @@ namespace GeneKerman.UI.Gui
         private readonly List<ContractCreation.BodyInfo> bodies = new List<ContractCreation.BodyInfo>();
         private string query = "";
         private El listHost;
+        private El chosenHost;
         private Action markDirty;
 
         public string Selected { get; private set; }
@@ -68,6 +69,7 @@ namespace GeneKerman.UI.Gui
                 if (Selected == null && bodies.Count > 0) Selected = bodies[0].Name;
             }
             RefreshList();
+            RefreshChosen();
         }
 
         public void Reset()
@@ -76,11 +78,19 @@ namespace GeneKerman.UI.Gui
             query = "";
             Selected = null;
             listHost = null;
+            chosenHost = null;
         }
 
         public void Build(El parent)
         {
             var box = UIF.Box(parent, "BodyPicker").Column(Theme.Space2);
+
+            // Stated outside the list, because the list is the one place it can go
+            // missing: the search filters it, and MaxRows truncates it, so the chosen
+            // body is routinely not among the rows on screen. No Clear — a rescue is
+            // always somewhere, and "no body" is not an answer this form accepts.
+            chosenHost = UIF.Box(box, "Chosen").Column(0);
+            RefreshChosen();
 
             var field = UIF.TextField(box, query, "Search bodies…", 28);
             field.E.PrefW(0).Flex(1f);
@@ -89,6 +99,22 @@ namespace GeneKerman.UI.Gui
             listHost = UIF.Box(box, "List").Column(1).Pad(Theme.Space1).H(ListHeight)
                           .Bg(Theme.Alpha(Theme.Muted, 0.35f), Theme.RadiusSm, Theme.Border);
             RefreshList();
+        }
+
+        /// <summary>Refill the "which body" line in place. Same host-is-gone contract
+        /// as RefreshList.</summary>
+        private void RefreshChosen()
+        {
+            if (chosenHost == null || chosenHost.Go == null) return;
+
+            chosenHost.ClearChildren();
+            // Inactive rather than empty, so it costs the column no spacing while
+            // there is nothing to say — see PlayerPicker.RefreshChosen.
+            bool has = !string.IsNullOrEmpty(Selected);
+            chosenHost.Active(has);
+            if (!has) return;
+
+            UIF.Selection(chosenHost, "Target", Selected);
         }
 
         /// <summary>Refill in place. Safe when the host is gone — a rebuild or a scene
@@ -133,6 +159,7 @@ namespace GeneKerman.UI.Gui
                          {
                              Selected = info.Name;
                              RefreshList();
+                             RefreshChosen();
                              markDirty?.Invoke();
                          }, selected, Theme.RadiusSm)
                          .Row(Theme.Space2)
@@ -140,7 +167,8 @@ namespace GeneKerman.UI.Gui
                          .ChildAlign(TextAnchor.MiddleLeft)
                          .MinH(24);
 
-            UIF.Label(row, b.Name, Theme.FontSm).E.PrefW(0).Flex(1f);
+            UIF.Label(row, b.Name, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null)
+               .Bold(selected).E.PrefW(0).Flex(1f);
             if (b.Modded) UIF.Badge(row, "mod", Theme.Status("warning"));
         }
     }

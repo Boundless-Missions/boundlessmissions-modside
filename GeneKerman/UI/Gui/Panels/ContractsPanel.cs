@@ -253,7 +253,7 @@ namespace GeneKerman.UI.Gui
             EnsureAutoCollapse(shown);
 
             El list;
-            UIF.ScrollView(col, out list).Flex(1f, 1f);
+            UIF.ScrollView(col, out list, "contracts.inbox").Flex(1f, 1f);
 
             BuildWeeks(list, shown);
         }
@@ -786,7 +786,11 @@ namespace GeneKerman.UI.Gui
             UIF.Grow(head);
 
             El body;
-            UIF.ScrollView(col, out body).Flex(1f, 1f);
+            // Keyed by contract, not just "the detail view": every action on this
+            // screen rebuilds the panel, so the offset has to survive that — but
+            // opening a *different* contract is a different document and starts at
+            // the top, which a shared key would not do.
+            UIF.ScrollView(col, out body, "contracts.detail:" + openId).Flex(1f, 1f);
 
             var card = UIF.Card(body, "Detail").Column(Theme.Space3).Pad(Theme.Space4);
 

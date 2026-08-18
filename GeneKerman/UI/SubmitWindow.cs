@@ -1363,6 +1363,13 @@ namespace GeneKerman.UI
             if (craftData != null)
                 craftData = TextureTransfer.EmbedInCraft(craftData);
 
+            // Carry the RealFuels/RO fuel-and-engine configuration manifest: which tank
+            // packs the craft's config needs and whether it was built for RO physics —
+            // knowable only on this install, invisible to every part walk. After GKTU,
+            // before GKMODS.
+            if (craftData != null)
+                craftData = RealFuelsTransfer.EmbedInCraft(craftData);
+
             // Record the craft's mods so a recipient missing any gets a CKAN modpack.
             // Appended after flags/TweakScale so the GKMODS block stays a clean strip.
             if (craftData != null)

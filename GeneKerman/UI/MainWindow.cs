@@ -2195,6 +2195,7 @@ namespace GeneKerman.UI
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
                 craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes); // backstop warning
                 craftBytes = TextureTransfer.EmbedInCraft(craftBytes);   // carry paint job
+                craftBytes = RealFuelsTransfer.EmbedInCraft(craftBytes); // carry fuel config
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes); // carry mod list
                 craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
 
@@ -2228,59 +2229,16 @@ namespace GeneKerman.UI
 
         private System.Collections.IEnumerator DoQuicksend(string recipientId, string recipientName, string kind)
         {
-            byte[] payload;
-            string fileName;
-            string craftName;
-
-            if (kind == "vessel")
-            {
-                // Live, flyable vessel — flags + crew roster embedded so it arrives intact.
-                string node = VesselTransfer.ExportActiveVessel(embedRoster: true);
-                if (string.IsNullOrEmpty(node))
-                {
-                    SetStatus("(No) Could not read the active vessel.");
-                    yield break;
-                }
-                payload = System.Text.Encoding.UTF8.GetBytes(node);
-                fileName = "vessel.cfg";
-                craftName = FlightGlobals.ActiveVessel != null ? FlightGlobals.ActiveVessel.vesselName : "Vessel";
-            }
-            else // "craft"
-            {
-                if (string.IsNullOrEmpty(editorCraftPath) || !System.IO.File.Exists(editorCraftPath))
-                {
-                    SetStatus("(No) Save your craft first.");
-                    yield break;
-                }
-                byte[] craftBytes = System.IO.File.ReadAllBytes(editorCraftPath);
-                payload = ScaleBridge.BakeEditorCraft(craftBytes);   // bake scale (first)
-                payload = FlagTransfer.EmbedFlagsInCraft(payload);   // carry custom flags
-                payload = TweakScaleGuard.EmbedVersionInCraft(payload); // backstop warning
-                payload = TextureTransfer.EmbedInCraft(payload);     // carry paint job
-                payload = CkanGenerator.EmbedModsInCraft(payload);   // carry mod list
-                payload = CraftThumb.EmbedThumbForCurrentCraft(payload); // NW thumbnail (last)
-                fileName = editorCraftName + ".craft";
-                craftName = editorCraftName;
-            }
-
+            // The payload assembly (bake chain), blueprint render and upload all live
+            // in ToolActions.Quicksend — the same implementation the sidebar and web
+            // bridge run. This window only keeps its status line.
             sending = true;
             SetStatus($"📤 Sending to {recipientName}...");
-            yield return GeneKermanMod.Instance.Api.SendCraftToFriend(
-                recipientId, kind, craftName, payload, fileName, (ok, resp, status) =>
+            yield return ToolActions.Quicksend(recipientId, recipientName, kind,
+                editorCraftPath, editorCraftName, (ok, message) =>
             {
                 sending = false;
-                if (ok && !string.IsNullOrEmpty(resp))
-                {
-                    var d = MiniJSON.DeserializeDict(resp);
-                    if (MiniJSON.GetBool(d, "success", false))
-                        SetStatus($"(Ok) Sent to {recipientName}! They'll get it at the Space Center.");
-                    else
-                        SetStatus("(No) " + MiniJSON.GetString(d, "message", "Failed to send."));
-                }
-                else
-                {
-                    SetStatus("(No) Failed to send.");
-                }
+                SetStatus((ok ? "(Ok) " : "(No) ") + message);
             });
         }
 
@@ -2886,8 +2844,10 @@ namespace GeneKerman.UI
         // purchase DM). That queues an entry on the player's account; here we poll
         // the queue and import each craft into the active save automatically.
         //
-        // Called from GeneKermanMod.Update on a timer while at the Space Center —
-        // a safe scene for both live-vessel imports and blueprint installs.
+        // Called from GeneKermanMod.Update on a timer at the Space Center and in the
+        // editor (where only the file-write imports run — live vessels wait for a
+        // scene they can spawn in), and once from GiftInbox.Accept to deliver an
+        // accepted gift on the spot.
 
         public void PollCraftImports()
         {
@@ -2957,6 +2917,14 @@ namespace GeneKerman.UI
             // original names; anyone else's keep their owner tag.
             if ((source == "rescue_delivery" || source == "gift_vessel") && !string.IsNullOrEmpty(vesselNodeUrl))
             {
+                // The poll also runs in the editor now (for blueprint installs), but a
+                // live vessel cannot spawn there — leave the entry queued for a scene
+                // that can, and skip the download it would waste.
+                if (!GiftInbox.CanDeliverHere(source))
+                {
+                    processingImports.Remove(importId);
+                    yield break;
+                }
                 string myName = GeneKermanMod.Instance.LinkedUsername;
                 bool spawned = false;
                 yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>

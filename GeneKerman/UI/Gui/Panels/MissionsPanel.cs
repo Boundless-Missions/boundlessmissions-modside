@@ -75,7 +75,7 @@ namespace GeneKerman.UI.Gui
             DrawStatus(col);
 
             El list;
-            UIF.ScrollView(col, out list).Flex(1f, 1f);
+            UIF.ScrollView(col, out list, "missions").Flex(1f, 1f);
 
             foreach (var obj in missions)
             {

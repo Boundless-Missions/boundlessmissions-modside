@@ -88,7 +88,7 @@ namespace GeneKerman.UI.Gui
             }
 
             El body;
-            UIF.ScrollView(col, out body).Flex(1f, 1f);
+            UIF.ScrollView(col, out body, "tools").Flex(1f, 1f);
 
             BuildQuicksend(body, mod);
             BuildExport(body);

@@ -386,15 +386,22 @@ namespace GeneKerman
             if (Api.CheckpointPhotosEnabled)
                 checkpointDetector.Tick();
 
-            // Auto-import crafts the player queued from Discord. Only at the Space
-            // Center — a scene where both live-vessel imports and blueprint installs
-            // are safe. Independent of the notifications toggle.
-            if (HighLogic.LoadedScene == GameScenes.SPACECENTER &&
+            // Auto-import crafts the player queued from Discord. Space Center is safe
+            // for everything; the editor is safe for the file-write imports (blueprint
+            // installs, flags) — DoProcessImport leaves live-vessel entries queued
+            // there, so an accepted .craft lands in the Ships folder without a trip
+            // out of the VAB. Independent of the notifications toggle.
+            if ((HighLogic.LoadedScene == GameScenes.SPACECENTER ||
+                 HighLogic.LoadedScene == GameScenes.EDITOR) &&
                 Time.realtimeSinceStartup - lastImportCheck > ImportInterval)
             {
                 lastImportCheck = Time.realtimeSinceStartup;
                 mainWindow.PollCraftImports();
             }
+
+            // Friend-quicksend offers awaiting an accept/decline. Separate from the
+            // import queue on purpose: an offer is shown, never auto-installed.
+            GiftInbox.Tick();
 
             // Reconcile rescue craft against what the server says actually happened.
             // The removal notification is only the fast path; this is the one that has
@@ -1415,6 +1422,24 @@ namespace GeneKerman
             ShowLinkWindow = false;
             updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
             Debug.Log($"[GeneKerman] Update required (server-enforced): {ModVersion.Current} → {LatestVersion}");
+        }
+
+        /// Called by ApiClient when a request comes back 401 — this PC's session is
+        /// no longer accepted (expired, or revoked by "log out of all devices", which
+        /// invalidates every token minted before it). Nothing here can retry its way
+        /// out, so unlink and put the link screen up, the same terminal handling the
+        /// device-denied path below does.
+        public void OnSessionRevoked()
+        {
+            if (!Api.IsLinked) return;   // already dropped
+            Api.ClearToken();
+            ShowMainWindow = false;
+            ShowLinkWindow = true;   // drop the user straight onto the link screen
+            // Transient toast, not a stored notification: like the device-denied
+            // unlink, persisting it would resurface it after the user re-links.
+            notificationPopup.Show("🔑 Session expired",
+                "This PC was unlinked. Run /g linkcode in Discord to link again.");
+            Debug.Log("[GeneKerman] Session revoked — returned to the link screen.");
         }
 
         /// Called by ApiClient when the server blocks this device (device binding).

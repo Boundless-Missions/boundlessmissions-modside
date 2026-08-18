@@ -15,6 +15,12 @@
  * "Open" hands the contract to the inbox panel through the controller
  * (SidebarPanel.OpenContract), which is the sidebar's equivalent of the classic
  * window switching to the Contracts tab.
+ *
+ * Friend-quicksend offers render above the feed: the server posts a "Craft
+ * Offered" notification into the same feed, so this is where the player comes
+ * looking. The offer state and both decisions live in GiftInbox — this panel
+ * only draws cards and downloads blueprint previews, which it owns (and must
+ * destroy) like ContractsPanel owns its submission preview.
  */
 
 using System.Collections.Generic;
@@ -33,6 +39,14 @@ namespace GeneKerman.UI.Gui
         private bool lastLoading;
         private bool lastLinked;
         private int lastUnread = -1;
+        private int lastGiftVersion = -1;
+
+        // Blueprint previews downloaded for gift offers, keyed by import_id. Owned
+        // here: destroyed on hide and on scene change, with the viewer closed first
+        // because it only borrows them.
+        private readonly Dictionary<string, Texture2D> giftBlueprints =
+            new Dictionary<string, Texture2D>();
+        private readonly HashSet<string> giftBlueprintLoading = new HashSet<string>();
 
         protected override void Rebuild()
         {
@@ -56,6 +70,12 @@ namespace GeneKerman.UI.Gui
                      "Open the classic window and link with a 6-digit code to see your feed here.");
                 return;
             }
+
+            // Offers sit above the feed and outside its scroll view, so a pending
+            // decision cannot be scrolled out of sight. Drawn before the loading /
+            // empty early-outs — an empty feed does not mean no offers.
+            BuildGiftOffers(col);
+            DrawStatus(col);
 
             if (main.NotificationsLoading)
             {
@@ -84,10 +104,8 @@ namespace GeneKerman.UI.Gui
                    .Interactable(!Busy).E.PrefW(112);
             }
 
-            DrawStatus(col);
-
             El list;
-            UIF.ScrollView(col, out list).Flex(1f, 1f);
+            UIF.ScrollView(col, out list, "feed").Flex(1f, 1f);
 
             foreach (var obj in feed)
             {
@@ -95,6 +113,118 @@ namespace GeneKerman.UI.Gui
                 if (n == null) continue;
                 BuildRow(list, n, main);
             }
+        }
+
+        // ── Gift offers ─────────────────────────────────────────────────────
+
+        private void BuildGiftOffers(El col)
+        {
+            var offers = GiftInbox.Offers;
+            if (GiftInbox.Loading && offers.Count == 0)
+            {
+                UIF.Muted(col, "Checking for craft offers…", Theme.FontXs);
+                return;
+            }
+            if (offers.Count == 0) return;
+
+            var box = UIF.Box(col, "Gifts").Column(Theme.Space2);
+            UIF.Label(box, "CRAFT OFFERS", Theme.FontXs, Theme.MutedForeground);
+            foreach (var offer in offers)
+                BuildGiftCard(box, offer);
+        }
+
+        private void BuildGiftCard(El parent, Dictionary<string, object> offer)
+        {
+            string id = MiniJSON.GetString(offer, "import_id");
+            string name = MiniJSON.GetString(offer, "craft_name", "Craft");
+            string from = MiniJSON.GetString(offer, "owner_name", "Someone");
+            string bpUrl = MiniJSON.GetString(offer, "blueprint_url", "");
+            bool vessel = MiniJSON.GetString(offer, "source", "") == "gift_vessel";
+
+            var card = UIF.Card(parent, "Gift").Column(Theme.Space1).Pad(Theme.Space3);
+
+            var titleRow = UIF.Box(card, "Title").Row(Theme.Space2).H(18);
+            UIF.Box(titleRow, "Dot").Dot(Theme.Primary, 8);
+            UIF.Label(titleRow, "🎁 " + name, Theme.FontSm).Bold();
+
+            UIF.Label(card, from + " sent you " + (vessel
+                          ? "a live vessel. Accepting spawns it into your save."
+                          : "a craft blueprint. Accepting saves it to your Ships folder."),
+                      Theme.FontSm, Theme.MutedForeground).Body();
+
+            if (vessel && HighLogic.LoadedScene == GameScenes.EDITOR)
+                UIF.Muted(card, "A live vessel can't spawn in the editor — accepting here " +
+                                "delivers it on your next Space Center visit.", Theme.FontXs);
+
+            if (string.IsNullOrEmpty(bpUrl))
+                UIF.Muted(card, "No blueprint preview came with this one.", Theme.FontXs);
+
+            var row = UIF.Box(card, "Actions").Row(Theme.Space2).H(24);
+
+            if (!string.IsNullOrEmpty(bpUrl))
+            {
+                string label = giftBlueprintLoading.Contains(id) ? "Loading…" : "Blueprint";
+                UIF.Button(row, label, () => ViewGiftBlueprint(id, bpUrl, name),
+                           BtnStyle.Secondary, 24, Theme.Space2)
+                   .Interactable(!Busy && !giftBlueprintLoading.Contains(id)).E.PrefW(88);
+            }
+
+            UIF.Button(row, "Accept", () =>
+                GeneKermanMod.Instance.RunCoroutine(GiftInbox.Accept(offer, BeginAction())),
+                BtnStyle.Primary, 24, Theme.Space2).Interactable(!Busy).E.PrefW(72);
+
+            UIF.Grow(row);
+
+            UIF.Button(row, "Decline", () =>
+                GeneKermanMod.Instance.RunCoroutine(GiftInbox.Reject(offer, BeginAction())),
+                BtnStyle.Ghost, 24, Theme.Space2).Interactable(!Busy).E.PrefW(76);
+        }
+
+        /// <summary>
+        /// Open the offer's blueprint full screen, downloading it first if this is
+        /// the first look. The texture is kept for the next click and destroyed with
+        /// the panel's other previews.
+        /// </summary>
+        private void ViewGiftBlueprint(string id, string url, string caption)
+        {
+            Texture2D have;
+            if (giftBlueprints.TryGetValue(id, out have) && have != null)
+            {
+                ShowImages(new List<Texture2D> { have }, new List<string> { caption }, 0, caption);
+                return;
+            }
+
+            if (giftBlueprintLoading.Contains(id)) return;
+            giftBlueprintLoading.Add(id);
+            MarkDirty();
+
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.DownloadFile(url,
+                (ok, bytes) =>
+                {
+                    giftBlueprintLoading.Remove(id);
+                    MarkDirty();
+
+                    Texture2D tex = null;
+                    if (ok && bytes != null)
+                    {
+                        tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
+                        if (!tex.LoadImage(bytes)) { Object.Destroy(tex); tex = null; }
+                    }
+                    if (tex == null) return;
+
+                    giftBlueprints[id] = tex;
+                    ShowImages(new List<Texture2D> { tex }, new List<string> { caption }, 0, caption);
+                }));
+        }
+
+        private void ClearGiftBlueprints()
+        {
+            // The viewer borrows these; close it before they go.
+            if (giftBlueprints.Count > 0) CloseImages();
+            foreach (var t in giftBlueprints.Values)
+                if (t != null) Object.Destroy(t);
+            giftBlueprints.Clear();
+            giftBlueprintLoading.Clear();
         }
 
         private void BuildRow(El parent, Dictionary<string, object> n, MainWindow main)
@@ -204,6 +334,7 @@ namespace GeneKerman.UI.Gui
             lastLoading = main.NotificationsLoading;
             lastLinked = linked;
             lastUnread = Unread(feed);
+            lastGiftVersion = GiftInbox.Version;
         }
 
         /// <summary>
@@ -226,7 +357,8 @@ namespace GeneKerman.UI.Gui
                 TopId(feed) != lastTopId ||
                 main.NotificationsLoading != lastLoading ||
                 linked != lastLinked ||
-                Unread(feed) != lastUnread)
+                Unread(feed) != lastUnread ||
+                GiftInbox.Version != lastGiftVersion)
             {
                 MarkDirty();
             }
@@ -239,6 +371,16 @@ namespace GeneKerman.UI.Gui
             return first == null ? "" : MiniJSON.GetString(first, "id");
         }
 
-        internal override void OnShown() => ClearStatus();
+        internal override void OnShown()
+        {
+            ClearStatus();
+            // Opening the feed is the natural "anything for me?" moment — don't make
+            // an offer wait for the next timer tick to appear.
+            GiftInbox.Refresh();
+        }
+
+        internal override void OnHidden() => ClearGiftBlueprints();
+
+        internal override void OnSceneChanged() => ClearGiftBlueprints();
     }
 }

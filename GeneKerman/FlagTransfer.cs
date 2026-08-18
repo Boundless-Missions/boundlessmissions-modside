@@ -45,6 +45,10 @@ namespace GeneKerman
         private static readonly string[] FLAG_EXTS =
             { "png", "dds", "jpg", "jpeg", "truecolor", "mbm", "tga" };
 
+        // Where a flag reference lands when its image can't be resolved. Stock, so it
+        // exists for everyone — the one URL that is always safe to point at.
+        private const string STOCK_FLAG = "Squad/Flags/default";
+
         private static string GameDataRoot =>
             Path.Combine(KSPUtil.ApplicationRootPath, "GameData");
 
@@ -63,12 +67,15 @@ namespace GeneKerman
                 if (urls.Count == 0) return;
 
                 var manifest = BuildFlagManifest(urls);
-                if (manifest.Count == 0) return;
 
-                // Repoint the node's flag references to the content-addressed paths …
+                // Repoint the node's flag references to the content-addressed paths, and
+                // reset the ones we can't ship (see Unresolvable) to the stock flag.
                 var remap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in manifest) remap[kv.Key] = kv.Value.NewUrl;
+                foreach (string dead in Unresolvable(urls, manifest)) remap[dead] = STOCK_FLAG;
                 RewriteFlagValuesInNode(node, remap);
+
+                if (manifest.Count == 0) return;
 
                 // … then attach the images so the recipient can resolve them.
                 foreach (var kv in manifest)
@@ -107,13 +114,23 @@ namespace GeneKerman
                 if (urls.Count == 0) return craftBytes;
 
                 var manifest = BuildFlagManifest(urls);
-                if (manifest.Count == 0) return craftBytes;
+                var dead = Unresolvable(urls, manifest);
+                if (manifest.Count == 0 && dead.Count == 0) return craftBytes;
 
                 // Repoint each flag reference in the craft body to its content-addressed
-                // path (plain text edit — never reparse the craft), then append the images.
+                // path (plain text edit — never reparse the craft), reset the ones we
+                // can't ship (see Unresolvable), then append the images.
                 string text = Encoding.UTF8.GetString(craftBytes);
                 foreach (var kv in manifest)
                     text = RewriteFlagUrlInText(text, kv.Key, kv.Value.NewUrl);
+                foreach (string url in dead)
+                    text = RewriteFlagUrlInText(text, url, STOCK_FLAG);
+
+                if (manifest.Count == 0)
+                {
+                    if (!text.EndsWith("\n")) text += "\n";
+                    return Encoding.UTF8.GetBytes(text);
+                }
 
                 var sb = new StringBuilder();
                 foreach (var kv in manifest)
@@ -156,6 +173,11 @@ namespace GeneKerman
                 if (flags.Count > 0) node.RemoveNodes(FLAG_NODE);
                 if (installed > 0)
                     Debug.Log($"[GeneKerman] FlagTransfer: installed {installed} flag(s).");
+
+                // Anything still unresolvable — lost in transit, or carried dangling
+                // since before EncodeFlagData was fixed — is reset now, after the
+                // install, so the vessel never loads pointing at a missing texture.
+                ResetDanglingFlagsInNode(node);
             }
             catch (Exception ex)
             {
@@ -202,14 +224,23 @@ namespace GeneKerman
                 if (idx < 0)
                 {
                     Debug.Log("[GeneKerman] FlagTransfer: downloaded craft carries no GKFLAG block (sender embedded none) — nothing to install.");
-                    return rawCraftBytes;
+                }
+                else
+                {
+                    InstallFlagsFromText(text.Substring(idx));
+
+                    string body = text.Substring(0, idx).TrimEnd('\r', '\n', ' ', '\t');
+                    if (body.Length > 0) body += "\n";
+                    text = body;
                 }
 
-                InstallFlagsFromText(text.Substring(idx));
-
-                string body = text.Substring(0, idx).TrimEnd('\r', '\n', ' ', '\t');
-                if (body.Length > 0) body += "\n";
-                return Encoding.UTF8.GetBytes(body);
+                // Anything still unresolvable — lost in transit, or carried dangling
+                // since before EncodeFlagData was fixed — is reset now, after the
+                // install, so the craft never lands on disk pointing at a missing
+                // texture. A craft with nothing to fix is returned byte-for-byte.
+                string cleaned = ResetDanglingFlagsInText(text);
+                if (idx < 0 && ReferenceEquals(cleaned, text)) return rawCraftBytes;
+                return Encoding.UTF8.GetBytes(cleaned);
             }
             catch (Exception ex)
             {
@@ -243,6 +274,57 @@ namespace GeneKerman
                 Debug.Log($"[GeneKerman] FlagTransfer: installed {installed} flag(s).");
         }
 
+        /// <summary>Point every flag reference in raw craft text that this install can't
+        /// resolve at the stock flag — see <see cref="Unresolvable"/> for why. Returns the
+        /// input string itself when there's nothing to fix, so an untouched craft can be
+        /// handed back byte-for-byte. Run AFTER the carried flags have been installed,
+        /// or a flag that arrived with the craft reads as missing.</summary>
+        private static string ResetDanglingFlagsInText(string craftText)
+        {
+            try
+            {
+                ConfigNode probe = LoadConfigFromBytes(Encoding.UTF8.GetBytes(craftText));
+                if (probe == null) return craftText;
+
+                string text = craftText;
+                foreach (string url in CollectFlagUrls(probe))
+                {
+                    if (FlagResolves(url)) continue;
+                    Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' isn't installed here and "
+                        + $"didn't arrive with the craft — resetting that reference to {STOCK_FLAG}.");
+                    text = RewriteFlagUrlInText(text, url, STOCK_FLAG);
+                }
+                return text;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] FlagTransfer.ResetDanglingFlagsInText failed: {ex.Message}");
+                return craftText;
+            }
+        }
+
+        /// <summary>Node-tree counterpart of <see cref="ResetDanglingFlagsInText"/>, for
+        /// the VESSEL import path. Same ordering rule: install first, reset after.</summary>
+        private static void ResetDanglingFlagsInNode(ConfigNode node)
+        {
+            try
+            {
+                var remap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string url in CollectFlagUrls(node))
+                {
+                    if (FlagResolves(url)) continue;
+                    Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' isn't installed here and "
+                        + $"didn't arrive with the vessel — resetting that reference to {STOCK_FLAG}.");
+                    remap[url] = STOCK_FLAG;
+                }
+                if (remap.Count > 0) RewriteFlagValuesInNode(node, remap);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] FlagTransfer.ResetDanglingFlagsInNode failed: {ex.Message}");
+            }
+        }
+
         /// <summary>Collect every GKFLAG node anywhere in the tree (handles a parsed
         /// fragment that ConfigNode may have nested under a wrapper node).</summary>
         private static void CollectFlagNodesRecursive(ConfigNode node, List<ConfigNode> outList)
@@ -259,19 +341,41 @@ namespace GeneKerman
         /// was written; false if skipped (already present, malformed, or failed).</summary>
         private static bool TryInstallFlagNode(ConfigNode fn)
         {
-            string url = fn.GetValue("url");
+            string declaredUrl = fn.GetValue("url");
             string ext = fn.GetValue("ext");
             string b64 = fn.GetValue("data");
-            if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(b64)) return false;
+            if (string.IsNullOrEmpty(declaredUrl) || string.IsNullOrEmpty(b64)) return false;
             try
             {
-                return InstallOneFlag(url, ext, DecodeFlagData(b64));
+                byte[] data = DecodeFlagData(b64);
+                if (data == null || data.Length == 0) return false;
+                // SECURITY: never trust the sender-declared url/ext for the on-disk
+                // write path. Both are concatenated into the write path, so a crafted
+                // GKFLAG node could otherwise drop an arbitrary file (e.g. a .dll into
+                // GameData, or via "../" outside it). Recompute the url by content hash
+                // (all-hex under TRANSFER_DIR — no traversal, and identical to what an
+                // honest sender's craft body already references), and clamp the
+                // extension to the known-texture allowlist.
+                string url = ComputeContentUrl(data);
+                ext = SafeFlagExt(ext);
+                return InstallOneFlag(url, ext, data);
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[GeneKerman] FlagTransfer: install of '{url}' failed: {ex.Message}");
+                Debug.LogWarning($"[GeneKerman] FlagTransfer: install of '{declaredUrl}' failed: {ex.Message}");
                 return false;
             }
+        }
+
+        /// <summary>Clamp a sender-declared flag extension to the known-texture
+        /// allowlist. The extension is concatenated into the on-disk write path, so
+        /// anything outside this set (e.g. "dll", "cfg") is refused and becomes "png".</summary>
+        private static string SafeFlagExt(string ext)
+        {
+            ext = (ext ?? "").Trim().TrimStart('.').ToLowerInvariant();
+            foreach (string e in FLAG_EXTS)
+                if (e == ext) return ext;
+            return "png";
         }
 
         // ── Helpers ──────────────────────────────────────────────────────────
@@ -303,6 +407,58 @@ namespace GeneKerman
             }
             for (int i = 0; i < node.nodes.Count; i++)
                 CollectFlagUrlsRecursive(node.nodes[i], urls);
+        }
+
+        /// <summary>The referenced URLs whose image couldn't be read — everything
+        /// <see cref="BuildFlagManifest"/> dropped. Callers reset these to
+        /// <see cref="STOCK_FLAG"/> rather than shipping them as they are, because a flag
+        /// reference nothing can resolve is not merely cosmetic; it is self-perpetuating.
+        ///
+        /// A flag URL is content-addressed at export ("GeneKerman/Flags/&lt;sha256&gt;")
+        /// and the hash can only be computed from the image bytes, so such a URL in a
+        /// craft is proof some sender held the file. If it doesn't resolve here the image
+        /// was lost in transit — historically to the base64 "//" truncation that
+        /// EncodeFlagData now avoids, which made TryInstallFlagNode throw and install
+        /// nothing while the craft body had already been repointed. Left alone:
+        ///
+        ///   • every module that resolves it errors, and not always in its own name —
+        ///     ModuleConformalFlag with useCustomFlag = false renders the *mission* flag,
+        ///     so a broken mission flag throws mid-OnLoad as a ConformalDecals failure,
+        ///     while the stock flag decals only warn;
+        ///   • re-exporting can't heal it — BuildFlagManifest finds no file, embeds
+        ///     nothing, and ships the same dangling URL on to the next player.
+        ///
+        /// Resetting costs the craft a custom flag it had already lost, and stops the
+        /// reference spreading. Both directions are covered: export never ships one
+        /// (EmbedFlagsIn*), import never lands one on disk (StripAndInstall* /
+        /// ExtractAndInstallFlags).</summary>
+        private static List<string> Unresolvable(
+            ICollection<string> urls, Dictionary<string, FlagAsset> manifest)
+        {
+            var dead = new List<string>();
+            foreach (string url in urls)
+                if (!manifest.ContainsKey(url)) dead.Add(url);
+            return dead;
+        }
+
+        /// <summary>True if this install can actually show the flag at
+        /// <paramref name="url"/>: known to GameDatabase, or present on disk (a flag we
+        /// just wrote in a format GameDatabase can't take at runtime — .dds and friends —
+        /// resolves on the next launch, so the file is the authority, not the database).</summary>
+        private static bool FlagResolves(string url)
+        {
+            if (string.IsNullOrEmpty(url)) return false;
+            try
+            {
+                if (GameDatabase.Instance != null &&
+                    GameDatabase.Instance.GetTexture(url, false) != null) return true;
+            }
+            catch { /* ignore — fall through to the disk probe */ }
+
+            string rel = url.Replace('/', Path.DirectorySeparatorChar);
+            foreach (string e in FLAG_EXTS)
+                if (File.Exists(Path.Combine(GameDataRoot, rel + "." + e))) return true;
+            return false;
         }
 
         /// <summary>Stock flags ship with the game and exist for everyone. KSP's in-game
@@ -448,6 +604,18 @@ namespace GeneKerman
             if (string.IsNullOrEmpty(ext)) ext = "png";
             string rel = url.Replace('/', Path.DirectorySeparatorChar);
             string path = Path.Combine(GameDataRoot, rel + "." + ext);
+
+            // Defense-in-depth: the callers already content-address the url and clamp
+            // the extension, but the write path must never escape GameData regardless of
+            // how this is reached. Refuse anything that resolves outside the root.
+            string rootFull = Path.GetFullPath(GameDataRoot);
+            string pathFull = Path.GetFullPath(path);
+            if (!pathFull.StartsWith(rootFull.TrimEnd(Path.DirectorySeparatorChar)
+                                     + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                Debug.LogWarning($"[GeneKerman] FlagTransfer: refusing flag write outside GameData: {pathFull}");
+                return false;
+            }
 
             // Persist to disk so the flag survives future sessions. Rewrite when the
             // on-disk size differs from the payload — this heals files left truncated by

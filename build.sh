@@ -11,11 +11,14 @@ PROJECT_DIR="$SCRIPT_DIR/GeneKerman"
 RELEASE=0
 if [ "${1:-}" = "--release" ]; then RELEASE=1; fi
 # Deploy to every KSP install here. FK-KSP is the heavily-modded dev instance (TweakScale /
-# mod-compatibility testing — its KSP.log is the "heavymod log"); KR-KSP is the near-stock
-# instance used to verify the mod works without the mod pile.
+# mod-compatibility testing — its KSP.log is the "heavymod log"); KR-KSP carries its own
+# mod spread (SSPX, TAC-LS, Kerbalism, Deferred + TexturesUnlimited, …) and is the
+# rendering-stack compatibility testbed; RSS-RO runs the Realism Overhaul / Real Solar
+# System suite (RealFuels, FAR, Kopernicus+RSS…).
 KSP_PATHS=(
     "/home/ayd/Documents/KSP DEV Instances/FK-KSP"
     "/home/ayd/Documents/KSP DEV Instances/KR-KSP"
+    "/home/ayd/Documents/KSP DEV Instances/RSS-RO"
 )
 GAMEDATA_SRC="$SCRIPT_DIR/GameData/BoundlessMissions"
 

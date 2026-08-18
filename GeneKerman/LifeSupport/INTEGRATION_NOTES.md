@@ -149,9 +149,39 @@ the fields alone are discarded), or add `new ProtoPartResourceSnapshot(node)` bu
 
 **Thaw trigger:** the active vessel within `ReviveRadiusMeters` (10 km — well outside load
 range, so the wreck is still unloaded and KSP seats the crew on load), or the manual
-"Thaw the crew now" button. Crew go back — loaded → `Part.AddCrewmember` +
-`Vessel.SpawnCrew`; unloaded → the part's `protoModuleCrew`/`protoCrewNames` +
-`ProtoVessel.AddCrew` — at `RosterStatus.Assigned`.
+"Thaw the crew now" button. Crew go back — loaded → `Part.AddCrewmemberAt` (or
+`AddCrewmember` when their own seat is gone or taken); unloaded → the part's
+`protoModuleCrew`/`protoCrewNames` + `ProtoVessel.AddCrew` — at `RosterStatus.Assigned`.
+
+**Putting a kerbal back is three things**, and a thaw that does only the first leaves a
+wreck that looks crewed and behaves as if it weren't (some control, no SAS, no portraits —
+recovered only by EVA'ing and boarding again, which is KSP doing all three properly):
+
+  - **The right part.** `ModuleCommand` counts crew and pilots in *its own*
+    `part.protoModuleCrew`, so a pilot seated in a passenger cabin instead of the pod
+    leaves the pod crewed but pilotless — `ControlLevel.PARTIAL_MANNED`, which is exactly
+    "half control and SAS won't hold". The freeze record therefore carries the part's
+    `flightID`, and the fallback (part gone or full) prefers a part with a `ModuleCommand`
+    and says so in the log.
+  - **A seat of its own.** `InternalModel.AssignToSeat` writes `seats[pcm.seatIdx]`
+    *without* checking `taken`, so two kerbals carrying the same index share a chair and
+    only the last one gets a `Kerbal` — the object a portrait is drawn from. The record
+    carries `seatIdx`, and `pcm.seat`/`seatIdx`/`KerbalRef` are cleared on both freeze and
+    thaw, since those point at scene objects from a vessel state that no longer exists.
+  - **Telling KSP.** Seating by hand updates one list and notifies nothing:
+    `Vessel.CrewWasModified` rebuilds the vessel crew cache and fires
+    `onVesselCrewWasModified`, while `KerbalPortraitGallery` listens to
+    `onVesselWasModified` — both are fired after a thaw. `Part.AddCrewmember*` also does
+    not *spawn* the seated kerbal, so `InternalSeat.SpawnCrew()` is called for the seat we
+    filled, and `Part.SpawnIVA()` for a touched part on the active vessel that has no
+    interior yet.
+
+**Never `DespawnCrew(); SpawnCrew();` back to back.** `Part.DespawnIVA` destroys the
+interior with `Object.Destroy` (which completes at the *end* of the frame) and never nulls
+`part.internalModel`, so `SpawnIVA`'s null check still passes in the same frame: it
+re-seats the crew and spawns their `Kerbal`s into a model that dies moments later. The part
+is left with no interior, every portrait it just registered is unregistered as the objects
+die, and nothing rebuilds either until the player switches vessels.
 
 **Cross-mod visibility:** the wreck's own LS provisioning is scanned on the issuer's
 client at rescue creation and rides on the contract (`life_support`), so the rescuer's
@@ -159,9 +189,12 @@ window can say "built for TAC-LS, you run USI-LS" before they set off, and the f
 record persists it (`builtWithLs`).
 
 Confirmed KSP crew APIs used: `ProtoPartSnapshot.protoModuleCrew`/`protoCrewNames`/
-`flightID`/`RemoveCrew`; `ProtoVessel.AddCrew`/`RemoveCrew`; `Part.AddCrewmember`/
-`RemoveCrewmember`; `Vessel.SpawnCrew`/`DespawnCrew`/`RebuildCrewList`/
-`UpdateResourceSets`; `KerbalRoster.Kerbals(RosterStatus[])` (finds parked Dead crew).
+`flightID`/`RemoveCrew`/`FindModule`; `ProtoVessel.AddCrew`/`RemoveCrew`;
+`Part.AddCrewmember`/`AddCrewmemberAt`/`RemoveCrewmember`/`SpawnIVA`;
+`InternalModel.seats`/`InternalSeat.taken`/`InternalSeat.SpawnCrew`;
+`Vessel.CrewWasModified`/`RebuildCrewList`/`UpdateResourceSets`;
+`GameEvents.onVesselWasModified`; `KerbalRoster.Kerbals(RosterStatus[])` (finds parked
+Dead crew).
 
 **Player switches** (`PluginData/settings.cfg`, also in the sidebar's Settings panel):
 `enableEmergencyFreeze` (default true — off leaves the crew seated and starving normally)

@@ -97,6 +97,7 @@ namespace GeneKerman
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
                 craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes);
                 craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
+                craftBytes = RealFuelsTransfer.EmbedInCraft(craftBytes);
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
                 craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes);
 
@@ -159,15 +160,32 @@ namespace GeneKerman
                 payload = FlagTransfer.EmbedFlagsInCraft(payload);
                 payload = TweakScaleGuard.EmbedVersionInCraft(payload);
                 payload = TextureTransfer.EmbedInCraft(payload);
+                payload = RealFuelsTransfer.EmbedInCraft(payload);
                 payload = CkanGenerator.EmbedModsInCraft(payload);
                 payload = CraftThumb.EmbedThumbForCurrentCraft(payload);
                 fileName = SanitizeFileName(editorCraftName) + ".craft";
                 craftName = editorCraftName;
             }
 
+            // Rendered blueprint — what the recipient sees before deciding to accept.
+            // Same renderer as a marketplace listing; works on the editor ship and the
+            // active vessel alike. Optional: a failed render still sends, just blind.
+            byte[] blueprintBytes = null;
+            try
+            {
+                string bpPath = VesselRenderer.CaptureVessel();
+                if (!string.IsNullOrEmpty(bpPath) && File.Exists(bpPath))
+                    blueprintBytes = File.ReadAllBytes(bpPath);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Quicksend blueprint render failed: {ex.Message}");
+            }
+
             string message = null;
             bool ok = false;
             yield return mod.Api.SendCraftToFriend(recipientId, kind, craftName, payload, fileName,
+                blueprintBytes,
                 (success, resp, _) =>
                 {
                     if (success && !string.IsNullOrEmpty(resp))
@@ -175,7 +193,7 @@ namespace GeneKerman
                         var d = MiniJSON.DeserializeDict(resp);
                         ok = MiniJSON.GetBool(d, "success", false);
                         message = ok
-                            ? $"Sent to {recipientName}. They'll get it at the Space Center."
+                            ? $"Sent to {recipientName}. They'll be asked in-game to accept it."
                             : MiniJSON.GetString(d, "message", "Failed to send.");
                     }
                     else message = "Failed to send.";
@@ -465,6 +483,10 @@ namespace GeneKerman
                 var modFolders = CkanGenerator.ModFoldersForCraft(craftBytes);
                 foreach (var f in TextureTransfer.TexturePackFoldersForCraft(craftBytes))
                     if (!modFolders.Contains(f)) modFolders.Add(f);
+                // RealFuels/RO add no parts either: union the fuel-config folders in so
+                // an RO craft is tagged (and filterable) as one instead of as stock.
+                foreach (var f in RealFuelsTransfer.FuelConfigFoldersForCraft(craftBytes))
+                    if (!modFolders.Contains(f)) modFolders.Add(f);
                 craftMods = string.Join(",", modFolders.ToArray());
                 // And with its exact part names, so the server can tell a buyer which parts
                 // they're missing before they spend anything — a mod-folder tag can't, since
@@ -474,6 +496,7 @@ namespace GeneKerman
                 craftBytes = FlagTransfer.EmbedFlagsInCraft(craftBytes);
                 craftBytes = TweakScaleGuard.EmbedVersionInCraft(craftBytes);
                 craftBytes = TextureTransfer.EmbedInCraft(craftBytes);
+                craftBytes = RealFuelsTransfer.EmbedInCraft(craftBytes);
                 craftBytes = CkanGenerator.EmbedModsInCraft(craftBytes);
                 craftBytes = CraftThumb.EmbedThumbForCurrentCraft(craftBytes); // NW thumbnail (last)
             }
@@ -532,8 +555,14 @@ namespace GeneKerman
                     {
                         var data = MiniJSON.DeserializeDict(resp);
                         ok = MiniJSON.GetBool(data, "success", false);
+                        // The success line is built here, not taken from the server, so the
+                        // complexity bonus rides in its own field — "reward_note" says either
+                        // what was just paid or when the next payout opens. An older server
+                        // sends neither and the line reads exactly as it always did.
+                        string note = MiniJSON.GetString(data, "reward_note", "");
                         message = ok
                             ? $"{state.EditorCraft} is listed for {price:N0} KCoins."
+                              + (string.IsNullOrEmpty(note) ? "" : " " + note)
                             : MiniJSON.GetString(data, "message", "Failed to list.");
                     }
                     else message = "Failed to list craft.";

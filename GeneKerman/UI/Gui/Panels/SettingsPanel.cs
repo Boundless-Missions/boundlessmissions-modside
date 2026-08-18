@@ -68,7 +68,7 @@ namespace GeneKerman.UI.Gui
             UIF.PanelHeader(col, "Settings", null);
 
             El body;
-            UIF.ScrollView(col, out body).Flex(1f, 1f);
+            UIF.ScrollView(col, out body, "settings").Flex(1f, 1f);
 
             BuildServerCard(body, mod, api);
             BuildInterfaceCard(body, mod, api);

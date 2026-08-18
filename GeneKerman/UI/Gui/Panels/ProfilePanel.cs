@@ -60,7 +60,7 @@ namespace GeneKerman.UI.Gui
             }
 
             El body;
-            UIF.ScrollView(col, out body).Flex(1f, 1f);
+            UIF.ScrollView(col, out body, "profile").Flex(1f, 1f);
 
             // Identity + the four stats the site shows, in the site's order.
             var card = UIF.Card(body, "Account").Column(Theme.Space2).Pad(Theme.Space3);

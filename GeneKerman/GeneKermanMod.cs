@@ -1585,7 +1585,7 @@ namespace GeneKerman
             // Transient toast, not a stored notification: like the device-denied
             // unlink, persisting it would resurface it after the user re-links.
             Toast("Session expired",
-                "This PC was unlinked. Run /g linkcode in Discord to link again.");
+                "This PC was unlinked. Run /b linkcode in Discord to link again.");
             Debug.Log("[GeneKerman] Session revoked — returned to the link screen.");
         }
 
@@ -1671,7 +1671,7 @@ namespace GeneKerman
                 // Terminal unlink — keep this a transient toast. Persisting it would
                 // make it resurface in the panel the next time the user re-links.
                 Toast("Device not approved",
-                    "This PC was unlinked. Run /g linkcode in Discord to link again.");
+                    "This PC was unlinked. Run /b linkcode in Discord to link again.");
             }
             else // expired
             {

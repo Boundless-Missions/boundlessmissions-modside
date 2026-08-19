@@ -38,6 +38,12 @@ namespace GeneKerman
         public const string ModlistMine = "mine";
         public const string ModlistJanitor = "janitor";
 
+        /// <summary>Lowest price a reverse auction may open at, mirroring
+        /// settings.AUCTION_MIN_START_VALUE on the server. A bid must undercut the
+        /// current price by one and still be above zero, so an auction opened at 1
+        /// escrows the money and then refuses every bid anyone tries to place.</summary>
+        public const int MinAuctionStartValue = 2;
+
         /// <summary>Tolerance floors on a rescue target. Public because both UIs label
         /// their margin fields with them, and a label that disagreed with the clamp would
         /// quietly mislead the issuer about how hard the contract is.</summary>
@@ -361,6 +367,12 @@ namespace GeneKerman
             { error = "Mission description is too short."; return false; }
 
             if (r.Payment <= 0) { error = "Enter a valid payment amount."; return false; }
+            if (r.Kind == "auction" && r.Payment < MinAuctionStartValue)
+            {
+                error = "An auction has to start at " + MinAuctionStartValue +
+                        " KCoins or more — nobody can undercut a lower opening price.";
+                return false;
+            }
             if (r.Fine < 0) r.Fine = 0;
 
             // yyyy-MM-dd is what the server parses and what <input type="date"> emits.

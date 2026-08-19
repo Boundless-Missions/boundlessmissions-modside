@@ -28,6 +28,13 @@
  * contract — which is why it only takes finished ones, and why it lives in
  * ContractInbox next to the file it is stored in.
  *
+ * Binning is one control at the top rather than a button per finished row: the top
+ * bar carries the inbox/bin switch and a drawn bin (Sprites.Trash — Sprites.Restore
+ * in the bin, where the mode puts contracts back rather than away), pressing it turns
+ * the list into a chooser — a tick box on every row and on every week heading — and
+ * the icon gives its place up to Delete and Cancel while the mode is on, so the way
+ * out is where the way in was. See BuildTopBar.
+ *
  * Deliberately not here: answering a settle / more-time request as the issuer — that
  * is browser-UI and Discord only today, and the panel says so rather than pretending
  * otherwise.
@@ -67,15 +74,23 @@ namespace GeneKerman.UI.Gui
         private bool showTrash;
 
         /// <summary>
-        /// Selection mode. Off by default and off again on the way out: a row is a
-        /// button that opens a contract, and a check box permanently in front of it
-        /// would make the common action the fiddly one.
+        /// Selection mode, armed by the top bar's bin. Off by default and off again on
+        /// the way out: a row is a button that opens a contract, and a check box
+        /// permanently in front of it would make the common action the fiddly one.
         /// </summary>
         private bool selecting;
         private readonly HashSet<string> selected = new HashSet<string>();
 
-        /// <summary>Bulk cancel is destructive, so it arms before it fires — as the per-contract one does.</summary>
+        /// <summary>Bulk withdraw is destructive, so it arms before it fires — as the per-contract one does.</summary>
         private bool bulkCancelConfirm;
+
+        /// <summary>
+        /// The top bar's Delete is armed and waiting for a second press. Cleared by any
+        /// change to the selection: the button carries the count it is about to act on,
+        /// so a confirmation held across a tick would be a confirmation of a different
+        /// list than the one that was read.
+        /// </summary>
+        private bool deleteConfirm;
 
         /// <summary>Week headings the player has folded away, plus which view they were computed for.</summary>
         private readonly HashSet<string> collapsedWeeks = new HashSet<string>();
@@ -224,13 +239,18 @@ namespace GeneKerman.UI.Gui
 
         private void BuildList(El col, IList<object> contracts)
         {
+            var shown = Filtered(contracts);
+
+            // The top bar comes first because it decides what the list *is* — inbox or
+            // bin — and holds the one control that changes it wholesale. The filters
+            // under it only narrow whichever of the two is on screen.
+            BuildTopBar(col, contracts, shown);
+
             // Filter row. Purely local — it re-renders the cached list, it does not refetch.
             var filters = UIF.Box(col, "Filters").Row(Theme.Space1).H(24);
             FilterButton(filters, "All", 0);
             FilterButton(filters, "Incoming", 1);
             FilterButton(filters, "Outgoing", 2);
-
-            var shown = Filtered(contracts);
 
             // "N waiting on you", from the same predicate that decides whether a row
             // gets its dot — so the count and the dots can never disagree. Never in the
@@ -241,8 +261,7 @@ namespace GeneKerman.UI.Gui
             if (waiting > 0)
                 UIF.Muted(filters, waiting + " waiting on you");
 
-            BuildViewRow(col, contracts);
-            if (selecting) BuildSelectionBar(col, shown);
+            if (selecting) BuildSelectionRow(col, shown);
 
             if (shown.Count == 0)
             {
@@ -259,13 +278,27 @@ namespace GeneKerman.UI.Gui
         }
 
         /// <summary>
-        /// Inbox / bin, and the way into selection mode. A second row rather than more
-        /// buttons on the filter row: these two switch what the list *is*, where the
-        /// filters only narrow it, and mixing the two reads as six equal choices.
+        /// The list's own bar: which view is on screen, and the bin.
+        ///
+        /// A row of its own rather than more buttons on the filter row — Inbox/Bin
+        /// switch what the list *is*, where the filters only narrow it, and mixing the
+        /// two reads as six equal choices. It carries the bin because binning used to
+        /// be a button on every finished row, which put a destructive control inside
+        /// the thing it destroys and repeated it down the whole column; one bin at the
+        /// top, acting on ticked rows, says the same thing once.
+        ///
+        /// The bin is a drawn icon rather than the word: it is the only control here
+        /// that is not a view or a filter, and a fourth caption in a row of captions
+        /// reads as a fourth tab. Pressing it turns the list into a chooser — tick
+        /// boxes appear on every row and every week — and the icon gives its place up
+        /// to the two buttons that end the mode, so the way out is where the way in
+        /// was. Delete arms first and fires on a second press: the bin is local and
+        /// nothing is lost, but "which twelve" is not something to be sure of after
+        /// the fact.
         /// </summary>
-        private void BuildViewRow(El col, IList<object> contracts)
+        private void BuildTopBar(El col, IList<object> contracts, List<Dictionary<string, object>> shown)
         {
-            var row = UIF.Box(col, "Views").Row(Theme.Space1).H(24);
+            var row = UIF.Box(col, "TopBar").Row(Theme.Space1).H(26);
 
             int binned = 0;
             foreach (var obj in contracts)
@@ -279,15 +312,78 @@ namespace GeneKerman.UI.Gui
 
             UIF.Grow(row);
 
-            UIF.Button(row, selecting ? "Done" : "Select", () =>
+            if (!selecting)
             {
-                selecting = !selecting;
+                // Nothing on screen to tick: arming the mode over an empty list would
+                // put a chooser and a disabled Delete in front of the notice explaining
+                // that there is nothing here.
+                if (shown.Count == 0) return;
+
+                // The icon says which way the mode goes, since that is the one thing
+                // that differs between the two views: a bin in the inbox, an arrow out
+                // of a tray in the bin. One icon for both would promise a delete on the
+                // screen where deleting is not a thing that can happen.
+                SpriteKey icon = showTrash
+                    ? Sprites.Restore(Theme.Foreground, 15)
+                    : Sprites.Trash(Theme.Foreground, 15);
+
+                UIF.IconButton(row, icon, () =>
+                {
+                    selecting = true;
+                    selected.Clear();
+                    bulkCancelConfirm = false;
+                    deleteConfirm = false;
+                    ClearStatus();
+                    MarkDirty();
+                }, BtnStyle.Ghost, 26, 15);
+                return;
+            }
+
+            // In the bin the destructive direction does not exist — a binned contract
+            // is hidden, not deleted, and the only thing to do to a ticked one is put
+            // it back. So the pair becomes Restore/Cancel, and Restore needs no
+            // confirmation: it undoes rather than does.
+            if (showTrash)
+            {
+                UIF.Button(row, selected.Count > 0 ? "Restore " + selected.Count : "Restore",
+                           () => BulkTrash(shown, false), BtnStyle.Secondary, 26, Theme.Space2)
+                   .Interactable(!Busy && selected.Count > 0).E.PrefW(84);
+                LeaveSelectButton(row);
+                return;
+            }
+
+            int binnable = CountSelected(shown, c => ContractInbox.IsFinished(MiniJSON.GetString(c, "status")));
+
+            if (deleteConfirm)
+            {
+                UIF.Button(row, "Confirm", () => { deleteConfirm = false; BulkTrash(shown, true); },
+                           BtnStyle.Destructive, 26, Theme.Space2)
+                   .Interactable(!Busy).E.PrefW(74);
+                UIF.Button(row, "Keep", () => { deleteConfirm = false; MarkDirty(); },
+                           BtnStyle.Ghost, 26, Theme.Space2).E.PrefW(54);
+            }
+            else
+            {
+                UIF.Button(row, binnable > 0 ? "Delete " + binnable : "Delete",
+                           () => { deleteConfirm = true; MarkDirty(); },
+                           BtnStyle.Destructive, 26, Theme.Space2)
+                   .Interactable(!Busy && binnable > 0).E.PrefW(74);
+                LeaveSelectButton(row);
+            }
+        }
+
+        /// <summary>Leave selection mode, dropping whatever was ticked. Sits where the bin was.</summary>
+        private void LeaveSelectButton(El row)
+        {
+            UIF.Button(row, "Cancel", () =>
+            {
+                selecting = false;
                 selected.Clear();
                 bulkCancelConfirm = false;
+                deleteConfirm = false;
                 ClearStatus();
                 MarkDirty();
-            }, selecting ? BtnStyle.Selected : BtnStyle.Ghost, 24, Theme.Space2)
-               .E.PrefW(62);
+            }, BtnStyle.Ghost, 26, Theme.Space2).E.PrefW(60);
         }
 
         private void ViewButton(El parent, string label, bool trash)
@@ -301,6 +397,7 @@ namespace GeneKerman.UI.Gui
                 // on rows that are no longer on screen.
                 selected.Clear();
                 bulkCancelConfirm = false;
+                deleteConfirm = false;
                 openId = null;
                 ClearStatus();
                 MarkDirty();
@@ -311,12 +408,17 @@ namespace GeneKerman.UI.Gui
         }
 
         /// <summary>
-        /// What can be done to the ticked rows. Cancel is the classic window's bulk
-        /// action and keeps its rule — pending only, since that is the one status where
-        /// cancelling is a withdrawal rather than a forfeit — and the bin actions are
-        /// the per-row ones applied to the whole selection.
+        /// What the selection *is*, and the one bulk action that is not a bin action.
+        ///
+        /// Delete and Restore live in the top bar, where the bin that armed this mode
+        /// was; what is left here is the whole-list tick box (the week headings do the
+        /// same job a group at a time), the running count, and withdrawing pending
+        /// offers — the classic window's bulk action, which keeps its rule: pending
+        /// only, since that is the one status where cancelling is a withdrawal rather
+        /// than a forfeit. It is called Withdraw and not Cancel because Cancel in the
+        /// top bar means leave this mode, and one word on one screen cannot mean both.
         /// </summary>
-        private void BuildSelectionBar(El col, List<Dictionary<string, object>> shown)
+        private void BuildSelectionRow(El col, List<Dictionary<string, object>> shown)
         {
             var card = UIF.Card(col, "Selection").Column(Theme.Space2).Pad(Theme.Space2);
 
@@ -326,8 +428,7 @@ namespace GeneKerman.UI.Gui
             {
                 selected.Clear();
                 if (on) foreach (var c in shown) selected.Add(MiniJSON.GetString(c, "contract_id"));
-                bulkCancelConfirm = false;
-                MarkDirty();
+                SelectionChanged();
             });
             UIF.Label(head, allSelected ? "All selected" : "Select all", Theme.FontXs);
             UIF.Grow(head);
@@ -337,44 +438,57 @@ namespace GeneKerman.UI.Gui
 
             if (selected.Count == 0)
             {
-                UIF.Muted(card, "Tick the contracts you want to act on.").Body();
+                UIF.Muted(card, showTrash
+                          ? "Tick the contracts you want back in the inbox."
+                          : "Tick the contracts you want to act on.").Body();
                 return;
             }
 
+            if (showTrash) return;
+
             int cancellable = CountSelected(shown, c => MiniJSON.GetString(c, "status") == "pending");
-            int binnable = CountSelected(shown, c => ContractInbox.IsFinished(MiniJSON.GetString(c, "status")));
-
-            var actions = UIF.Box(card, "SelActions").Row(Theme.Space2).H(28);
-
-            if (showTrash)
+            if (cancellable > 0)
             {
-                UIF.Button(actions, "Restore " + selected.Count, () => BulkTrash(shown, false),
-                           BtnStyle.Secondary, 28).Interactable(!Busy).E.Flex(1f);
-            }
-            else
-            {
-                UIF.Button(actions, binnable > 0 ? "Bin " + binnable : "Bin",
-                           () => BulkTrash(shown, true), BtnStyle.Ghost, 28)
-                   .Interactable(!Busy && binnable > 0).E.Flex(1f);
+                var actions = UIF.Box(card, "SelActions").Row(Theme.Space2).H(28);
 
                 if (bulkCancelConfirm)
                 {
-                    UIF.Button(actions, "Confirm", () => { bulkCancelConfirm = false; BulkCancel(shown); },
+                    UIF.Button(actions, "Confirm withdraw", () => { bulkCancelConfirm = false; BulkCancel(shown); },
                                BtnStyle.Destructive, 28).Interactable(!Busy).E.Flex(1f);
                     UIF.Button(actions, "Keep", () => { bulkCancelConfirm = false; MarkDirty(); },
                                BtnStyle.Ghost, 28).E.Flex(1f);
                 }
                 else
                 {
-                    UIF.Button(actions, cancellable > 0 ? "Cancel " + cancellable : "Cancel",
+                    UIF.Button(actions, "Withdraw " + cancellable,
                                () => { bulkCancelConfirm = true; MarkDirty(); },
-                               BtnStyle.Destructive, 28)
-                       .Interactable(!Busy && cancellable > 0).E.Flex(1f);
+                               BtnStyle.Destructive, 28).Interactable(!Busy).E.Flex(1f);
                 }
             }
 
-            if (!showTrash && binnable < selected.Count)
+            int binnable = CountSelected(shown, c => ContractInbox.IsFinished(MiniJSON.GetString(c, "status")));
+            if (binnable < selected.Count)
                 UIF.Muted(card, "Only finished contracts can go in the bin; live ones stay put.").Body();
+        }
+
+        /// <summary>
+        /// Something was ticked or unticked. Both armed confirmations name a count, so
+        /// neither may outlive the selection it was read against.
+        /// </summary>
+        private void SelectionChanged()
+        {
+            bulkCancelConfirm = false;
+            deleteConfirm = false;
+            MarkDirty();
+        }
+
+        /// <summary>Is every contract in this group ticked? Empty groups are not "all".</summary>
+        private bool AllSelected(List<Dictionary<string, object>> items)
+        {
+            if (items.Count == 0) return false;
+            foreach (var c in items)
+                if (!selected.Contains(MiniJSON.GetString(c, "contract_id"))) return false;
+            return true;
         }
 
         private int CountSelected(List<Dictionary<string, object>> shown,
@@ -399,10 +513,14 @@ namespace GeneKerman.UI.Gui
                 if (trash && !ContractInbox.IsFinished(MiniJSON.GetString(c, "status"))) continue;
 
                 ContractInbox.SetTrashed(cid, trash);
+                // The detail pane cannot outlive the row that opened it: the contract
+                // has just left the view it was read in.
+                if (openId == cid) openId = null;
                 moved++;
             }
 
             selected.Clear();
+            deleteConfirm = false;
             var done = BeginAction();
             done(moved > 0, moved == 0
                 ? "Nothing to move."
@@ -527,6 +645,26 @@ namespace GeneKerman.UI.Gui
                     .ChildAlign(TextAnchor.MiddleLeft)
                     .H(24);
 
+                // The week's own tick box, so a whole batch is one press rather than
+                // eight. It is inside the ClickableRow that folds the group and is safe
+                // there for the reason UIF.Checkbox documents — Unity gives the click to
+                // the innermost handler, so ticking a week does not also fold it.
+                // Deliberately live on a folded week too: "select this week and delete
+                // it" is the reason the fold and the tick box are on the same row.
+                if (selecting)
+                {
+                    var weekItems = items;
+                    UIF.Checkbox(head, AllSelected(weekItems), on =>
+                    {
+                        foreach (var c in weekItems)
+                        {
+                            string wid = MiniJSON.GetString(c, "contract_id");
+                            if (on) selected.Add(wid); else selected.Remove(wid);
+                        }
+                        SelectionChanged();
+                    }, 16);
+                }
+
                 UIF.Label(head, week, Theme.FontXs, Theme.MutedForeground).Bold();
                 UIF.Grow(head);
                 // No caret glyph: the font is KSP's and arrows are not a safe bet in it
@@ -621,10 +759,15 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>
         /// One inbox row. The whole row is the button — there is no "Open" affordance,
-        /// matching the web UI, where each list item is a full-width button. The two
-        /// controls that sit inside it (the tick box, the bin button) are Buttons of
-        /// their own, and Unity gives a click to the innermost handler, so pressing
-        /// either does not also open the contract.
+        /// matching the web UI, where each list item is a full-width button. The one
+        /// control that sits inside it, the tick box, is a Button of its own, and Unity
+        /// gives a click to the innermost handler, so ticking a row does not also open
+        /// the contract.
+        ///
+        /// No bin button of its own any more: it is in the top bar, acting on whatever
+        /// is ticked. A row carried one only where the status allowed it, so the column
+        /// grew and lost a control from line to line, and the control that hides a
+        /// contract sat inside the contract it hides.
         /// </summary>
         private void BuildRow(El parent, Dictionary<string, object> c)
         {
@@ -643,8 +786,7 @@ namespace GeneKerman.UI.Gui
                 UIF.Checkbox(row, ticked, on =>
                 {
                     if (on) selected.Add(cid); else selected.Remove(cid);
-                    bulkCancelConfirm = false;
-                    MarkDirty();
+                    SelectionChanged();
                 });
             }
             else
@@ -687,18 +829,6 @@ namespace GeneKerman.UI.Gui
             if (!string.IsNullOrEmpty(due)) UIF.Muted(foot, "due " + due);
             UIF.Grow(foot);
 
-            // Per-row bin / restore, for the common case of tidying one line without
-            // going into selection mode. Only where the classic window offers it: a
-            // contract still in play cannot be hidden.
-            if (selecting || !(showTrash || ContractInbox.IsFinished(status))) return;
-
-            bool trashed = showTrash;
-            UIF.Button(row, trashed ? "Restore" : "Bin", () =>
-            {
-                ContractInbox.SetTrashed(cid, !trashed);
-                if (openId == cid) openId = null;
-                MarkDirty();
-            }, BtnStyle.Ghost, 22, Theme.Space2).E.PrefW(trashed ? 66 : 44);
         }
 
         /// <summary>Does this contract restrict what the contractor may build?</summary>
@@ -765,6 +895,8 @@ namespace GeneKerman.UI.Gui
             showTrash = ContractInbox.IsTrashed(cid);
             selecting = false;
             selected.Clear();
+            bulkCancelConfirm = false;
+            deleteConfirm = false;
             Select(cid);
 
             GeneKermanMod.Instance?.State?.RequestContractsRefresh();
@@ -1472,6 +1604,7 @@ namespace GeneKerman.UI.Gui
             selecting = false;
             selected.Clear();
             bulkCancelConfirm = false;
+            deleteConfirm = false;
             autoCollapsedFor = null;
 
             form.Attach(MarkDirty, Done, () =>

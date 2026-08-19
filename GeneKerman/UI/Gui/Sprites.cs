@@ -29,6 +29,14 @@ using UnityEngine.UI;
 
 namespace GeneKerman.UI.Gui
 {
+    /// <summary>
+    /// The pictograms this file can draw. There is no icon font to borrow from and no
+    /// Unity Editor to import an SVG with, so an icon here is one more distance
+    /// function — which is also what gets it the same antialiasing and the same
+    /// fill-or-outline behaviour as everything else (see Star5Distance).
+    /// </summary>
+    internal enum IconShape { None = 0, Star5, Trash, Restore }
+
     /// <summary>Identity of a generated sprite. Value type so it keys a Dictionary cheaply.</summary>
     internal struct SpriteKey : IEquatable<SpriteKey>
     {
@@ -36,7 +44,8 @@ namespace GeneKerman.UI.Gui
         public int BorderWidth;
         public int Spread;      // >0 = soft shadow falloff, in px, outside the shape
         public int Diameter;    // >0 = a fixed-size circle, drawn unsliced
-        public int Star;        // >0 = a fixed-size five-pointed star, drawn unsliced
+        public int Icon;        // >0 = a fixed-size pictogram of Shape, drawn unsliced
+        public IconShape Shape;
         public uint Fill;
         public uint Stroke;
 
@@ -47,11 +56,12 @@ namespace GeneKerman.UI.Gui
         /// Shapes that are not rounded rectangles carry no slice margin and must be
         /// drawn Simple. Stretching a 9-slice star would tear its points off.
         /// </summary>
-        public bool IsUnsliced => Diameter > 0 || Star > 0;
+        public bool IsUnsliced => Diameter > 0 || Icon > 0;
 
         public bool Equals(SpriteKey o) =>
             Radius == o.Radius && BorderWidth == o.BorderWidth && Spread == o.Spread &&
-            Diameter == o.Diameter && Star == o.Star && Fill == o.Fill && Stroke == o.Stroke;
+            Diameter == o.Diameter && Icon == o.Icon && Shape == o.Shape &&
+            Fill == o.Fill && Stroke == o.Stroke;
 
         public override bool Equals(object o) => o is SpriteKey k && Equals(k);
 
@@ -63,7 +73,8 @@ namespace GeneKerman.UI.Gui
                 h = (h * 397) ^ BorderWidth;
                 h = (h * 397) ^ Spread;
                 h = (h * 397) ^ Diameter;
-                h = (h * 397) ^ Star;
+                h = (h * 397) ^ Icon;
+                h = (h * 397) ^ (int)Shape;
                 h = (h * 397) ^ (int)Fill;
                 h = (h * 397) ^ (int)Stroke;
                 return h;
@@ -197,13 +208,47 @@ namespace GeneKerman.UI.Gui
         /// (pass a stroke and a transparent fill for a hollow star).
         /// </summary>
         public static SpriteKey Star(Color fill, int size, Color? stroke = null, int borderWidth = Theme.BorderWidth)
+            => Icon(IconShape.Star5, fill, size, stroke, borderWidth);
+
+        /// <summary>
+        /// A waste bin — lid, handle and a slotted body — of exactly
+        /// <paramref name="size"/> px, drawn unsliced.
+        ///
+        /// The same argument as Star: an icon has to be a picture, and the two ways of
+        /// getting one here are both closed (KSP's TMP font is whatever the game
+        /// loaded, so a glyph is a bet; and with no Unity Editor on this machine there
+        /// is no import path for an SVG or a PNG). So the bin is built from the
+        /// primitive this file already has — four rounded boxes unioned, with two
+        /// subtracted for the slots — which keeps it resolution-independent, gets the
+        /// supersampling and the antialiasing for free, and takes an outline exactly
+        /// as the star does.
+        /// </summary>
+        public static SpriteKey Trash(Color fill, int size, Color? stroke = null, int borderWidth = Theme.BorderWidth)
+            => Icon(IconShape.Trash, fill, size, stroke, borderWidth);
+
+        /// <summary>
+        /// An arrow rising out of an open tray — put this back — of exactly
+        /// <paramref name="size"/> px, drawn unsliced.
+        ///
+        /// The counterpart to Trash and deliberately built out of the same parts: the
+        /// tray is the bin's body with its lid and slots taken away, so the pair reads
+        /// as two directions of one motion rather than as two unrelated pictures. The
+        /// direction is the whole message, which is why the arrow is the largest thing
+        /// in it and the tray is left as a container to come out of.
+        /// </summary>
+        public static SpriteKey Restore(Color fill, int size, Color? stroke = null, int borderWidth = Theme.BorderWidth)
+            => Icon(IconShape.Restore, fill, size, stroke, borderWidth);
+
+        private static SpriteKey Icon(IconShape shape, Color fill, int size,
+                                      Color? stroke, int borderWidth)
         {
             return new SpriteKey
             {
                 Radius = 0,
                 BorderWidth = stroke.HasValue ? Mathf.Max(0, borderWidth) : 0,
                 Spread = 0,
-                Star = Mathf.Max(6, size),
+                Icon = Mathf.Max(6, size),
+                Shape = shape,
                 Fill = Pack(fill),
                 Stroke = Pack(stroke ?? fill),
             };
@@ -410,10 +455,10 @@ namespace GeneKerman.UI.Gui
             int spread = key.Spread;
 
             int margin, size;
-            if (key.Star > 0)
+            if (key.Icon > 0)
             {
                 margin = 0;
-                size = key.Star;
+                size = key.Icon;
             }
             else if (key.IsCircle)
             {
@@ -473,9 +518,25 @@ namespace GeneKerman.UI.Gui
                 for (int x = 0; x < dim; x++)
                 {
                     // Signed distance to the boundary; negative inside.
-                    float d = key.Star > 0
-                        ? Star5Distance(x + 0.5f - half, y + 0.5f - half, half - ss)
-                        : RoundedBoxDistance(x + 0.5f - half, y + 0.5f - half, ext, ext, rr);
+                    float d;
+                    if (key.Icon > 0)
+                    {
+                        // One texel of headroom, so the outermost edge has somewhere
+                        // for its antialiasing ramp to land.
+                        float ir = half - ss;
+                        float ix = x + 0.5f - half;
+                        float iy = y + 0.5f - half;
+                        switch (key.Shape)
+                        {
+                            case IconShape.Trash:   d = TrashDistance(ix, iy, ir); break;
+                            case IconShape.Restore: d = RestoreDistance(ix, iy, ir); break;
+                            default:                d = Star5Distance(ix, iy, ir); break;
+                        }
+                    }
+                    else
+                    {
+                        d = RoundedBoxDistance(x + 0.5f - half, y + 0.5f - half, ext, ext, rr);
+                    }
 
                     Color c;
                     if (spread > 0)
@@ -524,7 +585,8 @@ namespace GeneKerman.UI.Gui
                 SpriteMeshType.FullRect,
                 new Vector4(margin * ss, margin * ss, margin * ss, margin * ss));
             sprite.hideFlags = HideFlags.HideAndDontSave;
-            sprite.name = "GK_" + key.Radius + "_" + key.BorderWidth + "_" + key.Spread + "_" + key.Diameter;
+            sprite.name = "GK_" + key.Radius + "_" + key.BorderWidth + "_" + key.Spread + "_" +
+                          key.Diameter + "_" + key.Shape;
 
             return new Entry { Texture = tex, Sprite = sprite };
         }
@@ -584,6 +646,87 @@ namespace GeneKerman.UI.Gui
             float dist = Mathf.Sqrt(ex * ex + ey * ey);
 
             return dist * Mathf.Sign(py * bax - px * bay);
+        }
+
+        /// <summary>
+        /// Signed distance to a waste bin centred on the origin, fitting a box of
+        /// half-extent <paramref name="r"/>. Lid, handle and body are rounded boxes
+        /// unioned (min of the distances, which is exact for a union), and the two
+        /// slots are subtracted from the body alone (max against the negated slot) so
+        /// they cut the body without also biting into the lid above it.
+        ///
+        /// The proportions are in units of r, which is what keeps the icon identical
+        /// at 14 px in a row and at 15 px in the toolbar — and, since the body is the
+        /// widest thing only after the lid, the lid is what sets the horizontal
+        /// extent. The gap between the lid and the body is deliberate: without it the
+        /// silhouette is a single blob at small sizes, and the gap is the one feature
+        /// that survives being two pixels tall.
+        /// </summary>
+        private static float TrashDistance(float px, float py, float r)
+        {
+            if (r <= 0f) return 1f;
+
+            float x = px / r;
+            float y = py / r;
+
+            // Handle, then lid: the handle overlaps the lid, so the union closes the
+            // seam rather than leaving a hairline where two edges meet.
+            float d = RoundedBoxDistance(x, y - 0.84f, 0.30f, 0.14f, 0.06f);
+            d = Mathf.Min(d, RoundedBoxDistance(x, y - 0.60f, 0.88f, 0.12f, 0.06f));
+
+            float body = RoundedBoxDistance(x, y + 0.26f, 0.66f, 0.62f, 0.16f);
+            float slots = Mathf.Min(RoundedBoxDistance(x - 0.27f, y + 0.24f, 0.085f, 0.40f, 0.08f),
+                                    RoundedBoxDistance(x + 0.27f, y + 0.24f, 0.085f, 0.40f, 0.08f));
+            body = Mathf.Max(body, -slots);
+
+            return Mathf.Min(d, body) * r;
+        }
+
+        /// <summary>
+        /// Signed distance to an arrow rising out of an open tray, centred on the
+        /// origin and fitting a box of half-extent <paramref name="r"/>.
+        ///
+        /// Same construction as TrashDistance: the tray is one rounded box with a
+        /// second subtracted from it — offset upwards, so what it takes away is the
+        /// inside *and* the top, which is what leaves a container open at the end the
+        /// arrow comes out of. The head is a triangle rather than two strokes, because
+        /// at 15 px a chevron drawn as two 1 px lines is two grey smudges.
+        /// </summary>
+        private static float RestoreDistance(float px, float py, float r)
+        {
+            if (r <= 0f) return 1f;
+
+            float x = px / r;
+            float y = py / r;
+
+            // Arrow: head over shaft, unioned so the seam between them closes.
+            float d = TriangleUpDistance(x, y, 0.98f, 0.36f, 0.58f);
+            d = Mathf.Min(d, RoundedBoxDistance(x, y - 0.02f, 0.19f, 0.44f, 0.06f));
+
+            float outer = RoundedBoxDistance(x, y + 0.64f, 0.84f, 0.34f, 0.16f);
+            float inner = RoundedBoxDistance(x, y + 0.46f, 0.58f, 0.32f, 0.10f);
+
+            return Mathf.Min(d, Mathf.Max(outer, -inner)) * r;
+        }
+
+        /// <summary>
+        /// Signed distance to an isosceles triangle pointing up: apex on the y axis at
+        /// <paramref name="apexY"/>, a horizontal base at <paramref name="baseY"/> of
+        /// half-width <paramref name="halfWidth"/>.
+        ///
+        /// The largest of the three edges' half-plane distances, mirrored about x so
+        /// only one side has to be measured. Exact inside the triangle and along each
+        /// edge; outside a corner it reads slightly short, which spends itself inside
+        /// the one texel of antialiasing and never past it.
+        /// </summary>
+        private static float TriangleUpDistance(float px, float py, float apexY, float baseY, float halfWidth)
+        {
+            float h = apexY - baseY;
+            if (h <= 0f || halfWidth <= 0f) return 1f;
+
+            float x = Mathf.Abs(px);
+            float side = (h * x + halfWidth * (py - apexY)) / Mathf.Sqrt(h * h + halfWidth * halfWidth);
+            return Mathf.Max(baseY - py, side);
         }
 
         // ── Colour packing (so SpriteKey stays a cheap value type) ──────────

@@ -264,7 +264,13 @@ namespace GeneKerman.UI.Gui
 
         private void BuildMoney(El parent, string currency, int balance)
         {
-            Caption(parent, "PAYMENT (" + currency.ToUpperInvariant() + ")");
+            // An auction's payment is its opening price, and the floor on one is not a
+            // round number anybody would guess — say it here rather than only in the
+            // refusal after they press Send.
+            Caption(parent, auction && Auctionable(type)
+                            ? "STARTING PRICE (" + currency.ToUpperInvariant() + ", MIN " +
+                              ContractCreation.MinAuctionStartValue + ")"
+                            : "PAYMENT (" + currency.ToUpperInvariant() + ")");
             UIF.TextField(parent, payment, "0").OnChanged(s => payment = s);
 
             if (balance >= 0)

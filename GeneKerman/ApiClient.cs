@@ -1109,7 +1109,7 @@ namespace GeneKerman
         }
 
         /// Poll the server until the user approves the login in their Discord DM.
-        /// The user pressed /g linkcode → entered the code here → the bot DM'd them
+        /// The user pressed /b linkcode → entered the code here → the bot DM'd them
         /// a Log-in button; this waits for that press. Calls back exactly once:
         /// success with the linked data (token stored), or failure with a message.
         public IEnumerator PollLoginApproval(string challengeId,

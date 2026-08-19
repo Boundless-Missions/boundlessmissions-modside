@@ -114,7 +114,7 @@ namespace GeneKerman.UI
             {
                 // Instructions
                 GUILayout.Label(
-                    "1. In Discord, type /g linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
+                    "1. In Discord, type /b linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
                     labelStyle
                 );
                 GUILayout.Space(15);

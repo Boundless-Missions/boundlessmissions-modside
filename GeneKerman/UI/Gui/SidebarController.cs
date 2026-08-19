@@ -747,6 +747,12 @@ namespace GeneKerman.UI.Gui
             if (mod.UpdateRequired && !mod.UpdateAcknowledged) return false;
             if (!mod.Api.DataGatheringEnabled) return false;
             if (!Consent.Accepted) return false;
+            // Suspended: every panel here is server-backed, and the two that aren't
+            // (Tools, Settings) are not worth drawing a whole interface for when the
+            // rest of it would answer 403 to everything. The IMGUI notice says why —
+            // and unlike the update gate there is no limited mode to fall back to,
+            // because there is nothing the player can do from this side.
+            if (mod.Suspended) return false;
 
             return true;
         }

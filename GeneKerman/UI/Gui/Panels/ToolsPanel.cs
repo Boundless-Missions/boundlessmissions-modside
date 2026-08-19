@@ -221,15 +221,16 @@ namespace GeneKerman.UI.Gui
             UIF.Muted(card, "Paste a public PNG or JPEG link to add it to your in-game flag picker.")
                .Body();
 
+            Btn import = null;
+            System.Action rearm = () => Rearm(import, FlagReady());
+
             var urlField = UIF.TextField(card, flagUrl, "https://example.com/flag.png");
-            urlField.OnChanged(s => flagUrl = s);
+            urlField.OnChanged(s => { flagUrl = s; rearm(); });
 
             var nameField = UIF.TextField(card, flagName, "Name (optional)");
             nameField.OnChanged(s => flagName = s);
 
-            bool ready = !string.IsNullOrEmpty((flagUrl ?? "").Trim()) && !Busy;
-
-            UIF.Button(card, Busy ? "Importing…" : "Import flag", () =>
+            import = UIF.Button(card, Busy ? "Importing…" : "Import flag", () =>
             {
                 string url = (flagUrl ?? "").Trim();
                 if (url.Length == 0) return;
@@ -242,10 +243,12 @@ namespace GeneKerman.UI.Gui
                     if (ok) { flagUrl = ""; flagName = ""; }
                     done(ok, message);
                 }));
-            }, BtnStyle.Secondary, 30).Interactable(ready);
+            }, BtnStyle.Secondary, 30).Interactable(FlagReady());
 
             if (statusOwner == CardFlag) DrawStatus(card);
         }
+
+        private bool FlagReady() => (flagUrl ?? "").Trim().Length > 0 && !Busy;
 
         // ── Bug report ──────────────────────────────────────────────────────
 
@@ -266,23 +269,40 @@ namespace GeneKerman.UI.Gui
             UIF.Muted(card, "Opens a private ticket in Discord. Replies come back to you there.")
                .Body();
 
+            Btn send = null;
+            Lbl hint = null;
+            System.Action rearm = () =>
+            {
+                Rearm(send, BugReady());
+                // Safe on a torn-down build: Lbl.Set goes through a Unity null check
+                // on the text component, which a destroyed label fails.
+                hint?.Set(BugHint());
+            };
+
             var summaryField = UIF.TextField(card, bugSummary, "One line: what went wrong");
-            summaryField.OnChanged(s => bugSummary = s);
+            summaryField.OnChanged(s => { bugSummary = s; rearm(); });
 
             var detailsField = UIF.TextField(card, bugDetails,
                 "What you did, what happened, what you expected…", 88, true);
-            detailsField.OnChanged(s => bugDetails = s);
+            detailsField.OnChanged(s => { bugDetails = s; rearm(); });
 
             UIF.Switch(card, "Attach KSP.log",
                        "Your game log: mod list, install paths and system specs. Almost every " +
                        "bug needs it to be fixable.",
                        bugAttachLog,
+                       // MarkDirty is not optional here: UIF.Switch paints its state at
+                       // build time and hands its handler a fixed !on, so without a
+                       // rebuild the knob never moves and a second click resends the
+                       // first click's value.
                        v => { bugAttachLog = v; MarkDirty(); });
 
-            bool ready = (bugSummary ?? "").Trim().Length > 0
-                      && (bugDetails ?? "").Trim().Length > 0 && !Busy;
+            // Why Send is dark, said before it is pressed rather than after. Silent
+            // while the form is untouched: a disabled button on an empty form explains
+            // itself, and a requirement stated before anything is typed reads as a
+            // complaint about not having typed yet.
+            hint = UIF.Muted(card, BugHint(), Theme.FontXs).Body();
 
-            UIF.Button(card, Busy ? "Sending…" : "Send report", () =>
+            send = UIF.Button(card, Busy ? "Sending…" : "Send report", () =>
             {
                 var done = Begin(CardBug);
                 mod.RunCoroutine(ToolActions.SubmitBugReport(bugSummary, bugDetails, bugAttachLog,
@@ -293,9 +313,69 @@ namespace GeneKerman.UI.Gui
                         if (ok) { bugSummary = ""; bugDetails = ""; }
                         done(ok, message);
                     }));
-            }, BtnStyle.Secondary, 30).Interactable(ready);
+            }, BtnStyle.Secondary, 30);
+            send.Interactable(BugReady());
+
+            // Under the button, not above it: this is a consequence of pressing Send,
+            // not another rule about filling the form in, and it has to be the last
+            // thing read before the press rather than one more line to scroll past.
+            // Red because it is the only text on this card that is about the player's
+            // account rather than about the bug — the report channel is anonymous
+            // enough to feel free, and it is not.
+            UIF.Label(card,
+                      "Misuse may result in a temporary suspension from Boundless Missions services.",
+                      Theme.FontXs, Theme.Lighten(Theme.Status("danger"), 0.35f))
+               .Body();
 
             if (statusOwner == CardBug) DrawStatus(card);
+        }
+
+        private bool BugReady() => (bugSummary ?? "").Trim().Length >= ToolActions.MinBugSummary
+                                && (bugDetails ?? "").Trim().Length >= ToolActions.MinBugDetails
+                                && !Busy;
+
+        /// <summary>
+        /// What is still short of ToolActions' floors, or "" when the report will be
+        /// taken. Empty on an untouched form as well: the button is dark there for the
+        /// obvious reason, and a rule quoted at someone who has not typed anything yet
+        /// is noise.
+        /// </summary>
+        private string BugHint()
+        {
+            int s = (bugSummary ?? "").Trim().Length;
+            int d = (bugDetails ?? "").Trim().Length;
+            if (s == 0 && d == 0) return "";
+
+            bool shortSummary = s < ToolActions.MinBugSummary;
+            bool shortDetails = d < ToolActions.MinBugDetails;
+            if (shortSummary && shortDetails)
+                return "Summary needs " + ToolActions.MinBugSummary + "+ characters, details " +
+                       ToolActions.MinBugDetails + "+.";
+            if (shortSummary)
+                return "Summary needs " + ToolActions.MinBugSummary + "+ characters.";
+            if (shortDetails)
+                return "Details need " + ToolActions.MinBugDetails + "+ characters.";
+            return "";
+        }
+
+        /// <summary>
+        /// Re-arm a button whose enabled state depends on what has been *typed*.
+        ///
+        /// A keystroke deliberately does not MarkDirty — a rebuild destroys the box
+        /// being typed into, caret and all, which is why SidebarPanel.Tick defers one
+        /// until the player stops. So a `ready` evaluated while building the card stays
+        /// frozen at what it was when the card was drawn: both boxes empty, hence a dead
+        /// button. Anything else marking the panel dirty (the attach switch, a craft
+        /// change in the editor) would silently "fix" it on the next rebuild, which is
+        /// exactly how this presented — Send only came alive after toggling the switch.
+        /// </summary>
+        private static void Rearm(Btn btn, bool ready)
+        {
+            // The button belongs to a build that may already have been torn down; its
+            // fields go with it, so this normally can't fire, but a click handler
+            // running one frame late must not touch a destroyed component.
+            if (btn == null || btn.Button == null) return;
+            btn.Interactable(ready);
         }
 
         // ── Plumbing ────────────────────────────────────────────────────────

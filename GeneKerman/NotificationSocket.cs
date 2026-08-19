@@ -267,10 +267,37 @@ namespace GeneKerman
                 CloseSocket();
 
                 ws = new WebSocket(url);
-                // KSP ships its own (old) certificate store; for wss accept whatever
-                // the configured server presents rather than failing the handshake.
+                // TLS validation. websocket-sharp's default callback accepts ANY
+                // certificate, so leaving it unset is the same as trusting a MITM. We
+                // set it explicitly:
+                //
+                //   • Public host (the official server, or any custom wss:// on a
+                //     routable address): enforce a real chain — accept only when the
+                //     cert validates with NO policy errors (a valid chain AND a
+                //     matching hostname). A self-signed / mis-issued cert from a
+                //     man-in-the-middle is refused, so the socket simply stays down and
+                //     the client falls back to HTTP polling (see GeneKermanMod: the
+                //     10-min notification poll and the 30-s import poll both run
+                //     whenever the socket is down). The WS is an accelerant, never the
+                //     only channel — so failing closed here degrades gracefully instead
+                //     of trusting an attacker. We deliberately do NOT pin the leaf: the
+                //     official server uses a short-lived (Let's Encrypt) cert that
+                //     rotates, and a leaf pin would break every client on renewal.
+                //
+                //   • Loopback / private-LAN dev server (localhost, 127/8, ::1, 10/8,
+                //     192.168/16, 172.16-31/12): a developer testing over a self-signed
+                //     cert. There is no MITM to defend against on your own machine/LAN,
+                //     and requiring a CA-signed cert for local dev is pointless friction,
+                //     so accept whatever it presents.
                 if (url.StartsWith("wss://"))
-                    ws.SslConfiguration.ServerCertificateValidationCallback = (s, c, ch, e) => true;
+                {
+                    if (IsLocalDevHost(HostOf(url)))
+                        ws.SslConfiguration.ServerCertificateValidationCallback =
+                            (s, c, ch, e) => true;
+                    else
+                        ws.SslConfiguration.ServerCertificateValidationCallback =
+                            ValidatePublicServerCertificate;
+                }
 
                 ws.OnOpen += (s, e) =>
                 {
@@ -356,6 +383,60 @@ namespace GeneKerman
         {
             nextRetryTime = Time.realtimeSinceStartup + retryDelay;
             retryDelay = Math.Min(retryDelay * 2f, MAX_RETRY);
+        }
+
+        // ── TLS certificate validation (wss://) ──────────────────────────────
+
+        /// <summary>Certificate callback for a public wss:// server. Accepts the
+        /// connection only when the presented chain has no policy errors — i.e. it
+        /// validates against the trust store AND the hostname matches. Anything else
+        /// (self-signed, wrong host, expired, mis-issued — what a man-in-the-middle
+        /// would present) is refused; the socket then stays down and the client falls
+        /// back to HTTP polling. Runs on a websocket-sharp background thread, so it
+        /// only touches Debug.Log, never Unity API.</summary>
+        private static bool ValidatePublicServerCertificate(
+            object sender,
+            System.Security.Cryptography.X509Certificates.X509Certificate certificate,
+            System.Security.Cryptography.X509Certificates.X509Chain chain,
+            System.Net.Security.SslPolicyErrors sslPolicyErrors)
+        {
+            if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
+                return true;
+            Debug.LogWarning("[GeneKerman] Notification socket: refusing server " +
+                "certificate (" + sslPolicyErrors + ") — falling back to HTTP polling. " +
+                "This is expected on a MITM'd or misconfigured connection.");
+            return false;
+        }
+
+        /// <summary>The host component of a ws(s):// URL, or "" if unparseable.</summary>
+        private static string HostOf(string url)
+        {
+            try { return new Uri(url).Host; }
+            catch { return ""; }
+        }
+
+        /// <summary>True for a loopback or private-LAN host — a local dev server, where
+        /// there is no man-in-the-middle to defend against and a self-signed cert is
+        /// normal. Everything else is treated as public and gets full validation.</summary>
+        private static bool IsLocalDevHost(string host)
+        {
+            if (string.IsNullOrEmpty(host)) return false;
+            host = host.Trim().Trim('[', ']').ToLowerInvariant();  // strip IPv6 brackets
+            if (host == "localhost" || host == "::1") return true;
+
+            System.Net.IPAddress ip;
+            if (!System.Net.IPAddress.TryParse(host, out ip)) return false;  // a real DNS name → public
+            if (System.Net.IPAddress.IsLoopback(ip)) return true;            // 127.0.0.0/8, ::1
+
+            byte[] b = ip.GetAddressBytes();
+            if (b.Length == 4)
+            {
+                if (b[0] == 10) return true;                          // 10.0.0.0/8
+                if (b[0] == 192 && b[1] == 168) return true;          // 192.168.0.0/16
+                if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return true;  // 172.16.0.0/12
+                if (b[0] == 169 && b[1] == 254) return true;          // 169.254.0.0/16 link-local
+            }
+            return false;
         }
 
         private void CloseSocket()

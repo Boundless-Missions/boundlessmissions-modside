@@ -27,7 +27,7 @@ namespace GeneKerman.UI.Gui
     internal enum TextAlign { Left, Center, Right }
 
     /// <summary>Which of the site's button variants a button is drawn as.</summary>
-    internal enum BtnStyle { Primary, Secondary, Ghost, Destructive }
+    internal enum BtnStyle { Primary, Secondary, Ghost, Destructive, Selected }
 
     // ── Element handle ──────────────────────────────────────────────────────
 
@@ -626,6 +626,20 @@ namespace GeneKerman.UI.Gui
                     fill = Theme.Alpha(Theme.Secondary, 0f); fg = Theme.Foreground; stroke = Theme.Border;
                     hover = Theme.Alpha(Theme.Secondary, 1f); pressed = Theme.Alpha(Theme.Muted, 1f);
                     break;
+                case BtnStyle.Selected:
+                    // The chosen one of a segmented pair or row — Discord's list
+                    // selection rather than this file's other two "chosen" looks. Not
+                    // Primary, because a solid green chip is what the sidebar's tab
+                    // bar already means (which panel you are in), and not the Choice
+                    // card's green outline either: these sit in a row of four, where
+                    // the thing to answer is which one, not what colour it is. So the
+                    // state is carried the way Discord carries it — a ground light
+                    // enough to read at a glance, its label at full strength, and the
+                    // unchosen siblings left transparent with a --muted-foreground
+                    // caption (the call site's job, since Ghost is a general style).
+                    fill = Theme.Selected; fg = Theme.Foreground; stroke = Theme.SelectedBorder;
+                    hover = Theme.Lighten(fill, 0.10f); pressed = Theme.Darken(fill, 0.10f);
+                    break;
                 default:
                     fill = Theme.Secondary; fg = Theme.Foreground; stroke = Theme.Border;
                     hover = Theme.Lighten(fill, 0.14f); pressed = Theme.Darken(fill, 0.10f);
@@ -733,57 +747,33 @@ namespace GeneKerman.UI.Gui
             var btn = e.Go.AddComponent<Button>();
             btn.onClick.AddListener(new UnityAction(onClick ?? (() => { })));
 
-            // Selected is --primary, not a darker grey.
+            // Selected is an outline, not a wash.
             //
             // It used to be --muted at 0.6 with hover at 0.4 and 0.7, which put the
             // chosen row a sixth of an alpha step away from the row the pointer
             // happened to be over — on a list whose own ground is already --muted at
             // 0.35. Three greys that close together is not a state anyone can read at
-            // a glance, and picking a player from a list you then scroll away from is
-            // exactly where it mattered. So the selected row changes hue rather than
-            // brightness, and gets the outline and the edge bar below on top of it.
-            Color rest = selected ? Theme.Alpha(Theme.Primary, 0.14f) : Theme.Alpha(Theme.Muted, 0f);
+            // a glance. Tinting the whole row --primary read at a glance but at the
+            // cost of the row's own contents: a badge, a status colour and a body
+            // paragraph all sat on a green ground that competed with them. So the
+            // state lives entirely on the --primary outline, and the fill stays the
+            // same as every other row's, which leaves hover free to mean hover on a
+            // selected row too. No left-edge strip either: 3px on top of an outline
+            // is not a marker any more, it is one side of the border drawn three
+            // times thicker than the other three.
+            Color rest = Theme.Alpha(Theme.Muted, 0f);
             Color? edge = selected ? Theme.Alpha(Theme.Primary, 0.85f) : (Color?)null;
+
+            int border = selected ? Theme.BorderWidthSelected : Theme.BorderWidth;
 
             Sprites.BindStates(
                 img, btn,
-                Sprites.Rounded(rest, radius, edge),
-                Sprites.Rounded(selected ? Theme.Alpha(Theme.Primary, 0.22f) : Theme.Alpha(Theme.Muted, 0.4f),
-                                radius, edge),
-                Sprites.Rounded(selected ? Theme.Alpha(Theme.Primary, 0.30f) : Theme.Alpha(Theme.Muted, 0.8f),
-                                radius, edge),
-                Sprites.Rounded(rest, radius, edge));
+                Sprites.Rounded(rest, radius, edge, border),
+                Sprites.Rounded(Theme.Alpha(Theme.Muted, 0.4f), radius, edge, border),
+                Sprites.Rounded(Theme.Alpha(Theme.Muted, 0.8f), radius, edge, border),
+                Sprites.Rounded(rest, radius, edge, border));
 
-            if (selected) SelectionBar(e);
             return e;
-        }
-
-        /// <summary>
-        /// The 3px --primary strip down a selected row's left edge.
-        ///
-        /// Carries the state in *position and shape* rather than in colour alone, so
-        /// it survives the two things a tint does not: the row scrolled half out of
-        /// its clip rect, and the row sitting inside a card whose fill is already
-        /// tinted. Flat-filled rather than Sprites.Rounded — a 9-slice sprite carries
-        /// slice margins of radius+1 per side, so a rounded 3px-wide rect asks uGUI
-        /// to fit 14px of non-stretchable corner into 3px and smears (the note on
-        /// Sprites.Circle is the same problem).
-        ///
-        /// IgnoreLayout, because the row's own layout group would otherwise treat it
-        /// as a first child and push everything else across by 3px plus a spacing —
-        /// selecting a row would visibly re-indent it.
-        /// </summary>
-        private static void SelectionBar(El row)
-        {
-            var bar = Root("SelBar", row.Rt);
-            bar.Rt.anchorMin = new Vector2(0f, 0f);
-            bar.Rt.anchorMax = new Vector2(0f, 1f);
-            bar.Rt.pivot = new Vector2(0f, 0.5f);
-            // x pair is left/right against the left edge (so: 3px wide); y pair insets
-            // it from the row's top and bottom so it reads as a marker, not a border.
-            bar.Rt.offsetMin = new Vector2(0f, 3f);
-            bar.Rt.offsetMax = new Vector2(3f, -3f);
-            bar.IgnoreLayout().Fill(Theme.Primary).Raycast(false);
         }
 
         /// <summary>
@@ -975,9 +965,13 @@ namespace GeneKerman.UI.Gui
         /// press, when only the unselected one is actually an action. --accent rather
         /// than the neutral --secondary it started as, because a 12% grey behind a
         /// green outline reads as "this card is slightly lighter" instead of as the
-        /// answer; the tinted ground, the accent title and the edge bar all say the
-        /// same thing, which is what it takes for a card in a stack of four to be
-        /// obviously the chosen one.
+        /// answer; the tinted ground and the accent title say the same thing, which
+        /// is what it takes for a card in a stack of four to be obviously the chosen
+        /// one.
+        ///
+        /// There is no left-edge bar. A 3px strip inside a card that is already
+        /// tinted *and* outlined is a fourth statement of one fact, and the one that
+        /// reads as a border drawn far thicker on one side than the other three.
         /// </summary>
         public static El Choice(El parent, string title, string subtitle, bool selected, Action onClick)
         {
@@ -1003,8 +997,6 @@ namespace GeneKerman.UI.Gui
                 Sprites.Rounded(selected ? Theme.Lighten(Theme.Accent, 0.18f) : Theme.Alpha(Theme.Muted, 0.8f),
                                 Theme.RadiusSm, stroke),
                 Sprites.Rounded(fill, Theme.RadiusSm, Theme.Alpha(stroke, 0.4f)));
-
-            if (selected) SelectionBar(e);
 
             Label(e, title, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null).Bold();
             // Ellipsis, not overflow: the subtitle is a host name in a ~170px card,

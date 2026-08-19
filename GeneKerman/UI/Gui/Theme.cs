@@ -45,6 +45,20 @@ namespace GeneKerman.UI.Gui
         /// <summary>--input · hsl(0 0% 16%)</summary>
         public static readonly Color Input = Gray(0.16f);
 
+        /// <summary>
+        /// The ground under a chosen segmented chip (Discord's
+        /// --background-modifier-selected). Deliberately far above --secondary:
+        /// 12% over a 4% panel is a step nobody reads as a state, which is what
+        /// the contract filters looked like before.
+        /// </summary>
+        public static readonly Color Selected = Gray(0.20f);
+        /// <summary>
+        /// Outline of a chosen chip. Lighter than its own fill, not darker — a
+        /// --border (15%) edge around a 20% ground draws a groove, and the row's
+        /// unchosen siblings are outlined at exactly that value.
+        /// </summary>
+        public static readonly Color SelectedBorder = Gray(0.30f);
+
         /// <summary>--primary · hsl(120 54% 62%) · #6ad26a</summary>
         public static readonly Color Primary = new Color(0.4157f, 0.8235f, 0.4157f, 1f);
         /// <summary>--primary-foreground · hsl(120 40% 8%) — text ON primary</summary>
@@ -93,6 +107,12 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>Border width, in px, of a card/button outline.</summary>
         public const int BorderWidth = 1;
+        /// <summary>
+        /// Border width of a *selected* row's outline. Thicker than the ordinary
+        /// one because it is the whole of the state: with the fill left alone (see
+        /// UIF.ClickableRow) a 1px edge is doing a job a full-row tint used to do.
+        /// </summary>
+        public const int BorderWidthSelected = 2;
 
         // ── Type scale ──────────────────────────────────────────────────────
         // text-xs / text-sm / text-base / text-lg / text-xl from the site.

@@ -41,6 +41,11 @@ namespace GeneKerman.UI.Gui
         private int lastUnread = -1;
         private int lastGiftVersion = -1;
 
+        // Second click armed on "Clear read". Panel-local and dropped on every close,
+        // so a confirm left standing cannot be pressed by someone reopening the feed
+        // for something else.
+        private bool clearConfirm;
+
         // Blueprint previews downloaded for gift offers, keyed by import_id. Owned
         // here: destroyed on hide and on scene change, with the viewer closed first
         // because it only borrows them.
@@ -89,20 +94,10 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
-            // Mark all read sits above the list rather than under it (where the classic
-            // window puts it): the feed scrolls, and a button below a scroll view is one
+            // The bulk actions sit above the list rather than under it (where the classic
+            // window puts them): the feed scrolls, and a button below a scroll view is one
             // the player has to reach the bottom of the feed to press.
-            int unread = Unread(feed);
-            if (unread > 0)
-            {
-                var bar = UIF.Box(col, "Bulk").Row(Theme.Space2).H(26);
-                UIF.Muted(bar, unread + " unread");
-                UIF.Grow(bar);
-                UIF.Button(bar, "Mark all read",
-                           () => main.RequestMarkAllNotificationsRead(BeginAction()),
-                           BtnStyle.Ghost, 26, Theme.Space2)
-                   .Interactable(!Busy).E.PrefW(112);
-            }
+            BuildBulkBar(col, main, feed);
 
             El list;
             UIF.ScrollView(col, out list, "feed").Flex(1f, 1f);
@@ -113,6 +108,57 @@ namespace GeneKerman.UI.Gui
                 if (n == null) continue;
                 BuildRow(list, n, main);
             }
+        }
+
+        /// <summary>
+        /// The row of whole-feed actions: mark everything read, and clear out the part
+        /// already read.
+        ///
+        /// Clearing gets the two-click confirm the per-row Dismiss deliberately does
+        /// not. That button's reasoning ("an accidental press costs nothing") is about
+        /// one line of a feed the server can send again; this one deletes every read
+        /// row at once, which is the only press in this panel a player could regret.
+        /// </summary>
+        private void BuildBulkBar(El col, ClientState main, IList<object> feed)
+        {
+            int unread = Unread(feed);
+            int read = feed.Count - unread;
+            if (unread == 0 && read == 0) return;
+
+            var bar = UIF.Box(col, "Bulk").Row(Theme.Space2).H(26);
+            UIF.Muted(bar, unread > 0 ? unread + " unread" : "All read");
+            UIF.Grow(bar);
+
+            if (unread > 0)
+            {
+                UIF.Button(bar, "Mark all read", () =>
+                {
+                    clearConfirm = false;
+                    main.RequestMarkAllNotificationsRead(BeginAction());
+                }, BtnStyle.Ghost, 26, Theme.Space2)
+                   .Interactable(!Busy).E.PrefW(112);
+            }
+
+            if (read == 0) { clearConfirm = false; return; }
+
+            if (!clearConfirm)
+            {
+                UIF.Button(bar, "Clear read", () => { clearConfirm = true; MarkDirty(); },
+                           BtnStyle.Ghost, 26, Theme.Space2)
+                   .Interactable(!Busy).E.PrefW(96);
+                return;
+            }
+
+            UIF.Button(bar, "Delete " + read, () =>
+            {
+                clearConfirm = false;
+                main.RequestDismissReadNotifications(BeginAction());
+            }, BtnStyle.Destructive, 26, Theme.Space2)
+               .Interactable(!Busy).E.PrefW(88);
+
+            UIF.Button(bar, "Cancel", () => { clearConfirm = false; MarkDirty(); },
+                       BtnStyle.Ghost, 26, Theme.Space2)
+               .Interactable(!Busy).E.PrefW(70);
         }
 
         // ── Gift offers ─────────────────────────────────────────────────────
@@ -392,6 +438,7 @@ namespace GeneKerman.UI.Gui
         {
             ClearStatus();
             requested = false;
+            clearConfirm = false;
             // Opening the feed is the natural "anything for me?" moment — don't make
             // an offer wait for the next timer tick to appear.
             GiftInbox.Refresh();

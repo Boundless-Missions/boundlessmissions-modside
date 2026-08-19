@@ -427,8 +427,23 @@ namespace GeneKerman.UI.Gui
             else
             {
                 // Slice margin: everything that must not stretch. That is the corner
-                // radius plus the shadow falloff, plus 1px of antialiasing headroom.
+                // radius plus the shadow falloff, plus 1px of antialiasing headroom
+                // — and at least the border *plus one px of fill*, which is the other
+                // thing that must not stretch.
+                //
+                // The +1 on the border is not spare room, it is the whole difference
+                // between an outline and a wash. uGUI stretches the 1px centre across
+                // the rect and samples it bilinearly, so the sample taken at the very
+                // start of the stretched region blends the centre texel with its
+                // neighbour — and with margin == BorderWidth that neighbour is the
+                // stroke. A 2px outline on a square (radius 0) shape therefore bled
+                // its colour a quarter of the way into the rect from every side,
+                // which on a selected list row read as a green-tinted fill rather
+                // than as the bare edge ClickableRow asks for. One px of fill between
+                // the stroke and the stretched centre is what the filter needs to
+                // find, so the bleed has nothing to carry inwards.
                 margin = r + spread + 1;
+                margin = Mathf.Max(margin, key.BorderWidth + 1);
                 // 1px of stretchable centre is all a 9-slice needs.
                 size = margin * 2 + 1;
             }

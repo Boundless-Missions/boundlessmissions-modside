@@ -332,6 +332,15 @@ namespace GeneKerman
         public const int MaxBugSummary = 200;
         public const int MaxBugDetails = 1500;
 
+        /// <summary>Floors, ours rather than the server's — that only insists on a
+        /// non-empty summary. A one-word report costs a maintainer a channel and a
+        /// round trip to ask what actually happened, so the bar is here. Public
+        /// because the Tools panel gates its Send button on exactly these numbers:
+        /// a second copy would drift, and the button would go back to promising a
+        /// send that the check below refuses.</summary>
+        public const int MinBugSummary = 5;
+        public const int MinBugDetails = 15;
+
         /// <summary>
         /// File a bug report against the mod. The server turns it into a private
         /// Discord ticket the reporter can be replied to in.
@@ -359,14 +368,20 @@ namespace GeneKerman
 
             summary = (summary ?? "").Trim();
             details = (details ?? "").Trim();
-            if (summary.Length < 5)
+            // Both messages name the number. "Summarise the bug in one line first"
+            // in front of a box that already has a line in it reads as a malfunction,
+            // not as a rule — the player has no way to guess that "test" is four
+            // characters short of being one.
+            if (summary.Length < MinBugSummary)
             {
-                onDone(false, "Summarise the bug in one line first.");
+                onDone(false, "Summarise the bug in one line first — at least " +
+                              MinBugSummary + " characters.");
                 yield break;
             }
-            if (details.Length < 15)
+            if (details.Length < MinBugDetails)
             {
-                onDone(false, "Add a few words on what you did and what happened.");
+                onDone(false, "Add a few words on what you did and what happened — at least " +
+                              MinBugDetails + " characters.");
                 yield break;
             }
             if (summary.Length > MaxBugSummary) summary = summary.Substring(0, MaxBugSummary);
@@ -389,10 +404,42 @@ namespace GeneKerman
                     // than folded into "could not send".
                     message = "You've filed several reports already — try again later.";
                 }
-                else message = "Could not reach the server to file the report.";
+                else message = BugFailureMessage(status, resp);
             });
 
             onDone(ok, message ?? "Could not file the report.");
+        }
+
+        /// <summary>
+        /// Why the report didn't land, in the player's words plus the one number a
+        /// maintainer needs.
+        ///
+        /// This is the channel bug reports arrive through, so a bug in *it* is
+        /// reported by nobody: the player sees one flat sentence and gives up. A
+        /// transport failure (nothing reached the server) and a refusal by the server
+        /// are opposite problems with opposite fixes, and only the status separates
+        /// them — so it is shown rather than logged where the player will not look.
+        /// </summary>
+        private static string BugFailureMessage(long status, string body)
+        {
+            if (status == 0)
+                return "Couldn't reach the server — check the address in Settings and " +
+                       "that you're online.";
+
+            // FastAPI puts the reason in `detail`, but only as a string when it was
+            // raised deliberately; a validation failure makes it a list of objects,
+            // which is noise to a player and would ToString() as a type name anyway.
+            string detail = null;
+            if (!string.IsNullOrEmpty(body))
+            {
+                var d = MiniJSON.DeserializeDict(body);
+                if (d != null && d.TryGetValue("detail", out object v) && v is string s)
+                    detail = s;
+                if (string.IsNullOrEmpty(detail))
+                    detail = MiniJSON.GetString(d, "message", null);
+            }
+            return "The server refused the report (HTTP " + status + ")" +
+                   (string.IsNullOrEmpty(detail) ? "." : " — " + detail);
         }
 
         // ── Marketplace ─────────────────────────────────────────────────────

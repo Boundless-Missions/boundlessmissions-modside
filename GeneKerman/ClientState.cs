@@ -236,6 +236,9 @@ namespace GeneKerman
         internal void RequestMarkAllNotificationsRead(Action<bool, string> onDone)
             => DoMarkAllNotificationsRead(onDone);
 
+        internal void RequestDismissReadNotifications(Action<bool, string> onDone)
+            => DoDismissReadNotifications(onDone);
+
         private Dictionary<string, object> FindNotification(string id)
         {
             if (notifications == null || string.IsNullOrEmpty(id)) return null;
@@ -406,6 +409,68 @@ namespace GeneKerman
                 }
                 onDone?.Invoke(ok, ok ? "Notification dismissed." : "Could not dismiss it.");
             }));
+        }
+
+        /// <summary>
+        /// Clear the read half of the feed. The two kinds have to be handled apart:
+        /// local notifications have no server record and are dropped here, while the
+        /// server-backed ones are only dropped once the delete lands — so a failed
+        /// call leaves the list exactly as the server still has it rather than hiding
+        /// rows that come straight back on the next refresh.
+        ///
+        /// A feed whose read rows are all local skips the call altogether; there is
+        /// nothing on the server to delete, and a request that can only 200 on an
+        /// empty query is one the player waits through for no reason.
+        /// </summary>
+        private void DoDismissReadNotifications(Action<bool, string> onDone = null)
+        {
+            int serverBacked = 0;
+            if (notifications != null)
+                foreach (var o in notifications)
+                {
+                    var d = o as Dictionary<string, object>;
+                    if (d != null && MiniJSON.GetBool(d, "read") &&
+                        !IsLocalNotif(MiniJSON.GetString(d, "id")))
+                        serverBacked++;
+                }
+
+            if (serverBacked == 0)
+            {
+                int dropped = DropReadNotifications(true);
+                if (dropped == 0) { onDone?.Invoke(false, "Nothing read to clear."); return; }
+                SetStatus("(Ok) Cleared " + dropped + " read notification" + (dropped == 1 ? "." : "s."));
+                onDone?.Invoke(true, "Cleared read notifications.");
+                return;
+            }
+
+            GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.DismissReadNotifications((ok, resp, status) =>
+            {
+                if (ok)
+                {
+                    int dropped = DropReadNotifications(true);
+                    SetStatus("(Ok) Cleared " + dropped + " read notification" + (dropped == 1 ? "." : "s."));
+                }
+                onDone?.Invoke(ok, ok ? "Cleared read notifications." : "Could not clear them.");
+            }));
+        }
+
+        /// <summary>Remove every read notification from the feed (and, when
+        /// <paramref name="includeLocal"/>, from the local backing list too, or a
+        /// refresh would merge them straight back in). Returns how many went.</summary>
+        private int DropReadNotifications(bool includeLocal)
+        {
+            Predicate<object> isRead = o =>
+            {
+                var d = o as Dictionary<string, object>;
+                if (d == null || !MiniJSON.GetBool(d, "read")) return false;
+                return includeLocal || !IsLocalNotif(MiniJSON.GetString(d, "id"));
+            };
+
+            int dropped = 0;
+            if (includeLocal) localNotifications.RemoveAll(isRead);
+            if (notifications != null) dropped = notifications.RemoveAll(isRead);
+            RecountUnread();
+            return dropped;
         }
 
         /// <summary>Recompute the unread badge from the currently loaded notifications.</summary>

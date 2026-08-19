@@ -44,6 +44,11 @@ namespace GeneKerman.Web
             Allow(@"^/api/v1/user/notifications$", "GET"),
             Allow(@"^/api/v1/user/notifications/mark_read$", "POST"),
             Allow(@"^/api/v1/user/notifications/[A-Za-z0-9_-]{1,64}/mark_read$", "POST"),
+            // Clearing the read half of the feed. Listed in its own right even though
+            // the id rule below already spans it — a bulk delete reaching the page
+            // because "read" happens to look like a notification id would be an
+            // accident, and this list is opted into on purpose or not at all.
+            Allow(@"^/api/v1/user/notifications/read$", "DELETE"),
             Allow(@"^/api/v1/user/notifications/[A-Za-z0-9_-]{1,64}$", "DELETE"),
 
             // ── Phase 2: Missions + Contracts, read-only ────────────────────

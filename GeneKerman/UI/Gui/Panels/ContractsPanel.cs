@@ -286,7 +286,7 @@ namespace GeneKerman.UI.Gui
                 bulkCancelConfirm = false;
                 ClearStatus();
                 MarkDirty();
-            }, selecting ? BtnStyle.Secondary : BtnStyle.Ghost, 24, Theme.Space2)
+            }, selecting ? BtnStyle.Selected : BtnStyle.Ghost, 24, Theme.Space2)
                .E.PrefW(62);
         }
 
@@ -304,8 +304,9 @@ namespace GeneKerman.UI.Gui
                 openId = null;
                 ClearStatus();
                 MarkDirty();
-            }, showTrash == trash ? BtnStyle.Secondary : BtnStyle.Ghost, 24, Theme.Space2);
+            }, showTrash == trash ? BtnStyle.Selected : BtnStyle.Ghost, 24, Theme.Space2);
             b.Label.Size(Theme.FontXs);
+            if (showTrash != trash) b.Label.Color(Theme.MutedForeground);
             b.E.PrefW(72);
         }
 
@@ -603,12 +604,18 @@ namespace GeneKerman.UI.Gui
 
         private void FilterButton(El parent, string label, int mode)
         {
+            bool active = filterMode == mode;
             var b = UIF.Button(parent, label, () =>
             {
                 filterMode = mode;
                 MarkDirty();
-            }, filterMode == mode ? BtnStyle.Secondary : BtnStyle.Ghost, 24, Theme.Space2);
+            }, active ? BtnStyle.Selected : BtnStyle.Ghost, 24, Theme.Space2);
             b.Label.Size(Theme.FontXs);
+            // Two halves of one state: the chosen chip gets the light ground, the
+            // others drop their caption to --muted-foreground. The fill alone is what
+            // it used to rest on, and at chip size that is a small patch of grey to
+            // find in a row of four.
+            if (!active) b.Label.Color(Theme.MutedForeground);
             b.E.PrefW(64);
         }
 

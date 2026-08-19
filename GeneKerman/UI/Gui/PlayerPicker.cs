@@ -314,9 +314,9 @@ namespace GeneKerman.UI.Gui
             Avatar(row, p);
 
             var text = UIF.Box(row, "Text").Column(0).PrefW(0).Flex(1f);
-            // The name goes accent-green on the chosen row. The row's tint and edge
-            // bar are behind the avatar and easy to read past when the eye is on the
-            // names, which is where it is while picking one.
+            // The name goes accent-green on the chosen row. The row's outline is at
+            // its edges and easy to read past when the eye is on the names, which is
+            // where it is while picking one.
             UIF.Label(text, p.Name, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null)
                .Bold(selected).Ellipsis();
             if (!string.IsNullOrEmpty(p.Corp)) UIF.Muted(text, p.Corp).Ellipsis();

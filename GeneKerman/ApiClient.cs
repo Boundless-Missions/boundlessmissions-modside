@@ -705,24 +705,35 @@ namespace GeneKerman
         }
 
         /// Post-response gate hook. Handles the server-enforced version block
-        /// (426 update_required), the dead-session drop (401) and the device-binding
-        /// block (403 device_unverified). Returns true if the response was a gate.
+        /// (426 update_required), the dead-session drop (401), the device-binding
+        /// block and the account suspension (both 403, told apart by `code`).
+        /// Returns true if the response was a gate.
         private bool HandleDeviceGate(long status, string body)
         {
             if (HandleVersionGate(status, body)) return true;
             if (HandleSessionGate(status)) return true;
             if (status != 403 || string.IsNullOrEmpty(body)) return false;
             var data = MiniJSON.DeserializeDict(body);
-            // FastAPI wraps the payload under "detail".
+            // FastAPI wraps the payload under "detail". Two different gates answer 403,
+            // so the code is read once and dispatched on — a 403 with neither code is
+            // some other refusal and is left to the caller.
             object detailObj;
-            if (data != null && data.TryGetValue("detail", out detailObj)
-                && detailObj is Dictionary<string, object> detail
-                && MiniJSON.GetString(detail, "code") == "device_unverified")
+            if (data == null || !data.TryGetValue("detail", out detailObj)) return false;
+            var detail = detailObj as Dictionary<string, object>;
+            if (detail == null) return false;
+
+            switch (MiniJSON.GetString(detail, "code"))
             {
-                string challengeId = MiniJSON.GetString(detail, "challenge_id");
-                if (GeneKermanMod.Instance != null)
-                    GeneKermanMod.Instance.OnDeviceGate(challengeId);
-                return true;
+                case "device_unverified":
+                    if (GeneKermanMod.Instance != null)
+                        GeneKermanMod.Instance.OnDeviceGate(MiniJSON.GetString(detail, "challenge_id"));
+                    return true;
+                case "suspended":
+                    if (GeneKermanMod.Instance != null)
+                        GeneKermanMod.Instance.OnSuspended(
+                            MiniJSON.GetString(detail, "reason"),
+                            MiniJSON.GetDouble(detail, "until", 0));
+                    return true;
             }
             return false;
         }
@@ -1253,7 +1264,8 @@ namespace GeneKerman
                 callback?.Invoke(ok, req.downloadHandler?.text, req.responseCode);
                 HandleDeviceGate(req.responseCode, req.downloadHandler?.text);
                 if (!ok)
-                    Debug.LogWarning($"[GeneKerman] Bug report failed: {req.error} ({req.responseCode})");
+                    Debug.LogWarning($"[GeneKerman] Bug report failed: {req.error} " +
+                                     $"({req.responseCode}) body: {req.downloadHandler?.text}");
             }
         }
 
@@ -1319,6 +1331,28 @@ namespace GeneKerman
                     callback(true, MiniJSON.DeserializeDict(resp), null);
                 else
                     callback(false, null, "version check failed");
+            });
+        }
+
+        /// <summary>
+        /// Ask whether this account is still suspended. The one endpoint that answers
+        /// a suspended client normally instead of 403 — everything else it can reach
+        /// is a wall, so without this the gate's "check again" button would have to
+        /// provoke a refusal and read the refusal's body, and a suspension that had
+        /// just *ended* would give it nothing at all to read.
+        ///
+        /// Callback data is null on a failed request; callers keep the gate up rather
+        /// than clearing it on a check that never arrived.
+        /// </summary>
+        public IEnumerator CheckSuspension(ApiCallback<Dictionary<string, object>> callback)
+        {
+            if (!IsLinked) { callback(false, null, "not linked"); yield break; }
+            yield return Get("/api/v1/auth/suspension", (ok, resp, status) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                    callback(true, MiniJSON.DeserializeDict(resp), null);
+                else
+                    callback(false, null, "suspension check failed");
             });
         }
 
@@ -1435,6 +1469,14 @@ namespace GeneKerman
         public IEnumerator DismissNotification(string notifId, ApiCallback callback)
         {
             yield return Delete($"/api/v1/user/notifications/{notifId}", callback);
+        }
+
+        /// <summary>Delete every notification the server has marked read, in one call.
+        /// Note the path is a sibling of the per-id dismiss above, not an id — the
+        /// server declares this route first so "read" cannot be taken for one.</summary>
+        public IEnumerator DismissReadNotifications(ApiCallback callback)
+        {
+            yield return Delete("/api/v1/user/notifications/read", callback);
         }
 
         public IEnumerator GetCorps(ApiCallback<Dictionary<string, object>> callback)

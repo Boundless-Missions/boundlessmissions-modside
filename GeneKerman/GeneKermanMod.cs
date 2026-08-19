@@ -81,6 +81,7 @@ namespace GeneKerman
         private UI.DeviceVerifyWindow deviceVerifyWindow;
 
         private UI.UpdateRequiredWindow updateWindow;
+        private UI.SuspendedWindow suspendedWindow;
 
         // Loopback web bridge, live only while the browser UI is in use (enableWebUi
         // in settings.cfg). Binds 127.0.0.1 on an ephemeral port. See Web/LocalServer.cs.
@@ -120,6 +121,16 @@ namespace GeneKerman
         /// launch re-shows the prompt and the nag cannot be permanently silenced.
         /// </summary>
         public bool UpdateAcknowledged { get; private set; }
+
+        // Suspension gate: the account is temporarily blocked from the services (the
+        // server answers every gated request 403 `suspended`). Unlike the update gate
+        // there is nothing the player can do about it here, so there is no
+        // "continue anyway" — only a re-check and the expiry.
+        public bool Suspended { get; private set; }
+        public string SuspensionReason { get; private set; } = "";
+        /// <summary>Unix seconds (server clock) when the suspension lifts; 0 if the
+        /// server didn't say, in which case only a re-check can clear it.</summary>
+        public double SuspendedUntil { get; private set; }
 
         /// <summary>Dismiss the update gate for this session and open the limited UI.</summary>
         public void AcknowledgeUpdate()
@@ -190,6 +201,7 @@ namespace GeneKerman
             checkpointPrompt = new UI.CheckpointPrompt();
             deviceVerifyWindow = new UI.DeviceVerifyWindow();
             updateWindow = new UI.UpdateRequiredWindow();
+            suspendedWindow = new UI.SuspendedWindow();
             webUiWindow = new UI.WebUiWindow();
             checkpointDetector = new CheckpointDetector(OnCheckpoint)
             {
@@ -390,6 +402,24 @@ namespace GeneKerman
                 OnConsentLapsed();
             lastConsentOk = consentOk;
             if (!consentOk) return;
+
+            // Suspension gate. Everything below this line talks to the server and would
+            // come back 403, so it all stays off. Note what is deliberately *above* it
+            // and still runs: rescue removals, the roster sweep and life-support
+            // immunity — a suspension blocks the services, it does not reach into the
+            // player's save to break the things already owed to them.
+            if (Suspended)
+            {
+                if (notifSocket.IsConnected)
+                    notifSocket.Disconnect();
+                // Free ourselves when the clock says so, rather than waiting for a
+                // restart or a button press. If the server disagrees — clock skew, or a
+                // fresh suspension — the next request comes straight back 403 and the
+                // gate returns, which makes this a retry rather than a decision.
+                if (SuspendedUntil > 0 && UI.SuspendedWindow.SecondsLeft(SuspendedUntil) <= 0)
+                    ClearSuspension();
+                return;
+            }
 
             // Watch for flight milestones worth a hero shot. Independent of the
             // notifications toggle; gated by its own setting and paused while a prompt
@@ -769,6 +799,16 @@ namespace GeneKerman
                 return;
             }
 
+            // Suspended: the notice is the only thing the button has to offer, and the
+            // only live control on it is the re-check. A second click closes it, like
+            // every other window this button toggles.
+            if (Suspended)
+            {
+                if (suspendedWindow.Visible) suspendedWindow.Hide();
+                else suspendedWindow.Show(SuspensionReason, SuspendedUntil);
+                return;
+            }
+
             // Acknowledged update gate: the sidebar is the only thing on offer, and it
             // comes up in limited mode. Linking is a server call that would just 426, so
             // an unlinked client goes here too rather than to the link window.
@@ -842,6 +882,15 @@ namespace GeneKerman
                 {
                     if (ShowConsentWindow)
                         consentWindow.Draw();
+                }
+                // Suspended account. Below the three legal gates above (an opt-out or a
+                // lapsed consent is the player's own decision and outranks ours) and
+                // above everything else: every server-backed surface is refused for the
+                // duration, and drawing them would present a mod that looks broken
+                // instead of one that is telling them what happened.
+                else if (Suspended)
+                {
+                    suspendedWindow.Draw();
                 }
                 // Acknowledged update gate. The branch is empty and must stay: limited
                 // mode is the sidebar's now (it narrows itself to the panels that work
@@ -1424,6 +1473,102 @@ namespace GeneKerman
             ShowLinkWindow = false;
             updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
             Debug.Log($"[GeneKerman] Update required (server-enforced): {ModVersion.Current} → {LatestVersion}");
+        }
+
+        /// <summary>
+        /// Called by ApiClient when any gated request is refused with 403 `suspended`.
+        /// Raises the notice and takes the mod off the air for the duration.
+        ///
+        /// The token is deliberately left alone (the server keeps accepting it — see
+        /// the bot's admin_user_suspend): unlinking here would drop the player onto
+        /// the link screen, where the only thing on offer is to link again, which
+        /// would work and change nothing.
+        /// </summary>
+        public void OnSuspended(string reason, double untilUnix)
+        {
+            // Re-raised on every refused request while the gate is up (a burst of
+            // in-flight calls all come back 403 together), so refresh the details and
+            // return rather than re-showing the window over itself.
+            SuspensionReason = reason ?? "";
+            SuspendedUntil = untilUnix;
+            if (Suspended)
+            {
+                suspendedWindow.Show(SuspensionReason, SuspendedUntil);
+                return;
+            }
+
+            Suspended = true;
+            notifSocket.Disconnect();
+            sidebar?.SetOpen(false);
+            ShowLinkWindow = false;
+            suspendedWindow.Show(SuspensionReason, SuspendedUntil);
+            Debug.Log("[GeneKerman] Account suspended until " + SuspendedUntil + ": " + SuspensionReason);
+        }
+
+        /// <summary>
+        /// The suspension is over (expired, or lifted early and confirmed by a
+        /// re-check). Put the mod back on the air and refill the panels, which hold
+        /// nothing — no fetch ran while the gate was up.
+        /// </summary>
+        public void ClearSuspension()
+        {
+            if (!Suspended) return;
+            Suspended = false;
+            SuspensionReason = "";
+            SuspendedUntil = 0;
+            suspendedWindow.Hide();
+            Debug.Log("[GeneKerman] Suspension cleared — resuming.");
+
+            if (Api.IsLinked && Api.DataGatheringEnabled && Consent.Accepted)
+            {
+                clientState.RefreshAll();
+                if (Api.NotificationsEnabled)
+                    notifSocket.Connect();
+            }
+            else if (!Api.IsLinked)
+            {
+                ShowLinkWindow = true;
+            }
+        }
+
+        /// <summary>
+        /// Ask the server whether the suspension still stands — the notice's
+        /// "Check again" button. Reports back one sentence for it to show.
+        ///
+        /// A check that never reached the server leaves the gate up: "we could not
+        /// ask" is not "you are free to go", and clearing on a failed request would
+        /// hand the player an interface whose every button 403s.
+        /// </summary>
+        public void RecheckSuspension(System.Action<string> onDone)
+        {
+            StartCoroutine(RecheckSuspensionRoutine(onDone));
+        }
+
+        private System.Collections.IEnumerator RecheckSuspensionRoutine(System.Action<string> onDone)
+        {
+            yield return Api.CheckSuspension((ok, data, err) =>
+            {
+                if (!ok || data == null)
+                {
+                    if (onDone != null) onDone("Couldn't reach the server — try again in a moment.");
+                    return;
+                }
+                if (!MiniJSON.GetBool(data, "suspended", false))
+                {
+                    ClearSuspension();
+                    if (onDone != null) onDone("Your access is back.");
+                    return;
+                }
+                // Still suspended, but the reason or expiry may have been changed.
+                SuspensionReason = MiniJSON.GetString(data, "reason");
+                SuspendedUntil = MiniJSON.GetDouble(data, "until", SuspendedUntil);
+                suspendedWindow.Show(SuspensionReason, SuspendedUntil);
+                string left = UI.SuspendedWindow.Remaining(SuspendedUntil);
+                if (onDone != null)
+                    onDone(string.IsNullOrEmpty(left)
+                        ? "Still suspended."
+                        : "Still suspended — " + left + " to go.");
+            });
         }
 
         /// Called by ApiClient when a request comes back 401 — this PC's session is

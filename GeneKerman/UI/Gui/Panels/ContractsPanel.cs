@@ -1152,8 +1152,9 @@ namespace GeneKerman.UI.Gui
                     if (mType == "rescue" && !isOutgoing) BuildRescueWreck(bar, main, c, cid);
 
                     // Submission is inherently an in-game act — it needs live
-                    // telemetry and a screenshot with the HUD hidden — so this
-                    // raises the IMGUI SubmitWindow rather than reimplementing it.
+                    // telemetry and a render of the craft in front of the player — so
+                    // this raises the submit window (UI/Gui/Panels/SubmitPanel.cs,
+                    // draggable, on this same canvas) rather than reimplementing it.
                     UIF.Button(bar, "Submit in KSP", () =>
                     {
                         var done = BeginAction();
@@ -1337,7 +1338,7 @@ namespace GeneKerman.UI.Gui
                                "target; finding it is the mission.").Body();
                 // BeginAction, not Done: the contract stays open so the freeze status
                 // below replaces the button in place.
-                UIF.Button(box, "🛟 Spawn stranded vessel",
+                UIF.Button(box, "Spawn stranded vessel",
                            () => main.RequestSpawnRescueWreck(c, BeginAction()),
                            BtnStyle.Primary, 28).Interactable(!Busy);
                 return;
@@ -1351,8 +1352,8 @@ namespace GeneKerman.UI.Gui
             var freeze = RescueImmunityGuardian.GetRecord(cid);
             if (freeze == null) return;
 
-            UIF.Muted(box, "🧊 " + freeze.Crew.Count + " kerbal(s) in emergency freeze. " +
-                           "They thaw when you get close.").Body();
+            UIF.Muted(box, freeze.Crew.Count + " kerbal(s) in emergency freeze. " +
+                           "They defreeze when you get close.").Body();
 
             // Only worth saying when the two installs actually differ: that is the case
             // where the wreck's own supplies are useless here.
@@ -1360,10 +1361,10 @@ namespace GeneKerman.UI.Gui
                 UIF.Label(box,
                     "Built for " + LsFreeze.DisplayNameFor(freeze.BuiltWithLs) + "; you run " +
                     LsFreeze.DisplayNameFor(LsFreeze.LocalLsKey) + ". Emergency rations were " +
-                    "stowed aboard so the crew survive the thaw.",
+                    "stowed aboard so the crew survive the defreeze.",
                     Theme.FontXs, Theme.Status("warning")).Body();
 
-            UIF.Button(box, "🧊 Thaw the crew now", () =>
+            UIF.Button(box, "Defreeze the crew now", () =>
             {
                 RescueImmunityGuardian.ReviveContract(cid);
                 MarkDirty();

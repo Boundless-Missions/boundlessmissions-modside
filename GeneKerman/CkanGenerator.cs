@@ -589,7 +589,7 @@ namespace GeneKerman
             if (missing.Count == 0)
             {
                 string dlcOnly = string.Join(" and ", missingDlc.Select(m => m.name).ToArray());
-                Post($"⚠ '{context}' needs the {dlcOnly} expansion",
+                Post($"'{context}' needs the {dlcOnly} expansion",
                      $"This craft uses parts from {dlcOnly}, which you don't have. "
                      + "It is a paid expansion, so CKAN can't install it — the craft will not "
                      + "load without it.");
@@ -627,7 +627,7 @@ namespace GeneKerman
                     $" It also needs the {string.Join(" and ", missingDlc.Select(m => m.name).ToArray())} "
                     + "expansion, which is a paid add-on CKAN can't install for you.";
 
-                Post($"⚠ Missing {missing.Count + missingDlc.Count} requirement(s) for '{context}'",
+                Post($"Missing {missing.Count + missingDlc.Count} requirement(s) for '{context}'",
                      $"Needs: {list}. A CKAN installer was saved to "
                      + $"GeneKerman_MissingMods/{Path.GetFileName(outPath)}. "
                      + "Open it in CKAN (File ▸ Install from .ckan file)."

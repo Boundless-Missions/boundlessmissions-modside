@@ -20,7 +20,7 @@ if [ "${1:-}" = "--release" ]; then RELEASE=1; fi
 # DLL hash differs, so the server version gate would reject it anyway.
 #
 # >>> Keep this at 'production' for anything you ship. <<<
-CHANNEL="${GK_CHANNEL:-dev}"
+CHANNEL="${GK_CHANNEL:-production}"
 
 # A packaged release with the debug panel in it is almost certainly a mistake — refuse.
 if [ "$RELEASE" = "1" ] && [ "$CHANNEL" != "production" ]; then

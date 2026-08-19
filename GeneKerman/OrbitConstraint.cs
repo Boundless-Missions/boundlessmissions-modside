@@ -63,7 +63,7 @@ namespace GeneKerman
             {
                 var names = new List<string>();
                 foreach (var r in Requirements) names.Add(Label(r));
-                violations.Add($"❌ Craft must be in orbit ({string.Join(", ", names.ToArray())}); " +
+                violations.Add($"Craft must be in orbit ({string.Join(", ", names.ToArray())}); " +
                                $"it is currently {(sit.Length == 0 ? "not orbiting" : sit)}.");
                 return violations;
             }
@@ -72,7 +72,7 @@ namespace GeneKerman
             {
                 string m = CheckOne(req, snap.inclination, snap.eccentricity,
                                     snap.period, snap.rotationPeriod);
-                if (m != null) violations.Add("❌ " + m);
+                if (m != null) violations.Add(m);
             }
             return violations;
         }

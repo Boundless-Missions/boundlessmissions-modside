@@ -383,10 +383,10 @@ namespace GeneKerman
                 }
 
                 string title = swaps.Count == 0
-                    ? $"⚠ {what} has {missing.Count} part(s) you don't have"
+                    ? $"{what} has {missing.Count} part(s) you don't have"
                     : Applied
                         ? $"Swapped {swaps.Count} part(s) to load {what}"
-                        : $"⚠ {what} needs {swaps.Count} part(s) you have under another name";
+                        : $"{what} needs {swaps.Count} part(s) you have under another name";
                 string body = sb.ToString().TrimEnd();
 
                 Debug.Log($"[GeneKerman] PartAliases: {title} — {body}");

@@ -33,6 +33,13 @@
  *     nothing happens before opt-in.
  *  5. The expand runs off Time.unscaledDeltaTime in Tick(), not a coroutine, so
  *     a scene load mid-animation cannot strand the panel half-open.
+ *
+ * The canvas also carries the draggable windows (UI/Gui/FloatWindow.cs), for the
+ * flows that are read *against* the scene behind them rather than instead of it —
+ * today, submitting a contract. They open and close independently of the panel,
+ * and living here is what gives them all five of the above for nothing: the same
+ * render gate, the same input lock (PointerOverSidebar asks every open window),
+ * the same font and sprite recovery, and the same release-everything teardown.
  */
 
 using System.Collections.Generic;
@@ -100,6 +107,7 @@ namespace GeneKerman.UI.Gui
         private RectTransform panelRect;
         private El contentHost;
         private readonly ImageViewer viewer = new ImageViewer();
+        private readonly ToastHost toasts = new ToastHost();
 
         private bool built;
         private bool open;
@@ -134,6 +142,15 @@ namespace GeneKerman.UI.Gui
         private readonly List<SidebarPanel> panels = new List<SidebarPanel>();
         private SidebarPanel active;
         private El tabStrip;
+
+        /// <summary>
+        /// Where the draggable windows live (see FloatWindow). A plain stretched
+        /// element with no Image of its own, so it is invisible to raycasts and a
+        /// click anywhere it does not have a window still reaches the panel or the
+        /// game underneath.
+        /// </summary>
+        private El windowLayer;
+        private readonly List<FloatWindow> windows = new List<FloatWindow>();
 
         public bool IsOpen => open;
 
@@ -213,10 +230,19 @@ namespace GeneKerman.UI.Gui
 
             BuildPanel(root);
 
+            // Above the panel, below the lightbox and the toasts: a window is a
+            // second surface the player arranges themselves, but a full-screen
+            // image and a time-critical notice both outrank it.
+            windowLayer = UIF.Root("Windows", root.Rt).Stretch();
+
             // Last child of the root, so it paints over the panel — a
             // ScreenSpaceOverlay canvas draws in hierarchy order, and there is no
             // second Canvas here to give it a sortingOrder of its own.
             viewer.Build(root);
+
+            // Later still: a toast has to clear the viewer's full-screen backdrop,
+            // which would otherwise cover both its pixels and its click.
+            toasts.Build(root, this);
         }
 
         private void BuildPanel(El parent)
@@ -281,6 +307,32 @@ namespace GeneKerman.UI.Gui
 
             if (active == null) Select(panel);
         }
+
+        /// <summary>
+        /// Mount a panel as a draggable window instead of as a tab. Built hidden;
+        /// the panel opens it (SubmitPanel.Open) when something asks for it.
+        /// </summary>
+        public FloatWindow AddWindow(WindowPanel panel, float width, float height, Vector2 defaultOffset)
+        {
+            if (!built || panel == null) return null;
+
+            var window = new FloatWindow(panel, width, height, defaultOffset);
+            window.Build(windowLayer, this);
+            windows.Add(window);
+            return window;
+        }
+
+        /// <summary>The open window nearest the front, or null. Its z-order is its
+        /// sibling index, which BringToFront maintains.</summary>
+        private FloatWindow TopWindow()
+        {
+            FloatWindow top = null;
+            foreach (var w in windows)
+                if (w.IsOpen && (top == null || w.Depth > top.Depth)) top = w;
+            return top;
+        }
+
+        private bool AnyWindowOpen => TopWindow() != null;
 
         private void RebuildTabStrip()
         {
@@ -384,6 +436,30 @@ namespace GeneKerman.UI.Gui
             }
         }
 
+        /// <summary>Select the notification feed. The counterpart of ShowContract,
+        /// and routed the same way — through Select, so the panel gets its
+        /// OnShown.</summary>
+        internal void ShowNotifications()
+        {
+            foreach (var p in panels)
+            {
+                var feed = p as NotificationsPanel;
+                if (feed == null) continue;
+
+                Select(feed);
+                return;
+            }
+        }
+
+        /// <summary>
+        /// Raise a transient top-right toast. The only entry point — GeneKermanMod
+        /// routes every notice here, so "what may appear on screen" stays one
+        /// decision (this canvas's render gate) rather than two.
+        /// </summary>
+        public void Toast(string title, string message, string contractId = null,
+                          string localAction = null)
+            => toasts.Show(title, message, contractId, localAction);
+
         internal bool ImagesOpen => viewer.IsOpen;
 
         // ── Frame ───────────────────────────────────────────────────────────
@@ -405,6 +481,9 @@ namespace GeneKerman.UI.Gui
                     // an update gate — are all reasons a full-screen overlay
                     // should not be waiting behind them.
                     viewer.Close();
+                    // Same for the stack: a toast that spent the gate frozen
+                    // mid-fade would flicker back on screen when it lifted.
+                    toasts.Clear();
                 }
             }
             if (!render) return;
@@ -413,11 +492,16 @@ namespace GeneKerman.UI.Gui
             UpdateAssets();
             AnimateExpand();
             viewer.Tick();
+            toasts.Tick();
             UpdateInputLock();
             UpdateEscape();
 
             if (open && openAmount > 0.99f)
                 active?.Tick();
+
+            // Windows tick whether or not the sidebar itself is open: a submission in
+            // progress is not a tab, and closing the panel must not freeze it.
+            foreach (var w in windows) w.Tick();
         }
 
         /// <summary>
@@ -483,16 +567,24 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         private void UpdateEscape()
         {
-            if (open != pauseLockHeld)
+            // A window counts as "ours on screen" for exactly the same reason the
+            // panel does: Escape has to close it without also pausing the game behind
+            // it, and the lock is what makes the key mean one thing at a time.
+            bool ours = open || AnyWindowOpen;
+            if (ours != pauseLockHeld)
             {
-                if (open) InputLockManager.SetControlLock(ControlTypes.PAUSE, PauseLockId);
+                if (ours) InputLockManager.SetControlLock(ControlTypes.PAUSE, PauseLockId);
                 else InputLockManager.RemoveControlLock(PauseLockId);
-                pauseLockHeld = open;
+                pauseLockHeld = ours;
             }
 
-            if (!open || typing || !Input.GetKeyDown(KeyCode.Escape)) return;
+            if (!ours || typing || !Input.GetKeyDown(KeyCode.Escape)) return;
 
+            // Topmost first: the lightbox covers everything, then the frontmost
+            // window, and the panel last — which is the order they are stacked in.
+            var top = TopWindow();
             if (viewer.IsOpen) viewer.Close();
+            else if (top != null) top.Hide();
             else SetOpen(false);
         }
 
@@ -728,6 +820,17 @@ namespace GeneKerman.UI.Gui
             // pan-drag would rotate the camera behind the overlay.
             if (viewer.IsOpen) return true;
 
+            // A window is placed by the player and is open independently of the
+            // panel, so it is asked before the closed check below for the same reason
+            // the toasts are: dragging one must not also swing the flight camera.
+            foreach (var w in windows)
+                if (w.PointerOver()) return true;
+
+            // Toasts live in the top-right corner whether or not the panel is open,
+            // so this has to be asked before the closed check below — otherwise a
+            // click meant for a toast also swings the flight camera.
+            if (toasts.PointerOverToast()) return true;
+
             // Closed is closed. RectangleContainsScreenPoint answers for a rect whether
             // or not anything is drawn, and a scaled-to-nothing panel still has one —
             // so without this the mod would take a control lock over a sliver at the
@@ -795,6 +898,7 @@ namespace GeneKerman.UI.Gui
             // The lock belongs to the scene we are leaving. KSP clears locks across
             // some transitions and not others; dropping ours makes that irrelevant.
             ReleaseLock();
+            foreach (var w in windows) w.OnSceneChange();
             foreach (var p in panels)
             {
                 p.OnSceneChanged();
@@ -808,6 +912,7 @@ namespace GeneKerman.UI.Gui
             // took it, and a leaked one leaves the player unable to fly.
             ReleaseLock();
             viewer.Close();
+            toasts.Clear();
 
             // SetVisible(false) first, so a panel holding textures gets its OnHidden
             // and hands them back — Detach alone would strand them until KSP next
@@ -819,6 +924,9 @@ namespace GeneKerman.UI.Gui
             }
             panels.Clear();
             active = null;
+
+            foreach (var w in windows) w.Destroy();
+            windows.Clear();
 
             Sprites.ClearBindings();
 

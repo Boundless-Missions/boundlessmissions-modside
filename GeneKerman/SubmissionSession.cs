@@ -1,105 +1,129 @@
 /*
- * UI/SubmitWindow.cs – Contract submission flow with classification enforcement.
+ * SubmissionSession.cs – The contract submission flow, with no UI attached.
+ *
+ * This is the whole of the old UI/SubmitWindow.cs except its drawing: the
+ * classification rules a mission is submitted under, the scene/vessel validation
+ * that enforces them client-side, the render capture and its freshness check, and
+ * the coroutine that packs and uploads everything. The IMGUI window that used to
+ * own all of it has been replaced by the draggable uGUI window in
+ * UI/Gui/Panels/SubmitPanel.cs, and the split is the same one CraftDelivery and
+ * SubmissionPreview were pulled out for: state and rules here, pixels there.
  *
  * Mission types (AI-classified, cached on server):
  *   - "craft_build": Must submit from VAB/SPH. Sends: craft file + KVV/screenshot.
- *   - "active_vessel": Must submit from Flight. Sends: craft + loadmeta + telemetry + screenshot.
- *     Also validates vessel situation and body match requirements.
+ *   - "active_vessel": Must submit from Flight. Sends: craft + loadmeta + telemetry
+ *     + screenshot, and the vessel's situation and body must match.
+ *   - "rescue": active_vessel, plus the stranded crew (and sometimes the wreck).
  *
- * The server tells us what type + requirements via the contract data.
- * We enforce it here so players get immediate feedback, not a server rejection.
+ * The server tells us what type + requirements via the contract data. We enforce
+ * it here so players get immediate feedback, not a server rejection.
+ *
+ * A view watches <see cref="Changed"/> rather than polling: nothing here runs on a
+ * draw pass any more, so a state change has to announce itself. <see cref="Closed"/>
+ * is the other direction of the same wire — the submit coroutine decides the flow is
+ * over (approved, or filed for review) and the window that is showing it closes.
  */
 
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using UnityEngine;
 
-namespace GeneKerman.UI
+namespace GeneKerman
 {
-    public class SubmitWindow
+    /// <summary>One other craft inside physics range, offered as an extra to pack
+    /// into this submission.</summary>
+    public sealed class NearbyCraft
     {
-        private Rect windowRect = new Rect(200, 80, 500, 560);
-        private readonly int windowId = "GKSubmit".GetHashCode();
+        public Vessel Vessel;
+        public VesselDataCollector.VesselSnapshot Snap;
+        public bool Selected;
+        public double Distance;   // metres from the active vessel
+    }
 
-        // State
-        public bool IsVisible { get; set; }
-        public string ContractId { get; set; }
-        public string ContractMission { get; set; }
+    public sealed class SubmissionSession
+    {
+        /// <summary>Anything a view draws has changed. Fired on the main thread.</summary>
+        public event Action Changed;
 
-        // Classification from server
-        private string missionType = "active_vessel";  // "craft_build", "active_vessel", or "rescue"
-        private string requiredSituation = "";           // "ORBITING", "LANDED", etc.
-        private string requiredBody = "";                // "Mun", "Duna", etc.
+        /// <summary>The flow is finished and whatever is showing it should go away.</summary>
+        public event Action Closed;
 
-        // Rescue mission data
+        // ── Contract ────────────────────────────────────────────────────────
+
+        public string ContractId { get; private set; }
+        public string ContractMission { get; private set; }
+
+        /// <summary>"craft_build", "active_vessel" or "rescue".</summary>
+        public string MissionType { get; private set; } = "active_vessel";
+
+        public string RequiredSituation { get; private set; } = "";
+        public string RequiredBody { get; private set; } = "";
+        public bool IsRescue => MissionType == "rescue";
+
         private RescueTargetSpec rescueTarget;
         private List<string> rescueKerbals;
-        private ContractConstraints partLimits; // mission part-usage limits (may be null)
-        private bool IsRescue { get { return missionType == "rescue"; } }
+        private ContractConstraints partLimits;   // mission part-usage limits (may be null)
 
-        private Vector2 scrollPos;
-        private string statusMsg = "";
+        /// <summary>The contract's part limits, or null when it sets none.</summary>
+        public ContractConstraints PartLimits => partLimits;
+
+        // ── State a view draws ──────────────────────────────────────────────
+
+        public bool SceneValid { get; private set; }       // right scene for this mission type?
+        public bool VesselValid { get; private set; }      // situation/body/limits satisfied?
+        public string ValidationMsg { get; private set; } = "";
+        public string StatusMsg { get; private set; } = "";
+
+        /// <summary>Whether <see cref="StatusMsg"/> is a failure — the view colours it.
+        /// Carried as a flag because the message itself no longer starts with an emoji
+        /// the caller could read it back out of.</summary>
+        public bool StatusIsError { get; private set; }
+        public bool IsSubmitting { get; private set; }
+        public bool PhysicsStabilizing { get; private set; }
+        public bool PreDisabledByUs { get; private set; }
 
         // Editor mode data
-        private string editorCraftName = "";
-        private string editorCraftPath = "";
-        private string editorCraftType = "";
-        private int editorPartCount;
-        private float editorCraftMass;
-        private float editorCraftCost;
+        public string EditorCraftName { get; private set; } = "";
+        public string EditorCraftPath { get; private set; } = "";
+        public string EditorCraftType { get; private set; } = "";
+        public int EditorPartCount { get; private set; }
+        public float EditorCraftMass { get; private set; }
+        public float EditorCraftCost { get; private set; }
 
         // Flight data
-        private VesselDataCollector.VesselSnapshot activeVessel;
+        public VesselDataCollector.VesselSnapshot ActiveVessel { get; private set; }
 
-        // Extra crafts in physics range that can be packed into the submission.
-        private class NearbyEntry
-        {
-            public Vessel vessel;
-            public VesselDataCollector.VesselSnapshot snap;
-            public bool selected;
-            public double distance;   // metres from the active vessel
-        }
-        private List<NearbyEntry> nearbyEntries = new List<NearbyEntry>();
-        private Vector2 nearbyScroll;
-        private string rangeFilterKm = "2.5";
+        private List<NearbyCraft> nearbyEntries = new List<NearbyCraft>();
+        public IList<NearbyCraft> Nearby => nearbyEntries;
 
-        // Physics Range Extender lifecycle: we pause PRE while the submit window is
-        // open (so far craft unload and the in-range list is the stock bubble), then
-        // restore it on close. preDisabledByUs is true only when we actually paused it.
-        private bool preDisabledByUs;
-        private bool physicsStabilizing;   // waiting for far vessels to unload
+        /// <summary>The "select everything within N km" box, kept as typed text so a
+        /// half-entered number survives a rebuild.</summary>
+        public string RangeFilterKm { get; set; } = "2.5";
 
-        // Submission
-        private bool isSubmitting;
+        // Renders
         private List<string> screenshotPaths = new List<string>();
-        private bool screenshotTaken;
+        public bool ScreenshotTaken { get; private set; }
+        public int RenderCount => screenshotPaths?.Count ?? 0;
 
         // Render freshness. A render is a picture of a craft at one moment; the craft
         // can be changed afterwards and the submission would then carry an image of
         // something that was never sent. renderFingerprint is the structural signature
-        // of everything the renders show, taken at capture time; renderStale is set
+        // of everything the renders show, taken at capture time; RenderStale is set
         // when the live craft no longer matches it, which blocks Submit until the
         // player retakes them. nextStaleCheck throttles the comparison — it walks the
-        // part list, and OnGUI runs several times a frame.
+        // part list, and the view asks once a frame.
+        public bool RenderStale { get; private set; }
         private int renderFingerprint;
-        private bool renderStale;
         private float nextStaleCheck;
 
-        // Validation
-        private bool sceneValid;       // Are we in the correct scene for this mission type?
-        private bool vesselValid;      // Does the vessel match required situation/body?
-        private string validationMsg = "";  // Why validation failed
+        // Part restriction
         private string requiredModlist;
         private HashSet<string> allowedMods;
         private List<string> excludePaths;
 
-        // Styles
-        private GUIStyle windowStyle, headerStyle, boxStyle, labelStyle, valueStyle, checkboxStyle;
-        private GUIStyle submitBtnStyle, cancelBtnStyle, errorStyle, successStyle;
-        private bool stylesReady;
+        // ── Opening ─────────────────────────────────────────────────────────
 
         public void Open(string contractId, string mission,
             string type = "active_vessel", string situation = "", string body = "", string modlist = "",
@@ -108,20 +132,22 @@ namespace GeneKerman.UI
         {
             ContractId = contractId;
             ContractMission = mission;
-            missionType = type ?? "active_vessel";
-            requiredSituation = situation ?? "";
-            requiredBody = body ?? "";
+            MissionType = type ?? "active_vessel";
+            RequiredSituation = situation ?? "";
+            RequiredBody = body ?? "";
             rescueTarget = rescueTargetSpec;
             rescueKerbals = rescueKerbalNames;
             partLimits = (constraints != null && !constraints.IsEmpty) ? constraints : null;
             // For rescue, derive the body the rescuer must reach from the target.
-            if (IsRescue && rescueTarget != null && string.IsNullOrEmpty(requiredBody))
-                requiredBody = rescueTarget.body;
-            IsVisible = true;
-            isSubmitting = false;
-            statusMsg = "";
-            screenshotTaken = false;
-            renderStale = false;
+            if (IsRescue && rescueTarget != null && string.IsNullOrEmpty(RequiredBody))
+                RequiredBody = rescueTarget.body;
+
+            IsSubmitting = false;
+            StatusMsg = "";
+            StatusIsError = false;
+            ScreenshotTaken = false;
+            screenshotPaths = new List<string>();
+            RenderStale = false;
             renderFingerprint = 0;
             nextStaleCheck = 0f;
 
@@ -143,72 +169,117 @@ namespace GeneKerman.UI
             Validate();
         }
 
+        /// <summary>
+        /// A scene load has been *requested* — everything below is still alive, and the
+        /// scene we are about to be in cannot be asked about yet. So this is only the
+        /// letting go: hand PRE back, and drop the renders and the vessel readout,
+        /// which describe a scene that is about to stop existing. Revalidating is
+        /// <see cref="Revalidate"/>, and it has to wait until the load has landed.
+        /// </summary>
+        public void LeavingScene()
+        {
+            if (PreDisabledByUs)
+            {
+                PhysicsRangeManager.Reenable();
+                PreDisabledByUs = false;
+            }
+
+            // Renders are of a craft in a scene that is going away. Keeping them would
+            // let a player submit a picture taken before whatever they just did.
+            ScreenshotTaken = false;
+            screenshotPaths = new List<string>();
+            RenderStale = false;
+            renderFingerprint = 0;
+
+            ActiveVessel = null;
+            nearbyEntries = new List<NearbyCraft>();
+
+            SceneValid = false;
+            VesselValid = false;
+            ValidationMsg = "";
+
+            Touch();
+        }
+
+        /// <summary>
+        /// Re-run validation for the scene we are in now. The window survives scene
+        /// loads, and a submission that is *waiting* for the player to reach the VAB or
+        /// launch the craft is the normal case — without this it would keep telling
+        /// them to go where they already are until they closed and reopened it.
+        /// </summary>
+        public void Revalidate() => Validate();
+
         private void Validate()
         {
-            sceneValid = false;
-            vesselValid = false;
-            validationMsg = "";
+            SceneValid = false;
+            VesselValid = false;
+            ValidationMsg = "";
 
-            if (missionType == "craft_build")
+            if (MissionType == "craft_build")
             {
                 // Craft build: must be in VAB/SPH
                 if (HighLogic.LoadedSceneIsEditor)
                 {
-                    sceneValid = true;
-                    vesselValid = true; // No vessel situation needed for craft builds
+                    SceneValid = true;
+                    VesselValid = true; // No vessel situation needed for craft builds
                     CaptureEditorCraft();
                 }
                 else
                 {
-                    validationMsg = "🏗️ This is a craft build mission.\nGo to the VAB or SPH to submit.";
+                    ValidationMsg = "This is a craft build mission.\nGo to the VAB or SPH to submit.";
                 }
             }
-            else // active_vessel
+            else // active_vessel / rescue
             {
-                // Active vessel: must be in flight
                 if (HighLogic.LoadedSceneIsFlight)
                 {
-                    sceneValid = true;
+                    SceneValid = true;
                     // Pause PRE (if any), let far craft unload, then capture the
                     // active vessel + the stock-range neighbours offered as extras.
                     GeneKermanMod.Instance.RunCoroutine(PreparePhysicsThenCapture());
                 }
                 else
                 {
-                    validationMsg = "🚀 This is an active vessel mission.\nLaunch your craft and fly to the target to submit.";
+                    ValidationMsg = "This is an active vessel mission.\nLaunch your craft and fly to the target to submit.";
                 }
             }
+
+            Touch();
         }
+
+        private void Touch() => Changed?.Invoke();
+
+        // ── Validation ──────────────────────────────────────────────────────
 
         private void ValidateVesselState()
         {
-            if (activeVessel == null)
+            if (ActiveVessel == null)
             {
-                vesselValid = false;
-                validationMsg = "No active vessel found.";
+                VesselValid = false;
+                ValidationMsg = "No active vessel found.";
                 return;
             }
 
-            vesselValid = true;
+            VesselValid = true;
             var issues = new List<string>();
 
             // Check body requirement
-            if (!string.IsNullOrEmpty(requiredBody))
+            if (!string.IsNullOrEmpty(RequiredBody))
             {
-                if (!string.Equals(activeVessel.body, requiredBody, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(ActiveVessel.body, RequiredBody, StringComparison.OrdinalIgnoreCase))
                 {
-                    vesselValid = false;
-                    issues.Add($"❌ Body mismatch: at {activeVessel.body}, need {requiredBody}");
+                    VesselValid = false;
+                    issues.Add($"Body mismatch: at {ActiveVessel.body}, need {RequiredBody}");
                 }
             }
 
             // Check situation requirement
-            if (!string.IsNullOrEmpty(requiredSituation))
+            if (!string.IsNullOrEmpty(RequiredSituation))
             {
-                if (!string.Equals(activeVessel.situation, requiredSituation, StringComparison.OrdinalIgnoreCase))
+                if (!string.Equals(ActiveVessel.situation, RequiredSituation, StringComparison.OrdinalIgnoreCase))
                 {
-                    vesselValid = false;
-                    issues.Add($"❌ Situation mismatch: {activeVessel.situation}, need {requiredSituation}");
+                    VesselValid = false;
+                    issues.Add($"Situation mismatch: {ActiveVessel.situation}, need {RequiredSituation}");
                 }
             }
 
@@ -217,9 +288,9 @@ namespace GeneKerman.UI
             // authoritatively from the submitted telemetry.
             if (partLimits?.Orbit != null && !partLimits.Orbit.IsEmpty)
             {
-                foreach (var v in partLimits.Orbit.CheckOrbit(activeVessel))
+                foreach (var v in partLimits.Orbit.CheckOrbit(ActiveVessel))
                 {
-                    vesselValid = false;
+                    VesselValid = false;
                     issues.Add(v);
                 }
             }
@@ -232,12 +303,12 @@ namespace GeneKerman.UI
             string illegalParts = FindIllegalParts(FlightGlobals.ActiveVessel?.parts);
             if (illegalParts != null)
             {
-                vesselValid = false;
+                VesselValid = false;
                 issues.Add(illegalParts);
             }
 
             if (issues.Count > 0)
-                validationMsg = string.Join("\n", issues);
+                ValidationMsg = string.Join("\n", issues.ToArray());
         }
 
         /// <summary>
@@ -246,7 +317,7 @@ namespace GeneKerman.UI
         /// parsed out of the mission text (any contract), and the plane/regime an issuer
         /// picked for a rescue target.
         /// </summary>
-        private string DescribeOrbitRequirement()
+        public string DescribeOrbitRequirement()
         {
             var bits = new List<string>();
             if (partLimits != null && partLimits.Orbit != null && !partLimits.Orbit.IsEmpty)
@@ -285,8 +356,8 @@ namespace GeneKerman.UI
 
                 if (missing.Count > 0)
                 {
-                    vesselValid = false;
-                    issues.Add($"❌ Missing kerbals ({missing.Count}): {string.Join(", ", missing.ToArray())}");
+                    VesselValid = false;
+                    issues.Add($"Missing kerbals ({missing.Count}): {string.Join(", ", missing.ToArray())}");
                 }
             }
 
@@ -298,42 +369,42 @@ namespace GeneKerman.UI
             bool surface = (rescueTarget.mode ?? "orbit").ToLower() == "surface";
             if (surface)
             {
-                if (!(activeVessel.situation == "LANDED" || activeVessel.situation == "SPLASHED"))
+                if (!(ActiveVessel.situation == "LANDED" || ActiveVessel.situation == "SPLASHED"))
                 {
-                    vesselValid = false;
-                    issues.Add($"❌ Must be landed at {rescueTarget.body} (currently {activeVessel.situation}).");
+                    VesselValid = false;
+                    issues.Add($"Must be landed at {rescueTarget.body} (currently {ActiveVessel.situation}).");
                 }
                 else
                 {
-                    double dLat = Math.Abs(activeVessel.latitude - rescueTarget.lat);
-                    double dLon = Math.Abs(activeVessel.longitude - rescueTarget.lon);
+                    double dLat = Math.Abs(ActiveVessel.latitude - rescueTarget.lat);
+                    double dLon = Math.Abs(ActiveVessel.longitude - rescueTarget.lon);
                     if (dLon > 180) dLon = 360 - dLon; // wrap
                     double margin = Math.Max(rescueTarget.marginPos, 0.01);
                     if (dLat > margin || dLon > margin)
                     {
-                        vesselValid = false;
-                        issues.Add($"❌ Off target: at {activeVessel.latitude:F2}°,{activeVessel.longitude:F2}°, " +
+                        VesselValid = false;
+                        issues.Add($"Off target: at {ActiveVessel.latitude:F2}°,{ActiveVessel.longitude:F2}°, " +
                                    $"need {rescueTarget.lat:F2}°,{rescueTarget.lon:F2}° (±{margin:F2}°).");
                     }
                 }
             }
             else
             {
-                if (activeVessel.situation != "ORBITING")
+                if (ActiveVessel.situation != "ORBITING")
                 {
-                    vesselValid = false;
-                    issues.Add($"❌ Must be orbiting {rescueTarget.body} (currently {activeVessel.situation}).");
+                    VesselValid = false;
+                    issues.Add($"Must be orbiting {rescueTarget.body} (currently {ActiveVessel.situation}).");
                 }
                 else
                 {
                     double margin = Math.Max(rescueTarget.marginAlt, 1.0); // metres
-                    double dAp = Math.Abs(activeVessel.apoapsis - rescueTarget.ap);
-                    double dPe = Math.Abs(activeVessel.periapsis - rescueTarget.pe);
+                    double dAp = Math.Abs(ActiveVessel.apoapsis - rescueTarget.ap);
+                    double dPe = Math.Abs(ActiveVessel.periapsis - rescueTarget.pe);
                     if (dAp > margin || dPe > margin)
                     {
-                        vesselValid = false;
-                        issues.Add($"❌ Orbit off target: Ap {activeVessel.apoapsis / 1000:F0}km / " +
-                                   $"Pe {activeVessel.periapsis / 1000:F0}km, need " +
+                        VesselValid = false;
+                        issues.Add($"Orbit off target: Ap {ActiveVessel.apoapsis / 1000:F0}km / " +
+                                   $"Pe {ActiveVessel.periapsis / 1000:F0}km, need " +
                                    $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
                     }
 
@@ -341,15 +412,15 @@ namespace GeneKerman.UI
                     // cheap half of a rendezvous — the plane is the half that costs
                     // delta-v, so a rescue that names one is a materially different job.
                     string plane = OrbitConstraint.CheckInclination(
-                        rescueTarget.incl, rescueTarget.marginIncl, activeVessel.inclination);
+                        rescueTarget.incl, rescueTarget.marginIncl, ActiveVessel.inclination);
                     if (plane != null)
                     {
-                        vesselValid = false;
-                        issues.Add("❌ " + plane);
+                        VesselValid = false;
+                        issues.Add(plane);
                     }
-                    foreach (var v in rescueTarget.OrbitTypeConstraint().CheckOrbit(activeVessel))
+                    foreach (var v in rescueTarget.OrbitTypeConstraint().CheckOrbit(ActiveVessel))
                     {
-                        vesselValid = false;
+                        VesselValid = false;
                         issues.Add(v);
                     }
                 }
@@ -386,8 +457,8 @@ namespace GeneKerman.UI
             if (needed < 1) needed = 1;
             if (found >= needed) return;
 
-            vesselValid = false;
-            issues.Add($"❌ The stranded vessel isn't here: {found} of {rescueTarget.wreckParts.Count} " +
+            VesselValid = false;
+            issues.Add($"The stranded vessel isn't here: {found} of {rescueTarget.wreckParts.Count} " +
                        $"of its parts aboard, need at least {needed}. This contract wants the wreck " +
                        $"brought home, not just its crew.");
         }
@@ -403,7 +474,7 @@ namespace GeneKerman.UI
             double dv = CraftDeltaV.TotalVacuum();
             if (dv < 0)
             {
-                issues.Add($"⚠ Δv unreadable. This rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
+                issues.Add($"Δv unreadable. This rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
                            "Turn on the stock Δv readout to check it here; the server checks it either way.");
                 return;
             }
@@ -412,206 +483,30 @@ namespace GeneKerman.UI
             // on the number isn't failed by rounding.
             if (dv >= rescueTarget.minDv * 0.995) return;
 
-            vesselValid = false;
-            issues.Add($"❌ Not enough Δv left: {dv:F0} m/s, need ≥{rescueTarget.minDv:F0} m/s " +
+            VesselValid = false;
+            issues.Add($"Not enough Δv left: {dv:F0} m/s, need ≥{rescueTarget.minDv:F0} m/s " +
                        "so the crew can get home from here.");
         }
 
-        public void Draw()
+        // ── Editor mode (craft_build) ───────────────────────────────────────
+
+        /// <summary>Re-read the craft on the editor's build stage, saving it to disk so
+        /// the .craft we would upload is the one on screen.</summary>
+        public void CaptureEditorCraft()
         {
-            if (!IsVisible) return;
-
-            if (GKSkin.NeedsRebuild())
-                stylesReady = false;
-
-            windowRect = ClickThroughHelper.Window(windowId, windowRect, DrawContent, "",
-                GUIStyle.none, GUILayout.Width(500));
-        }
-
-        private void InitStyles()
-        {
-            if (stylesReady) return;
-
-            windowStyle = new GUIStyle(GUI.skin.box)
-            {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.1f, 0.1f, 0.14f, 0.97f)) },
-                padding = new RectOffset(12, 12, 10, 10)
-            };
-
-            headerStyle = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 16, fontStyle = FontStyle.Bold,
-                normal = { textColor = new Color(0.3f, 0.7f, 0.9f) }
-            };
-
-            boxStyle = new GUIStyle(GUI.skin.box)
-            {
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.08f, 0.08f, 0.11f, 0.9f)) },
-                padding = new RectOffset(10, 10, 8, 8), margin = new RectOffset(0, 0, 2, 2)
-            };
-
-            labelStyle = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.6f, 0.6f, 0.6f) } };
-            checkboxStyle = new GUIStyle(GUI.skin.toggle) { fontSize = 11, normal = { textColor = new Color(0.65f, 0.7f, 0.75f) } };
-            valueStyle = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = Color.white } };
-
-            errorStyle = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 12, wordWrap = true,
-                normal = { textColor = new Color(0.9f, 0.35f, 0.3f) }
-            };
-
-            successStyle = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = 12, wordWrap = true,
-                normal = { textColor = new Color(0.3f, 0.9f, 0.4f) }
-            };
-
-            submitBtnStyle = new GUIStyle(GUI.skin.button)
-            {
-                fontSize = 14, fontStyle = FontStyle.Bold, fixedHeight = 38,
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.15f, 0.55f, 0.3f, 0.9f)), textColor = Color.white },
-                hover = { background = GKSkin.MakeTex(2, 2, new Color(0.2f, 0.65f, 0.4f, 0.9f)), textColor = Color.white }
-            };
-
-            cancelBtnStyle = new GUIStyle(GUI.skin.button)
-            {
-                fontSize = 11, fixedHeight = 26,
-                normal = { background = GKSkin.MakeTex(2, 2, new Color(0.5f, 0.2f, 0.2f, 0.9f)), textColor = Color.white }
-            };
-
-            stylesReady = true;
-        }
-
-        private void DrawContent(int id)
-        {
-            InitStyles();
-
-            // Layout pass only — see RefreshRenderStale.
-            if (Event.current.type == EventType.Layout)
-                RefreshRenderStale();
-
-            GUILayout.BeginVertical(windowStyle);
-
-            // Header
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("📤 Submit Contract", headerStyle);
-            if (GUILayout.Button("✕", GUILayout.Width(25), GUILayout.Height(25)))
-                CloseWindow();
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(3);
-            GUILayout.Label($"Mission: {ContractMission}", valueStyle);
-
-            // Mission type badge
-            GUILayout.BeginHorizontal();
-            string typeBadge = missionType == "craft_build" ? "🏗️ CRAFT BUILD" : "🚀 ACTIVE VESSEL";
-            GUILayout.Label(typeBadge, new GUIStyle(labelStyle) { fontStyle = FontStyle.Bold,
-                normal = { textColor = missionType == "craft_build" ? new Color(0.9f, 0.7f, 0.2f) : new Color(0.3f, 0.8f, 0.9f) } });
-            if (!string.IsNullOrEmpty(requiredBody))
-                GUILayout.Label($"📍 {requiredBody}", labelStyle);
-            if (!string.IsNullOrEmpty(requiredSituation))
-                GUILayout.Label($"📋 {requiredSituation}", labelStyle);
-            GUILayout.FlexibleSpace();
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(8);
-
-            scrollPos = GUILayout.BeginScrollView(scrollPos, GUILayout.Height(380));
-
-            if (!sceneValid)
-            {
-                // Wrong scene — show error
-                DrawWrongSceneMessage();
-            }
-            else if (missionType == "craft_build")
-            {
-                DrawEditorMode();
-            }
-            else
-            {
-                DrawFlightMode();
-            }
-
-            GUILayout.EndScrollView();
-
-            // Status
-            if (!string.IsNullOrEmpty(statusMsg))
-            {
-                var sStyle = statusMsg.StartsWith("✅") ? successStyle : errorStyle;
-                GUILayout.Label(statusMsg, sStyle);
-            }
-
-            // Bottom buttons
-            GUILayout.Space(5);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Cancel", cancelBtnStyle, GUILayout.Width(80)))
-                CloseWindow();
-            GUILayout.FlexibleSpace();
-
-            if (sceneValid)
-            {
-                GUI.enabled = !isSubmitting && CanSubmit();
-                if (GUILayout.Button(isSubmitting ? "Submitting..." : "📤 Submit", submitBtnStyle, GUILayout.Width(150)))
-                    DoSubmit();
-                GUI.enabled = true;
-            }
-            GUILayout.EndHorizontal();
-
-            GUILayout.EndVertical();
-            GUI.DragWindow();
-        }
-
-        // ── Wrong Scene ─────────────────────────────────────────────────────
-
-        private void DrawWrongSceneMessage()
-        {
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label("⚠ Wrong Location", valueStyle);
-            GUILayout.Space(5);
-            GUILayout.Label(validationMsg, errorStyle);
-            GUILayout.Space(10);
-
-            if (missionType == "craft_build")
-            {
-                GUILayout.Label(
-                    "Craft build missions require you to:\n" +
-                    "• Open the craft in VAB or SPH\n" +
-                    "• The loaded craft will be submitted automatically\n" +
-                    "• KVV will capture a vessel render (if installed)",
-                    labelStyle
-                );
-            }
-            else
-            {
-                GUILayout.Label(
-                    "Active vessel missions require you to:\n" +
-                    "• Have the vessel in flight\n" +
-                    (string.IsNullOrEmpty(requiredBody) ? "" : $"• Be at/around {requiredBody}\n") +
-                    (string.IsNullOrEmpty(requiredSituation) ? "" : $"• Vessel status: {requiredSituation}\n") +
-                    "• Vessel telemetry will be captured automatically",
-                    labelStyle
-                );
-            }
-            GUILayout.EndVertical();
-        }
-
-        // ── Editor Mode (craft_build) ───────────────────────────────────────
-
-        private void CaptureEditorCraft()
-        {
-            editorCraftName = "";
-            editorCraftPath = "";
-            editorPartCount = 0;
-            editorCraftMass = 0;
-            editorCraftCost = 0;
+            EditorCraftName = "";
+            EditorCraftPath = "";
+            EditorPartCount = 0;
+            EditorCraftMass = 0;
+            EditorCraftCost = 0;
 
             // Re-scan part legality from scratch each capture. This method is also called
-            // standalone via the "Refresh Craft Data" button (not just through Validate),
+            // standalone via the "Refresh craft data" button (not just through Validate),
             // so reset validity here or a fixed craft would stay flagged.
             if (allowedMods != null)
             {
-                vesselValid = true;
-                if (validationMsg.StartsWith("❌ Illegal part")) validationMsg = "";
+                VesselValid = true;
+                if (ValidationMsg.StartsWith("Illegal part")) ValidationMsg = "";
             }
 
             try
@@ -619,15 +514,15 @@ namespace GeneKerman.UI
                 var ship = EditorLogic.fetch?.ship;
                 if (ship != null)
                 {
-                    editorCraftName = ship.shipName ?? "Untitled";
-                    editorPartCount = ship.parts?.Count ?? 0;
+                    EditorCraftName = ship.shipName ?? "Untitled";
+                    EditorPartCount = ship.parts?.Count ?? 0;
 
                     // Auto-save the editor craft to disk so the .craft file we look
                     // up below is current — the player no longer has to save manually
                     // before submitting.
-                    if (editorPartCount > 0)
+                    if (EditorPartCount > 0)
                     {
-                        try { ShipConstruction.SaveShip(editorCraftName); }
+                        try { ShipConstruction.SaveShip(EditorCraftName); }
                         catch (Exception saveEx)
                         {
                             Debug.LogWarning($"[GeneKerman] Could not auto-save craft: {saveEx.Message}");
@@ -636,37 +531,40 @@ namespace GeneKerman.UI
 
                     if (ship.parts != null)
                     {
+                        float mass = 0f, cost = 0f;
                         foreach (var part in ship.parts)
                         {
-                            editorCraftMass += part.mass + part.GetResourceMass();
+                            mass += part.mass + part.GetResourceMass();
                             // Full funds cost (dry + module modifiers incl. TweakScale + fuel).
-                            editorCraftCost += VesselDataCollector.GetPartCost(part);
+                            cost += VesselDataCollector.GetPartCost(part);
                         }
+                        EditorCraftMass = mass;
+                        EditorCraftCost = cost;
 
                         // List every part that violates the contract's restriction.
                         string illegalParts = FindIllegalParts(ship.parts);
                         if (illegalParts != null)
                         {
-                            vesselValid = false;
-                            validationMsg = illegalParts;
+                            VesselValid = false;
+                            ValidationMsg = illegalParts;
                         }
                     }
 
-                    editorCraftType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
+                    EditorCraftType = EditorDriver.editorFacility == EditorFacility.VAB ? "VAB" : "SPH";
 
                     string saveFolder = HighLogic.SaveFolder ?? "default";
                     string shipDir = Path.Combine(KSPUtil.ApplicationRootPath, "saves", saveFolder,
-                        "Ships", editorCraftType);
-                    string craftFile = Path.Combine(shipDir, editorCraftName + ".craft");
+                        "Ships", EditorCraftType);
+                    string craftFile = Path.Combine(shipDir, EditorCraftName + ".craft");
 
                     if (File.Exists(craftFile))
-                        editorCraftPath = craftFile;
+                        EditorCraftPath = craftFile;
                     else
                     {
-                        string rootDir = Path.Combine(KSPUtil.ApplicationRootPath, "Ships", editorCraftType);
-                        craftFile = Path.Combine(rootDir, editorCraftName + ".craft");
+                        string rootDir = Path.Combine(KSPUtil.ApplicationRootPath, "Ships", EditorCraftType);
+                        craftFile = Path.Combine(rootDir, EditorCraftName + ".craft");
                         if (File.Exists(craftFile))
-                            editorCraftPath = craftFile;
+                            EditorCraftPath = craftFile;
                     }
                 }
             }
@@ -674,51 +572,20 @@ namespace GeneKerman.UI
             {
                 Debug.LogWarning($"[GeneKerman] Error reading editor craft: {ex.Message}");
             }
+
+            Touch();
         }
 
-        private void DrawEditorMode()
+        // ── Flight mode (active_vessel / rescue) ────────────────────────────
+
+        /// <summary>Re-read the active vessel and the craft around it, then re-check the
+        /// contract's requirements against them.</summary>
+        public void CaptureFlightData()
         {
-            if (string.IsNullOrEmpty(editorCraftName))
-            {
-                GUILayout.Label("❌ No craft loaded in the editor.", valueStyle);
-                GUILayout.Label("Open a craft in VAB or SPH first.", labelStyle);
-                return;
-            }
-
-            GUILayout.Label($"Currently Loaded Craft [{editorCraftType}]", headerStyle);
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label($"🚀 {editorCraftName}", valueStyle);
-            GUILayout.Label($"Parts: {editorPartCount}  ·  Mass: {editorCraftMass:F1}t  ·  Cost: {editorCraftCost:N0}", labelStyle);
-
-            if (!string.IsNullOrEmpty(editorCraftPath))
-                GUILayout.Label($"✅ Craft file ready", successStyle);
-            else
-                GUILayout.Label($"⚠ Save your craft first!", errorStyle);
-            GUILayout.EndVertical();
-
-            // Explain a greyed-out Submit: list the parts that break the restriction.
-            if (!vesselValid && !string.IsNullOrEmpty(validationMsg))
-            {
-                GUILayout.Space(5);
-                GUILayout.BeginVertical(boxStyle);
-                GUILayout.Label(validationMsg, errorStyle);
-                GUILayout.EndVertical();
-            }
-
-            GUILayout.Space(5);
-            if (GUILayout.Button("🔄 Refresh Craft Data", GUILayout.Height(26)))
-                CaptureEditorCraft();
-
-            GUILayout.Space(10);
-            DrawScreenshotSection();
-        }
-
-        // ── Flight Mode (active_vessel) ─────────────────────────────────────
-
-        private void CaptureFlightData()
-        {
-            activeVessel = VesselDataCollector.CaptureActiveVessel();
+            ActiveVessel = VesselDataCollector.CaptureActiveVessel();
             BuildNearbyEntries();
+            ValidateVesselState();
+            Touch();
         }
 
         /// <summary>Pause PRE, wait for out-of-range craft to unload, then capture. Keeps
@@ -726,23 +593,36 @@ namespace GeneKerman.UI
         /// neighbour list reflects the stock range, not PRE's inflated one.</summary>
         private IEnumerator PreparePhysicsThenCapture()
         {
-            physicsStabilizing = true;
-            statusMsg = "Stabilizing physics range...";
+            PhysicsStabilizing = true;
+            StatusMsg = "Stabilizing physics range...";
+            StatusIsError = false;
+            Touch();
 
             // Rescue is strictly single-vessel — leave PRE alone for it.
-            preDisabledByUs = !IsRescue && PhysicsRangeManager.TryDisable();
-            if (preDisabledByUs)
+            PreDisabledByUs = !IsRescue && PhysicsRangeManager.TryDisable();
+            if (PreDisabledByUs)
             {
                 // Give KSP a few frames + a beat to drop now-out-of-range vessels.
                 for (int i = 0; i < 5; i++) yield return new WaitForEndOfFrame();
                 yield return new WaitForSeconds(0.5f);
             }
 
-            CaptureFlightData();
+            // The player can leave flight while we wait; capturing then would read a
+            // vessel that is no longer loaded and overwrite the scene message.
+            if (!HighLogic.LoadedSceneIsFlight)
+            {
+                PhysicsStabilizing = false;
+                Touch();
+                yield break;
+            }
+
+            ActiveVessel = VesselDataCollector.CaptureActiveVessel();
+            BuildNearbyEntries();
             ValidateVesselState();
 
-            physicsStabilizing = false;
-            if (statusMsg == "Stabilizing physics range...") statusMsg = "";
+            PhysicsStabilizing = false;
+            if (StatusMsg == "Stabilizing physics range...") StatusMsg = "";
+            Touch();
         }
 
         /// <summary>(Re)build the in-range extra-craft list, preserving the player's
@@ -752,9 +632,9 @@ namespace GeneKerman.UI
             var prevSelected = new Dictionary<Guid, bool>();
             if (nearbyEntries != null)
                 foreach (var e in nearbyEntries)
-                    if (e.vessel != null) prevSelected[e.vessel.id] = e.selected;
+                    if (e.Vessel != null) prevSelected[e.Vessel.id] = e.Selected;
 
-            nearbyEntries = new List<NearbyEntry>();
+            nearbyEntries = new List<NearbyCraft>();
 
             var active = FlightGlobals.ActiveVessel;
             if (active == null) return;
@@ -762,219 +642,73 @@ namespace GeneKerman.UI
 
             foreach (var v in VesselDataCollector.GetNearbyVessels(active))
             {
-                var entry = new NearbyEntry
+                var entry = new NearbyCraft
                 {
-                    vessel = v,
-                    snap = VesselDataCollector.CaptureVessel(v),
-                    distance = Vector3d.Distance(aPos, v.GetWorldPos3D()),
+                    Vessel = v,
+                    Snap = VesselDataCollector.CaptureVessel(v),
+                    Distance = Vector3d.Distance(aPos, v.GetWorldPos3D()),
                 };
                 bool wasSelected;
-                if (prevSelected.TryGetValue(v.id, out wasSelected)) entry.selected = wasSelected;
+                if (prevSelected.TryGetValue(v.id, out wasSelected)) entry.Selected = wasSelected;
                 nearbyEntries.Add(entry);
             }
 
-            nearbyEntries.Sort((a, b) => a.distance.CompareTo(b.distance));
+            nearbyEntries.Sort((a, b) => a.Distance.CompareTo(b.Distance));
         }
 
-        private void SetAllSelected(bool value)
+        public void SetAllSelected(bool value)
         {
             if (nearbyEntries == null) return;
-            foreach (var e in nearbyEntries) e.selected = value;
+            foreach (var e in nearbyEntries) e.Selected = value;
+            Touch();
         }
 
-        private void SelectWithinRange()
+        public void SetSelected(NearbyCraft entry, bool value)
+        {
+            if (entry == null) return;
+            entry.Selected = value;
+            Touch();
+        }
+
+        public void SelectWithinRange()
         {
             double km;
-            if (!double.TryParse(rangeFilterKm, out km)) return;
+            if (!double.TryParse(RangeFilterKm, out km)) return;
             double metres = km * 1000.0;
-            foreach (var e in nearbyEntries) e.selected = e.distance <= metres;
+            foreach (var e in nearbyEntries) e.Selected = e.Distance <= metres;
+            Touch();
         }
 
-        private static string FormatDistance(double metres)
+        public int SelectedExtras
         {
-            return metres >= 1000.0 ? $"{metres / 1000.0:F2} km" : $"{metres:F0} m";
+            get
+            {
+                if (IsRescue || nearbyEntries == null) return 0;
+                int n = 0;
+                foreach (var e in nearbyEntries) if (e.Selected && e.Vessel != null) n++;
+                return n;
+            }
         }
 
-        private void DrawFlightMode()
-        {
-            if (physicsStabilizing)
-            {
-                GUILayout.BeginVertical(boxStyle);
-                GUILayout.Label("⏳ Stabilizing physics range…", valueStyle);
-                GUILayout.Label("Pausing Physics Range Extender and letting distant craft unload.", labelStyle);
-                GUILayout.EndVertical();
-                return;
-            }
-
-            if (activeVessel == null)
-            {
-                GUILayout.Label("❌ No active vessel detected.", valueStyle);
-                return;
-            }
-
-            // Validation status
-            if (!vesselValid && !string.IsNullOrEmpty(validationMsg))
-            {
-                GUILayout.BeginVertical(boxStyle);
-                GUILayout.Label("⚠ Vessel State Mismatch", valueStyle);
-                GUILayout.Label(validationMsg, errorStyle);
-                GUILayout.EndVertical();
-                GUILayout.Space(5);
-            }
-            else if (vesselValid)
-            {
-                GUILayout.Label("✅ Vessel state matches requirements", successStyle);
-                GUILayout.Space(3);
-            }
-
-            // The orbit this contract asks for, drawn whether or not the craft is in it.
-            // A requirement only ever printed as a failure is one the player meets by
-            // accident or not at all — and the vessel readout below prints the live
-            // inclination/eccentricity right underneath, so the two can be compared.
-            string orbitReq = DescribeOrbitRequirement();
-            if (!string.IsNullOrEmpty(orbitReq))
-            {
-                GUILayout.Label("🛰 Required orbit: " + orbitReq, labelStyle);
-                GUILayout.Space(3);
-            }
-
-            // Active vessel info
-            GUILayout.Label("Active Vessel", headerStyle);
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label($"🚀 {activeVessel.vesselName}", valueStyle);
-            GUILayout.Label($"📍 {activeVessel.body} · {activeVessel.situation}", labelStyle);
-            GUILayout.Label($"Alt: {activeVessel.altitude:N0}m  ·  Parts: {activeVessel.partCount}  ·  Mass: {activeVessel.totalMass:F1}t", labelStyle);
-            if (activeVessel.crewCount > 0)
-                GUILayout.Label($"👨‍🚀 Crew: {activeVessel.crewCount}", labelStyle);
-            if (activeVessel.sma > 0)
-                GUILayout.Label($"Orbit: SMA={activeVessel.sma:N0}m  e={activeVessel.eccentricity:F3}  i={activeVessel.inclination:F1}°", labelStyle);
-            GUILayout.EndVertical();
-
-            GUILayout.Space(5);
-            if (GUILayout.Button("🔄 Refresh Data", GUILayout.Height(26)))
-            {
-                CaptureFlightData();
-                ValidateVesselState();
-            }
-
-            // Multi-craft sending is for ordinary active-vessel contracts only.
-            if (!IsRescue)
-                DrawNearbySection();
-
-            GUILayout.Space(10);
-            DrawScreenshotSection();
-        }
-
-        // ── Extra Crafts (multi-vessel submission) ──────────────────────────
-
-        private void DrawNearbySection()
-        {
-            GUILayout.Space(8);
-            GUILayout.Label("Send Extra Crafts in Range", headerStyle);
-            GUILayout.BeginVertical(boxStyle);
-
-            if (preDisabledByUs)
-                GUILayout.Label("ℹ️ Physics Range Extender paused; showing stock-range craft.", labelStyle);
-
-            if (nearbyEntries == null || nearbyEntries.Count == 0)
-            {
-                GUILayout.Label("No other vessels in physics range.", labelStyle);
-                if (GUILayout.Button("🔄 Rescan Range", GUILayout.Height(24)))
-                    CaptureFlightData();
-                GUILayout.EndVertical();
-                return;
-            }
-
-            int selCount = 0;
-            foreach (var e in nearbyEntries) if (e.selected) selCount++;
-            GUILayout.Label($"{selCount}/{nearbyEntries.Count} selected, packed and sent with this submission.", labelStyle);
-
-            // Batch selectors
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Select All", GUILayout.Height(22))) SetAllSelected(true);
-            if (GUILayout.Button("Select None", GUILayout.Height(22))) SetAllSelected(false);
-            GUILayout.EndHorizontal();
-
-            GUILayout.BeginHorizontal();
-            GUILayout.Label("In range ≤", labelStyle, GUILayout.Width(62));
-            rangeFilterKm = GUILayout.TextField(rangeFilterKm ?? "", GUILayout.Width(50));
-            GUILayout.Label("km", labelStyle, GUILayout.Width(22));
-            if (GUILayout.Button("Apply", GUILayout.Height(22), GUILayout.Width(60))) SelectWithinRange();
-            GUILayout.EndHorizontal();
-
-            GUILayout.Space(4);
-            nearbyScroll = GUILayout.BeginScrollView(nearbyScroll, GUILayout.Height(130));
-            foreach (var e in nearbyEntries)
-            {
-                e.selected = GUILayout.Toggle(e.selected,
-                    $"{e.snap.vesselName}  ·  {FormatDistance(e.distance)}", checkboxStyle);
-                GUILayout.Label(
-                    $"      {e.snap.vesselType} · {e.snap.body} {e.snap.situation} · " +
-                    $"{e.snap.partCount} parts · {e.snap.crewCount} crew", labelStyle);
-            }
-            GUILayout.EndScrollView();
-
-            GUILayout.Space(4);
-            if (GUILayout.Button("🔄 Rescan Range", GUILayout.Height(24)))
-                CaptureFlightData();
-
-            GUILayout.EndVertical();
-        }
-
-        // ── Screenshot ──────────────────────────────────────────────────────
-
-        private void DrawScreenshotSection()
-        {
-            GUILayout.BeginVertical(boxStyle);
-            GUILayout.Label("📸 Vessel Render", valueStyle);
-
-            int extras = CountSelectedExtras();
-            if (extras > 0)
-                GUILayout.Label($"Renders the active craft + {extras} selected extra(s).", labelStyle);
-            else
-                GUILayout.Label("Orthographic vessel render will be captured automatically.", labelStyle);
-
-            if (screenshotTaken && renderStale)
-            {
-                GUILayout.Label("⚠ The craft changed after these renders were taken.", errorStyle);
-                GUILayout.Label(
-                    HighLogic.LoadedSceneIsEditor
-                        ? "Renders must show the craft you submit. Retake them to continue."
-                        : "The vessel is no longer the one in these renders. Retake them to continue.",
-                    labelStyle);
-                if (GUILayout.Button("📸 Retake Renders", GUILayout.Height(30)))
-                    TakeScreenshot();
-            }
-            else if (screenshotTaken)
-            {
-                GUILayout.Label($"✅ Captured {screenshotPaths.Count} render(s)", successStyle);
-                if (GUILayout.Button("🔄 Retake Renders", GUILayout.Height(26)))
-                    TakeScreenshot();
-            }
-            else
-            {
-                if (GUILayout.Button("📸 Capture Vessel Renders", GUILayout.Height(30)))
-                    TakeScreenshot();
-            }
-            GUILayout.EndVertical();
-        }
+        // ── Renders ─────────────────────────────────────────────────────────
 
         /// <summary>Capture an orthographic render of the active (contract) craft, plus
         /// one for each selected extra craft so every submitted vessel has a blueprint
         /// image. Renders run synchronously — a deliberate one-tap action.</summary>
-        private void TakeScreenshot()
+        public void TakeRenders()
         {
             // Re-capture before rendering, so the picture and the payload are taken from
             // the same craft. In the editor this re-saves the .craft to disk, which is
             // the file SubmitCoroutine uploads — without it a retake would produce a
             // fresh render of a craft still described on disk by a stale file.
-            if (missionType == "craft_build")
+            if (MissionType == "craft_build")
             {
                 CaptureEditorCraft();
             }
             else if (HighLogic.LoadedSceneIsFlight)
             {
-                CaptureFlightData();
+                ActiveVessel = VesselDataCollector.CaptureActiveVessel();
+                BuildNearbyEntries();
                 ValidateVesselState();
             }
 
@@ -988,46 +722,50 @@ namespace GeneKerman.UI
             {
                 foreach (var e in nearbyEntries)
                 {
-                    if (!e.selected || e.vessel == null) continue;
-                    string ep = KVVIntegration.CaptureWithFallback(e.vessel);
+                    if (!e.Selected || e.Vessel == null) continue;
+                    string ep = KVVIntegration.CaptureWithFallback(e.Vessel);
                     if (!string.IsNullOrEmpty(ep)) screenshotPaths.Add(ep);
                 }
             }
 
-            screenshotTaken = screenshotPaths.Count > 0;
+            ScreenshotTaken = screenshotPaths.Count > 0;
 
             // Pin what these renders show, so any later change to the craft is caught.
             renderFingerprint = RenderSubjectFingerprint();
-            renderStale = false;
+            RenderStale = false;
             nextStaleCheck = Time.realtimeSinceStartup + 0.4f;
 
-            statusMsg = screenshotPaths.Count > 1
-                ? $"📸 Captured {screenshotPaths.Count} renders! (may take a moment to save)"
-                : "📸 Captured! (may take a moment to save)";
-        }
+            StatusIsError = false;
+            StatusMsg = screenshotPaths.Count > 1
+                ? $"Captured {screenshotPaths.Count} renders. They may take a moment to save."
+                : "Captured. It may take a moment to save.";
 
-        // ── Render freshness ────────────────────────────────────────────────
+            Touch();
+        }
 
         /// <summary>
         /// Re-check whether the captured renders still show the craft that would be
-        /// submitted. Throttled, and only ever called from the Layout pass — flipping
-        /// a flag that changes the window's contents between Layout and Repaint is what
-        /// produces GUILayout mismatch errors.
+        /// submitted. Throttled — it walks the part list — and called once a frame by
+        /// whatever is showing the session.
         /// </summary>
-        private void RefreshRenderStale()
+        public void TickRenderStale()
         {
-            if (!screenshotTaken || isSubmitting) return;
+            if (!ScreenshotTaken || IsSubmitting) return;
 
             float now = Time.realtimeSinceStartup;
             if (now < nextStaleCheck) return;
             nextStaleCheck = now + 0.4f;
 
-            renderStale = RenderSubjectFingerprint() != renderFingerprint;
+            bool stale = RenderSubjectFingerprint() != renderFingerprint;
+            if (stale == RenderStale) return;
+
+            RenderStale = stale;
+            Touch();
         }
 
         /// <summary>
         /// Signature of everything the renders depict: the craft being submitted plus
-        /// each extra craft currently ticked, since TakeScreenshot captures one image
+        /// each extra craft currently ticked, since TakeRenders captures one image
         /// per subject and changing the selection changes the image set.
         /// Summed rather than chained, because the neighbour list is sorted by distance
         /// and drifting craft reorder it without anything having actually changed.
@@ -1041,8 +779,8 @@ namespace GeneKerman.UI
                 {
                     foreach (var e in nearbyEntries)
                     {
-                        if (!e.selected || e.vessel == null) continue;
-                        h += PartsFingerprint(e.vessel.parts) * 31 + 17;
+                        if (!e.Selected || e.Vessel == null) continue;
+                        h += PartsFingerprint(e.Vessel.parts) * 31 + 17;
                     }
                 }
                 return h;
@@ -1109,67 +847,68 @@ namespace GeneKerman.UI
             }
         }
 
-        private int CountSelectedExtras()
-        {
-            if (IsRescue || nearbyEntries == null) return 0;
-            int n = 0;
-            foreach (var e in nearbyEntries) if (e.selected && e.vessel != null) n++;
-            return n;
-        }
-
         // ── Submission ──────────────────────────────────────────────────────
 
-        private bool CanSubmit()
+        public bool CanSubmit()
         {
-            if (!sceneValid) return false;
-            if (!screenshotTaken) return false;
+            if (!SceneValid) return false;
+            if (!ScreenshotTaken) return false;
             // Renders that no longer match the craft are worse than none: the issuer
             // would review a picture of something that was never submitted.
-            if (renderStale) return false;
+            if (RenderStale) return false;
 
-            if (missionType == "craft_build")
-                // vesselValid carries the part-legality result from CaptureEditorCraft();
+            if (MissionType == "craft_build")
+                // VesselValid carries the part-legality result from CaptureEditorCraft();
                 // without it an illegal part (e.g. a Squad expansion part on a restricted
                 // contract) would pass the gate and submit anyway.
-                return !string.IsNullOrEmpty(editorCraftPath) && vesselValid;
+                return !string.IsNullOrEmpty(EditorCraftPath) && VesselValid;
 
             // active_vessel: need vessel data AND matching state
-            return activeVessel != null && vesselValid;
+            return ActiveVessel != null && VesselValid;
         }
 
-        /// <summary>Hide the window and restore Physics Range Extender if we paused it.
-        /// All close paths (✕, Cancel, successful/awaiting submit) route through here so
-        /// PRE is never left disabled.</summary>
-        private void CloseWindow()
+        /// <summary>Restore Physics Range Extender if we paused it, and tell whatever is
+        /// showing this session to go away. Every close path routes through here so PRE
+        /// is never left disabled.</summary>
+        public void Close()
         {
-            if (preDisabledByUs)
+            if (PreDisabledByUs)
             {
                 PhysicsRangeManager.Reenable();
-                preDisabledByUs = false;
+                PreDisabledByUs = false;
             }
-            IsVisible = false;
+            Closed?.Invoke();
         }
 
-        private void DoSubmit()
+        public void Submit()
         {
-            isSubmitting = true;
-            statusMsg = "Submitting...";
+            if (IsSubmitting) return;
+            IsSubmitting = true;
+            StatusMsg = "Submitting...";
+            StatusIsError = false;
+            Touch();
             GeneKermanMod.Instance.RunCoroutine(SubmitCoroutine());
+        }
+
+        private void Fail(string message)
+        {
+            IsSubmitting = false;
+            StatusMsg = message;
+            StatusIsError = true;
+            Touch();
         }
 
         private IEnumerator SubmitCoroutine()
         {
             yield return new WaitForSeconds(1.5f);
 
-            // Last word on render freshness, unthrottled: the throttled Draw-time check
+            // Last word on render freshness, unthrottled: the throttled per-frame check
             // can be up to 0.4s behind, and this coroutine then waits another 1.5s
             // before reading anything — ample time to pull a part off.
-            if (screenshotTaken && RenderSubjectFingerprint() != renderFingerprint)
+            if (ScreenshotTaken && RenderSubjectFingerprint() != renderFingerprint)
             {
-                renderStale = true;
-                isSubmitting = false;
-                statusMsg = "❌ The craft changed after the renders were taken.\n" +
-                            "Retake the renders, then submit.";
+                RenderStale = true;
+                Fail("The craft changed after the renders were taken.\nRetake the renders, then submit.");
                 yield break;
             }
 
@@ -1177,15 +916,14 @@ namespace GeneKerman.UI
             // screen. The fingerprint above proves the shape still matches the renders,
             // but a tweak a blueprint cannot show — a fuel level, an action group — is
             // only on disk if the file was written after it.
-            if (missionType == "craft_build")
+            if (MissionType == "craft_build")
             {
                 CaptureEditorCraft();
-                if (!vesselValid || string.IsNullOrEmpty(editorCraftPath))
+                if (!VesselValid || string.IsNullOrEmpty(EditorCraftPath))
                 {
-                    isSubmitting = false;
-                    statusMsg = string.IsNullOrEmpty(validationMsg)
-                        ? "❌ Could not read the craft. Save it and try again."
-                        : validationMsg;
+                    Fail(string.IsNullOrEmpty(ValidationMsg)
+                        ? "Could not read the craft. Save it and try again."
+                        : ValidationMsg);
                     yield break;
                 }
             }
@@ -1212,8 +950,7 @@ namespace GeneKerman.UI
                 var violations = partLimits.CheckCraft(GetSubmissionParts(), deltaVVac, crewAboard, crewTraits);
                 if (violations.Count > 0)
                 {
-                    isSubmitting = false;
-                    statusMsg = "❌ Mission limits not met:\n- " + string.Join("\n- ", violations.ToArray());
+                    Fail("Mission limits not met:\n- " + string.Join("\n- ", violations.ToArray()));
                     yield break;
                 }
             }
@@ -1224,10 +961,10 @@ namespace GeneKerman.UI
             string vesselDataJson = null;
             string vesselNodeData = null;
 
-            if (missionType == "craft_build" && !string.IsNullOrEmpty(editorCraftPath))
+            if (MissionType == "craft_build" && !string.IsNullOrEmpty(EditorCraftPath))
             {
-                craftData = VesselDataCollector.ReadCraftFile(editorCraftPath);
-                craftName = Path.GetFileName(editorCraftPath);
+                craftData = VesselDataCollector.ReadCraftFile(EditorCraftPath);
+                craftName = Path.GetFileName(EditorCraftPath);
                 // No loadmeta or vessel node for craft_build
 
                 // Bake the live editor parts' TweakScale-computed scale into the blueprint
@@ -1237,13 +974,13 @@ namespace GeneKerman.UI
                 if (craftData != null && editorParts != null)
                     craftData = ScaleBridge.SnapshotIntoCraftBytes(craftData, editorParts);
             }
-            else if (activeVessel != null) // active_vessel or rescue — both submit from flight
+            else if (ActiveVessel != null) // active_vessel or rescue — both submit from flight
             {
                 // Active vessel: send craft file + loadmeta + telemetry + full vessel state
                 var submission = new Dictionary<string, object>
                 {
                     { "contract_id", ContractId },
-                    { "active_vessel", activeVessel.ToDict() },
+                    { "active_vessel", ActiveVessel.ToDict() },
                 };
 
                 // Extra crafts the player toggled on (never for rescue — that flow is
@@ -1251,7 +988,7 @@ namespace GeneKerman.UI
                 var selectedExtras = new List<Vessel>();
                 if (!IsRescue && nearbyEntries != null)
                     foreach (var e in nearbyEntries)
-                        if (e.selected && e.vessel != null) selectedExtras.Add(e.vessel);
+                        if (e.Selected && e.Vessel != null) selectedExtras.Add(e.Vessel);
 
                 // Telemetry for the extras actually being sent (informational context
                 // for the issuer's review).
@@ -1260,8 +997,8 @@ namespace GeneKerman.UI
                     var sentList = new List<object>();
                     foreach (var e in nearbyEntries)
                     {
-                        if (!e.selected || e.vessel == null) continue;
-                        var d = e.snap.ToDict();
+                        if (!e.Selected || e.Vessel == null) continue;
+                        var d = e.Snap.ToDict();
                         d["sent"] = true;
                         sentList.Add(d);
                     }
@@ -1271,7 +1008,7 @@ namespace GeneKerman.UI
                 vesselDataJson = MiniJSON.Serialize(submission);
 
                 // Also try to get the craft file for the active vessel
-                string craftPath = VesselDataCollector.FindCraftFile(activeVessel.vesselName);
+                string craftPath = VesselDataCollector.FindCraftFile(ActiveVessel.vesselName);
                 if (!string.IsNullOrEmpty(craftPath))
                 {
                     craftData = VesselDataCollector.ReadCraftFile(craftPath);
@@ -1299,7 +1036,7 @@ namespace GeneKerman.UI
             var screenshots = new List<byte[]>();
             var ssNames = new List<string>();
 
-            if (screenshotTaken && screenshotPaths != null)
+            if (ScreenshotTaken && screenshotPaths != null)
             {
                 foreach (var sp in screenshotPaths)
                 {
@@ -1323,7 +1060,7 @@ namespace GeneKerman.UI
                     if (!string.IsNullOrEmpty(p.partUrl))
                         folders.Add(p.partUrl.Split('/')[0]);
                 }
-                modlist = string.Join(",", folders.ToArray());
+                modlist = string.Join(",", new List<string>(folders).ToArray());
             }
 
             // Mod folders actually used by this craft, so the server can re-check the
@@ -1392,12 +1129,11 @@ namespace GeneKerman.UI
                 ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
                 (ok, resp, status) =>
                 {
-                    isSubmitting = false;
+                    IsSubmitting = false;
                     if (ok && !string.IsNullOrEmpty(resp))
                     {
                         var result = MiniJSON.DeserializeDict(resp);
                         string reviewStatus = MiniJSON.GetString(result, "review_status", "");
-                        string message = MiniJSON.GetString(result, "message", "Submitted!");
 
                         if (!string.IsNullOrEmpty(submittedPid))
                             GeneKermanMod.Instance.RecordRescueSubmission(ContractId, submittedPid);
@@ -1406,31 +1142,36 @@ namespace GeneKerman.UI
                         {
                             int xp = MiniJSON.GetInt(result, "xp_awarded");
                             int coins = MiniJSON.GetInt(result, "coins_awarded");
-                            GeneKermanMod.Instance.ShowNotification("✅ Mission Approved!", $"+{coins} KCoins, +{xp} XP");
+                            GeneKermanMod.Instance.ShowNotification("Mission approved", $"+{coins} KCoins, +{xp} XP");
                             EditorPartEnforcer.Instance?.StopEnforcing();
-                            CloseWindow();
+                            Close();
                             GeneKermanMod.Instance.RefreshContracts();
                         }
                         else if (reviewStatus == "refused")
                         {
-                            statusMsg = $"❌ Refused: {MiniJSON.GetString(result, "reason", "")}";
+                            StatusMsg = $"Refused: {MiniJSON.GetString(result, "reason", "")}";
+                            StatusIsError = true;
                         }
                         else
                         {
                             // Submitted and awaiting review — clear enforcer so VAB is unlocked
                             EditorPartEnforcer.Instance?.StopEnforcing();
-                            CloseWindow();
+                            Close();
                             GeneKermanMod.Instance.RefreshContracts();
                         }
                     }
                     else
                     {
-                        statusMsg = "❌ Submission failed. Check connection and try again.";
+                        StatusMsg = "Submission failed. Check connection and try again.";
+                        StatusIsError = true;
                     }
+
+                    Touch();
                 }
             );
         }
 
+        // ── Part legality ───────────────────────────────────────────────────
 
         private string GetModFolder(string partUrl)
         {
@@ -1440,10 +1181,12 @@ namespace GeneKerman.UI
             return null;
         }
 
-        // Builds a user-facing list of every part that violates the contract's part
-        // restriction, so the player knows exactly why Submit is greyed out. Returns
-        // null when there's no restriction or all parts are allowed.
-        private string FindIllegalParts(System.Collections.Generic.IEnumerable<Part> parts)
+        /// <summary>
+        /// A user-facing list of every part that violates the contract's part
+        /// restriction, so the player knows exactly why Submit is greyed out. Returns
+        /// null when there's no restriction or all parts are allowed.
+        /// </summary>
+        private string FindIllegalParts(IEnumerable<Part> parts)
         {
             if (allowedMods == null || parts == null) return null;
 
@@ -1466,22 +1209,26 @@ namespace GeneKerman.UI
             }
 
             if (bad.Count == 0) return null;
-            return "❌ Illegal parts for this contract:\n" + string.Join("\n", bad.ToArray());
+            return "Illegal parts for this contract:\n" + string.Join("\n", bad.ToArray());
         }
 
-        // The parts of the craft being submitted: editor ship for craft builds,
-        // active vessel otherwise. Shared by the modlist, mission-limit and
-        // used-parts collectors so they all judge the same set of parts.
-        private System.Collections.Generic.IEnumerable<Part> GetSubmissionParts()
+        /// <summary>
+        /// The parts of the craft being submitted: editor ship for craft builds,
+        /// active vessel otherwise. Shared by the modlist, mission-limit and
+        /// used-parts collectors so they all judge the same set of parts.
+        /// </summary>
+        private IEnumerable<Part> GetSubmissionParts()
         {
-            if (missionType == "craft_build")
+            if (MissionType == "craft_build")
                 return EditorLogic.fetch?.ship?.parts;
             return FlightGlobals.ActiveVessel?.parts;
         }
 
-        // Per-part classification of the submitted craft (title, propellants,
-        // engine/part categories) as a JSON array, so the server can re-verify
-        // the contract's mission limits independently of the client gate.
+        /// <summary>
+        /// Per-part classification of the submitted craft (title, propellants,
+        /// engine/part categories) as a JSON array, so the server can re-verify
+        /// the contract's mission limits independently of the client gate.
+        /// </summary>
         private string CollectUsedPartsJson()
         {
             var parts = GetSubmissionParts();
@@ -1496,13 +1243,15 @@ namespace GeneKerman.UI
             return list.Count > 0 ? MiniJSON.Serialize(list) : null;
         }
 
-        // Distinct top-level mod folders used by the craft being submitted (editor ship
-        // for craft builds, active vessel otherwise). Sent to the server for validation.
+        /// <summary>
+        /// Distinct top-level mod folders used by the craft being submitted (editor ship
+        /// for craft builds, active vessel otherwise). Sent to the server for validation.
+        /// </summary>
         private string CollectUsedModFolders()
         {
             var folders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            System.Collections.Generic.IEnumerable<Part> parts = GetSubmissionParts();
+            IEnumerable<Part> parts = GetSubmissionParts();
             if (parts == null) return null;
 
             foreach (var part in parts)
@@ -1517,7 +1266,7 @@ namespace GeneKerman.UI
                 // TweakScale installed.
             }
 
-            return folders.Count > 0 ? string.Join(",", folders.ToArray()) : null;
+            return folders.Count > 0 ? string.Join(",", new List<string>(folders).ToArray()) : null;
         }
 
         private bool IsPartAllowed(string partUrl)

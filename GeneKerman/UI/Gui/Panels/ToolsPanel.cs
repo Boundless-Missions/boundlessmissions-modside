@@ -158,7 +158,7 @@ namespace GeneKerman.UI.Gui
         private void BuildRosterRepair(El parent)
         {
             var card = UIF.Card(parent, "RosterRepair").Column(Theme.Space2).Pad(Theme.Space3);
-            UIF.Label(card, "⚠ " + brokenCrew + " kerbal(s) with an unknown profession",
+            UIF.Label(card, brokenCrew + " kerbal(s) with an unknown profession",
                       Theme.FontSm).Bold();
             UIF.Muted(card,
                 "A mod that added their profession is no longer installed. KSP throws while " +

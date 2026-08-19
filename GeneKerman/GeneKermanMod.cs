@@ -74,9 +74,7 @@ namespace GeneKerman
         private UI.LinkWindow linkWindow;
         private UI.ConsentWindow consentWindow;
         private UI.DataPausedWindow dataPausedWindow;
-        private UI.SubmitWindow submitWindow;
         private UI.CreateContractWindow createContractWindow;
-        private UI.NotificationPopup notificationPopup;
         private UI.CheckpointPrompt checkpointPrompt;
         private UI.DeviceVerifyWindow deviceVerifyWindow;
 
@@ -91,6 +89,11 @@ namespace GeneKerman
         // windows or the browser UI, and it draws on its own Canvas rather than in
         // OnGUI — which is why it needs its own hide/scene/teardown handling below.
         private UI.Gui.SidebarController sidebar;
+
+        // The submission screen, mounted as a draggable window on the sidebar's
+        // canvas (see UI/Gui/FloatWindow.cs). It replaced the IMGUI UI/SubmitWindow.cs
+        // outright, so this is the only submission UI the mod has.
+        private UI.Gui.SubmitPanel submitPanel;
 
         // Device binding: set while we're blocked on an unrecognized-device challenge.
         private bool deviceGateActive;
@@ -180,9 +183,7 @@ namespace GeneKerman
             linkWindow = new UI.LinkWindow();
             consentWindow = new UI.ConsentWindow();
             dataPausedWindow = new UI.DataPausedWindow();
-            submitWindow = new UI.SubmitWindow();
             createContractWindow = new UI.CreateContractWindow();
-            notificationPopup = new UI.NotificationPopup();
             checkpointPrompt = new UI.CheckpointPrompt();
             deviceVerifyWindow = new UI.DeviceVerifyWindow();
             updateWindow = new UI.UpdateRequiredWindow();
@@ -206,6 +207,13 @@ namespace GeneKerman
             sidebar.AddPanel(new UI.Gui.MarketPanel());
             sidebar.AddPanel(new UI.Gui.ToolsPanel());
             sidebar.AddPanel(new UI.Gui.SettingsPanel());
+
+            // Submission is a window rather than a tab: it is read *against* the craft
+            // on the build stage or the ship in flight, so it has to be movable and to
+            // stay up while the player looks at something else. Offset right of centre
+            // so it does not open on top of the sidebar panel itself.
+            submitPanel = new UI.Gui.SubmitPanel();
+            sidebar.AddWindow(submitPanel, 470f, 660f, new Vector2(360f, 0f));
 
             // Detect installed life-support / DeepFreeze mods once (drives rescue-kerbal
             // immunity and the Kerbalism rescue gate). Reflection-only; safe if none present.
@@ -498,7 +506,7 @@ namespace GeneKerman
             var data = MiniJSON.GetDict(notif, "data");
             if (data != null) contractId = MiniJSON.GetString(data, "contract_id");
 
-            notificationPopup.Show(
+            Toast(
                 MiniJSON.GetString(notif, "title"),
                 MiniJSON.GetString(notif, "message"),
                 contractId
@@ -585,12 +593,12 @@ namespace GeneKerman
                 : "\"" + mission + "\"";
 
             checkpointPrompt.Show(
-                "🌐 Requested from the website",
+                "Requested from the website",
                 "Open the submission window for " + subject + "?",
                 onAccept: () => StartCoroutine(Web.GkRoutes.OpenSubmitRoutine(
                     contractId,
-                    (ok, msg) => notificationPopup.Show(
-                        ok ? "📤 Submit" : "📤 Submit unavailable", msg))),
+                    (ok, msg) => Toast(
+                        ok ? "Submit" : "Submit unavailable", msg))),
                 acceptLabel: "Open");
 
             return true;
@@ -790,9 +798,9 @@ namespace GeneKerman
             }
 
             // The sidebar is what the button opens now. The classic window is still
-            // built, still loaded and still holds the things the sidebar does not do
-            // (rescue contracts, submission, wreck spawning) — it is reached from
-            // Settings → Open the classic window rather than from here.
+            // built and still loaded, but nothing is left that only it can do —
+            // rescue contracts, submission and wreck spawning have all moved — so it
+            // is reached from Settings → Open the classic window rather than here.
             if (Api.IsLinked) sidebar?.Toggle();
             else ShowLinkWindow = !ShowLinkWindow;
         }
@@ -800,8 +808,10 @@ namespace GeneKerman
         /// <summary>
         /// Raise the classic IMGUI window. Called from the sidebar's Settings panel,
         /// which is the only route to it now that the toolbar button opens the
-        /// sidebar — and there has to be one, because the sidebar deliberately does
-        /// not carry every flow (see ContractForm's note on rescue contracts).
+        /// sidebar. It is kept as a second opinion rather than as the owner of any
+        /// flow: every tab it draws has a sidebar equivalent, and the one thing only
+        /// it still draws is the limited (acknowledged-update) mode, where the
+        /// sidebar's canvas deliberately does not render at all.
         /// </summary>
         public void OpenClassicWindow()
         {
@@ -869,14 +879,16 @@ namespace GeneKerman
                     // to the classic windows. Drawn in web mode only.
                     webUiWindow.Draw();
 
-                    submitWindow.Draw();
                     createContractWindow.Draw();
 
-                    // These four stay IMGUI permanently, in every mode. Toasts and the
-                    // checkpoint prompt are time-critical and must appear over the game
-                    // while the player is flying — a browser is alt-tabbed or on another
-                    // monitor. The device prompt is a security question about this PC.
-                    notificationPopup.Draw();
+                    // These stay IMGUI permanently, in every mode. The checkpoint
+                    // prompt is time-critical and must appear over the game while the
+                    // player is flying — a browser is alt-tabbed or on another monitor.
+                    // The device prompt is a security question about this PC. Toasts
+                    // used to be drawn here too; they are now uGUI (UI/Gui/ToastHost),
+                    // raised through Toast() below and gated by the sidebar's canvas —
+                    // which is this same cascade, so nothing about when one may appear
+                    // changed.
                     checkpointPrompt.Draw();
                     deviceVerifyWindow.Draw();
                 }
@@ -923,7 +935,7 @@ namespace GeneKerman
             if (string.IsNullOrEmpty(savedPath))
                 yield break;
 
-            notificationPopup.Show("📷 Photo captured", "Sharing to Discord…");
+            Toast("Photo captured", "Sharing to Discord…");
 
             // ScreenCapture writes asynchronously — wait for the file to flush before
             // reading it back for upload.
@@ -949,9 +961,9 @@ namespace GeneKerman
                 (ok, resp, status) =>
                 {
                     if (ok)
-                        RaiseLocalNotification("📡 Photo shared", "Posted to the community channel.");
+                        RaiseLocalNotification("Photo shared", "Posted to the community channel.");
                     else
-                        RaiseLocalNotification("⚠ Share failed",
+                        RaiseLocalNotification("Share failed",
                             "Saved locally in PluginData/renders.");
                 });
         }
@@ -969,19 +981,19 @@ namespace GeneKerman
 
             if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
             {
-                notificationPopup.Show("🏅 Achievement Shot", "Enter flight with an active vessel first.");
+                Toast("Achievement Shot", "Enter flight with an active vessel first.");
                 return;
             }
             if (Api == null || !Api.IsLinked || Api.TransmissionBlocked)
             {
-                notificationPopup.Show("🏅 Achievement Shot", "Link your account and enable data sharing first.");
+                Toast("Achievement Shot", "Link your account and enable data sharing first.");
                 return;
             }
 
             // Reuse the bottom-centre prompt; give the player ample time to frame the
             // shot before it self-dismisses.
             checkpointPrompt.Show(
-                "🏅 Achievement Shot",
+                "Achievement Shot",
                 "Frame your best angle of the achievement, then press Capture to submit it for a title role.",
                 onAccept: () => StartCoroutine(RunAchievementCapture()),
                 timeoutOverride: 60f);
@@ -1016,7 +1028,7 @@ namespace GeneKerman
 
             if (png == null || png.Length == 0)
             {
-                RaiseLocalNotification("⚠ Capture failed", "Couldn't read the screenshot. Try again.");
+                RaiseLocalNotification("Capture failed", "Couldn't read the screenshot. Try again.");
                 yield break;
             }
 
@@ -1035,12 +1047,12 @@ namespace GeneKerman
             bool review = !reviewedCaptures.Contains(captureKey);
             if (!review)
             {
-                notificationPopup.Show("📡 Sharing…",
+                Toast("Sharing…",
                     "You've already earned this vessel's achievement here, so the shot goes to Discord.");
             }
             else
             {
-                notificationPopup.Show("📡 Submitting…", "Checking your shot for an achievement…");
+                Toast("Submitting…", "Checking your shot for an achievement…");
             }
 
             yield return Api.UploadAchievementPhoto(
@@ -1063,7 +1075,7 @@ namespace GeneKerman
                         reviewedCaptures.Add(captureKey);
                         SaveReviewedCaptures();
                     }
-                    RaiseLocalNotification(ok ? "🏅 Achievement Shot" : "⚠ Achievement Shot", msg);
+                    RaiseLocalNotification("Achievement Shot", msg);
                 });
         }
 
@@ -1199,7 +1211,7 @@ namespace GeneKerman
 
             LinkedUsername = MiniJSON.GetString(data, "username");
             RaiseLocalNotification(
-                "✅ Account Linked!",
+                "Account Linked!",
                 "Welcome, " + LinkedUsername + "!"
             );
         }
@@ -1216,10 +1228,24 @@ namespace GeneKerman
         /// have no Firestore record — they're session-local (see
         /// MainWindow.AddLocalNotification) and disappear on a game restart.
         /// </summary>
+        /// <summary>
+        /// Raise a transient top-right toast and nothing else. Everything the mod
+        /// shows this way goes through here, so the sidebar stays the single owner
+        /// of the stack — a second front end raising its own would have its own
+        /// lifetime, its own cap and its own idea of when the UI is hidden.
+        ///
+        /// Null-safe on the sidebar: the toast is the *transient* copy, and the
+        /// callers that also want a durable one already call
+        /// RaiseLocalNotification, which records into the feed either way.
+        /// </summary>
+        public void Toast(string title, string message, string contractId = null,
+                          string localAction = null)
+            => sidebar?.Toast(title, message, contractId, localAction);
+
         public void RaiseLocalNotification(string title, string message, string contractId = null,
                                           string localAction = null)
         {
-            notificationPopup.Show(title, message, contractId, localAction);
+            Toast(title, message, contractId, localAction);
 
             if (mainWindow == null) return;
 
@@ -1437,7 +1463,7 @@ namespace GeneKerman
             ShowLinkWindow = true;   // drop the user straight onto the link screen
             // Transient toast, not a stored notification: like the device-denied
             // unlink, persisting it would resurface it after the user re-links.
-            notificationPopup.Show("🔑 Session expired",
+            Toast("Session expired",
                 "This PC was unlinked. Run /g linkcode in Discord to link again.");
             Debug.Log("[GeneKerman] Session revoked — returned to the link screen.");
         }
@@ -1453,8 +1479,8 @@ namespace GeneKerman
             deviceVerifyWindow.Show(
                 "A new device is using your account, so this PC is blocked for now.\n\n" +
                 "Check your Discord DMs:\n" +
-                "• Press \"✅ Yes, it's me\" if you switched PCs / reinstalled.\n" +
-                "• Press \"🚫 No, report it\" only if it wasn't you.\n\n" +
+                "• Press \"Yes, it's me\" if you switched PCs / reinstalled.\n" +
+                "• Press \"No, report it\" only if it wasn't you.\n\n" +
                 "Waiting for your response…");
             StartCoroutine(DeviceGateFlow(challengeId));
         }
@@ -1464,21 +1490,21 @@ namespace GeneKerman
         /// knows the login attempt is theirs (and can press "Yes, it's me" in Discord).
         private void ShowDevicePing()
         {
-            const string msg = "🔔 GENE KERMAN: Is this you? Someone is verifying this PC's " +
-                               "login from Discord. If this is your PC, press \"✅ Yes, it's me\" " +
+            const string msg = "GENE KERMAN: Is this you? Someone is verifying this PC's " +
+                               "login from Discord. If this is your PC, press \"Yes, it's me\" " +
                                "in your Discord DM.";
             try
             {
                 ScreenMessages.PostScreenMessage(msg, 12f, ScreenMessageStyle.UPPER_CENTER);
             }
             catch { /* ScreenMessages unavailable in this scene — popup still shows */ }
-            notificationPopup.Show("🔔 Is this you?",
+            Toast("Is this you?",
                 "Someone is verifying this PC's login from Discord.\n" +
-                "If this is your PC, press \"✅ Yes, it's me\" in your Discord DM.");
+                "If this is your PC, press \"Yes, it's me\" in your Discord DM.");
             deviceVerifyWindow.Show(
-                "🔔 PING RECEIVED. Someone is checking whether this PC is yours.\n\n" +
+                "PING RECEIVED. Someone is checking whether this PC is yours.\n\n" +
                 "If you're the account owner and meant to log in here, go to your\n" +
-                "Discord DM and press \"✅ Yes, it's me\".\n\n" +
+                "Discord DM and press \"Yes, it's me\".\n\n" +
                 "Waiting for your response…");
         }
 
@@ -1504,7 +1530,7 @@ namespace GeneKerman
 
             if (outcome == "approved")
             {
-                RaiseLocalNotification("✅ Device approved", "This PC is now trusted.");
+                RaiseLocalNotification("Device approved", "This PC is now trusted.");
                 StartCoroutine(InitialFetch());
             }
             else if (outcome == "denied")
@@ -1523,7 +1549,7 @@ namespace GeneKerman
                 ShowLinkWindow = true;   // drop the user straight onto the link screen
                 // Terminal unlink — keep this a transient toast. Persisting it would
                 // make it resurface in the panel the next time the user re-links.
-                notificationPopup.Show("🚫 Device not approved",
+                Toast("Device not approved",
                     "This PC was unlinked. Run /g linkcode in Discord to link again.");
             }
             else // expired
@@ -1553,8 +1579,8 @@ namespace GeneKerman
             RescueTargetSpec rescueTarget = null, List<string> rescueKerbals = null,
             ContractConstraints constraints = null)
         {
-            submitWindow.Open(contractId, mission, missionType, requiredSituation, requiredBody, requiredModlist,
-                rescueTarget, rescueKerbals, constraints);
+            submitPanel?.Open(contractId, mission, missionType, requiredSituation, requiredBody,
+                requiredModlist, rescueTarget, rescueKerbals, constraints);
         }
 
         /// <summary>
@@ -1651,7 +1677,7 @@ namespace GeneKerman
             // Still queued → we couldn't delete it yet (player is in flight). Warn them so
             // the craft doesn't silently vanish the next time they reach the Space Center.
             if (pending.ContainsKey(pid))
-                RaiseLocalNotification("🛰️ Craft scheduled for removal",
+                RaiseLocalNotification("Craft scheduled for removal",
                     $"\"{pending[pid].Name}\" will be deleted when you return to the Space Center.");
 
             return true;
@@ -1809,7 +1835,7 @@ namespace GeneKerman
             // Name them in the message rather than sending the player to KSP.log: the
             // notification now carries the button that fixes this, and a fix is not a
             // thing to press without seeing who it applies to.
-            RaiseLocalNotification("⚠️ Unknown crew professions",
+            RaiseLocalNotification("Unknown crew professions",
                 $"{broken.Count} kerbal(s) in this save have a profession no installed mod " +
                 $"defines: {NameList(broken, 6)}. The Astronaut Complex will fail to draw while " +
                 "they are in the roster. Reinstall the mod that adds their profession, or press " +
@@ -1834,7 +1860,7 @@ namespace GeneKerman
             var restored = TraitRepair.RestoreRecovered();
             if (restored.Count == 0) return;
 
-            RaiseLocalNotification("🧑‍🚀 Crew professions restored",
+            RaiseLocalNotification("Crew professions restored",
                 $"{restored.Count} kerbal(s) got their original profession back now that the mod " +
                 $"defining it is installed: {NameList(restored, 6)}.");
         }
@@ -1891,7 +1917,7 @@ namespace GeneKerman
             VesselTransfer.SaveNow();
 
             foreach (var name in announce)
-                RaiseLocalNotification("🗑️ Craft removed",
+                RaiseLocalNotification("Craft removed",
                     $"\"{name}\" was removed from your save.");
         }
 

@@ -1308,16 +1308,16 @@ namespace GeneKerman.UI
                     var freezeRec = RescueImmunityGuardian.GetRecord(rcid);
                     if (freezeRec != null)
                     {
-                        GUILayout.Label($"🧊 {freezeRec.Crew.Count} kerbal(s) in emergency freeze. " +
-                                        "They thaw when you get close.", labelStyle);
+                        GUILayout.Label($"{freezeRec.Crew.Count} kerbal(s) in emergency freeze. " +
+                                        "They defreeze when you get close.", labelStyle);
                         // Only worth saying when the two installs actually differ: that is
                         // the case where the wreck's own supplies are useless here.
                         if (LsFreeze.IsCrossMod(freezeRec.BuiltWithLs))
                             GUILayout.Label(
                                 $"⚠ Built for {LsFreeze.DisplayNameFor(freezeRec.BuiltWithLs)}; you run " +
                                 $"{LsFreeze.DisplayNameFor(LsFreeze.LocalLsKey)}. Emergency rations were " +
-                                "stowed aboard so the crew survive the thaw.", labelStyle);
-                        if (GUILayout.Button("🧊 Thaw the crew now", acceptBtnStyle, GUILayout.Height(28)))
+                                "stowed aboard so the crew survive the defreeze.", labelStyle);
+                        if (GUILayout.Button("Defreeze the crew now", acceptBtnStyle, GUILayout.Height(28)))
                             RescueImmunityGuardian.ReviveContract(rcid);
                     }
                 }
@@ -1852,8 +1852,8 @@ namespace GeneKerman.UI
 
                 GUILayout.BeginVertical(boxDarkStyle);
 
-                GUILayout.Label((read ? "   " : "● ") + MiniJSON.GetString(n, "title"), valueStyle);
-                GUILayout.Label(MiniJSON.GetString(n, "message"), labelStyle);
+                GUILayout.Label((read ? "   " : "● ") + Gui.Fmt.Plain(MiniJSON.GetString(n, "title")), valueStyle);
+                GUILayout.Label(Gui.Fmt.Plain(MiniJSON.GetString(n, "message")), labelStyle);
                 GUILayout.Label(MiniJSON.GetString(n, "timestamp"), new GUIStyle(labelStyle) { fontSize = 10 });
 
                 GUILayout.BeginHorizontal();
@@ -2776,7 +2776,7 @@ namespace GeneKerman.UI
         }
 
         /// <summary>Reads the currently-loaded editor craft's metadata and resolves
-        /// its saved .craft path (mirrors SubmitWindow's capture logic).</summary>
+        /// its saved .craft path (mirrors SubmissionSession's capture logic).</summary>
         private void CaptureEditorCraft()
         {
             editorCraftName = "";

@@ -112,7 +112,7 @@ namespace GeneKerman
             if (imported <= 0) { onDone(false, "Failed to import vessel."); yield break; }
 
             if (imported > 1)
-                mod.ShowNotification("🚀 Crafts Received", $"{imported} crafts arrived in your save.");
+                mod.ShowNotification("Crafts Received", $"{imported} crafts arrived in your save.");
 
             if (GKContractScenario.Instance != null)
                 GKContractScenario.Instance.MarkVesselImported(contractId);

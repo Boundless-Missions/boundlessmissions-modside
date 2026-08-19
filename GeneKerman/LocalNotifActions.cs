@@ -75,7 +75,7 @@ namespace GeneKerman
                         // Neutral on purpose: the same call reports "nothing to repair"
                         // and "could not repair 2 of them", and a title claiming success
                         // over either would be the wrong half of the message.
-                        title = "🧑‍🚀 Crew profession fix";
+                        title = "Crew profession fix";
                         break;
                     default:
                         return;
@@ -86,7 +86,7 @@ namespace GeneKerman
                 // A throw here is ours, not the player's problem to diagnose: say it
                 // plainly and leave the button in place so it can be tried again.
                 Debug.LogError($"[GeneKerman] Local action '{action}' failed: {ex}");
-                Report("⚠ Couldn't finish that", $"The fix failed: {ex.Message}. See KSP.log.");
+                Report("Couldn't finish that", $"The fix failed: {ex.Message}. See KSP.log.");
                 return;
             }
 

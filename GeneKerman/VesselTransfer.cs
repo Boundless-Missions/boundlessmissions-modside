@@ -1355,7 +1355,7 @@ namespace GeneKerman
             sb.Append("Their original professions are remembered: install the mod that defines ")
               .Append("them and they are handed back automatically.");
 
-            string title = "⚠ Crew arrived without their profession";
+            string title = "Crew arrived without their profession";
             string body = sb.ToString();
             Debug.LogWarning($"[GeneKerman] {title} — {body}");
 

@@ -282,7 +282,7 @@ namespace GeneKerman
                 string body = rations == null
                     ? $"{revived} kerbal(s) are back aboard the stranded craft."
                     : $"{revived} kerbal(s) are back aboard, with {rations} stowed aboard.";
-                GeneKermanMod.Instance?.ShowNotification("🧊 Rescue crew thawed", body);
+                GeneKermanMod.Instance?.ShowNotification("Rescue crew defrozen", body);
             }
             catch { /* a notification is never worth an exception */ }
         }

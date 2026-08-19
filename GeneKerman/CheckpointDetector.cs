@@ -105,7 +105,7 @@ namespace GeneKerman
             Fire(new Checkpoint
             {
                 kind = "eva",
-                title = "🚶 EVA",
+                title = "EVA",
                 message = $"{who} stepped outside. Capture the spacewalk?",
                 label = "eva_" + who,
                 // Frame the spacewalker against the craft they left (when it isn't the
@@ -127,7 +127,7 @@ namespace GeneKerman
             Fire(new Checkpoint
             {
                 kind = "staging",
-                title = "🔥 Staging",
+                title = "Staging",
                 message = $"Stage {stage} separation. Capture the burn?",
                 label = $"staging_s{stage}",
                 // Portrait of the vessel — no paired subject.
@@ -149,7 +149,7 @@ namespace GeneKerman
                     Fire(new Checkpoint
                     {
                         kind = "orbit",
-                        title = "🛰 Orbit achieved",
+                        title = "Orbit achieved",
                         message = $"You've reached orbit around {bodyName}. Capture it with the body in frame?",
                         label = "orbit_" + bodyName,
                         targetBody = body,   // backdrop the body you're now circling
@@ -160,7 +160,7 @@ namespace GeneKerman
                     Fire(new Checkpoint
                     {
                         kind = "landing",
-                        title = "🛬 Touchdown",
+                        title = "Touchdown",
                         message = $"Touchdown on {bodyName}. Capture the landing?",
                         label = "landing_" + bodyName,
                     }, key: "landing:" + bodyName);
@@ -170,7 +170,7 @@ namespace GeneKerman
                     Fire(new Checkpoint
                     {
                         kind = "splashdown",
-                        title = "🌊 Splashdown",
+                        title = "Splashdown",
                         message = $"Splashdown on {bodyName}. Capture the recovery?",
                         label = "splashdown_" + bodyName,
                     }, key: "splashdown:" + bodyName);
@@ -217,7 +217,7 @@ namespace GeneKerman
             return Fire(new Checkpoint
             {
                 kind = "flyby",
-                title = "🛰 " + bodyName + " flyby",
+                title = bodyName + " flyby",
                 message = $"You've reached {bodyName}. Capture a hero shot with it in the backdrop?",
                 label = "flyby_" + bodyName,
                 targetBody = entered,
@@ -238,7 +238,7 @@ namespace GeneKerman
             return Fire(new Checkpoint
             {
                 kind = "asteroid",
-                title = "☄ " + char.ToUpper(what[0]) + what.Substring(1) + " nearby",
+                title = char.ToUpper(what[0]) + what.Substring(1) + " nearby",
                 message = $"A {what} ({nearest.vesselName}) is in range. Capture it with your vessel?",
                 label = what + "_" + nearest.vesselName,
                 targetVessel = nearest,
@@ -253,7 +253,7 @@ namespace GeneKerman
             return Fire(new Checkpoint
             {
                 kind = "rendezvous",
-                title = "🤝 Rendezvous",
+                title = "Rendezvous",
                 message = $"Close approach with {nearest.vesselName}. Capture the moment together?",
                 label = "rendezvous_" + nearest.vesselName,
                 targetVessel = nearest,

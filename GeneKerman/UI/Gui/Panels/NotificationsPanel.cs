@@ -145,7 +145,7 @@ namespace GeneKerman.UI.Gui
 
             var titleRow = UIF.Box(card, "Title").Row(Theme.Space2).H(18);
             UIF.Box(titleRow, "Dot").Dot(Theme.Primary, 8);
-            UIF.Label(titleRow, "🎁 " + name, Theme.FontSm).Bold();
+            UIF.Label(titleRow, name, Theme.FontSm).Bold();
 
             UIF.Label(card, from + " sent you " + (vessel
                           ? "a live vessel. Accepting spawns it into your save."
@@ -246,10 +246,12 @@ namespace GeneKerman.UI.Gui
             if (!read)
                 UIF.Box(titleRow, "Dot").Dot(Theme.Primary, 8);
 
-            UIF.Label(titleRow, MiniJSON.GetString(n, "title"), Theme.FontSm,
+            // Fmt.Plain on both: the titles are written for Discord and open with an
+            // emoji the borrowed font has no glyph for (see Fmt.Plain).
+            UIF.Label(titleRow, Fmt.Plain(MiniJSON.GetString(n, "title")), Theme.FontSm,
                       Theme.Alpha(Theme.Foreground, dim)).Bold();
 
-            UIF.Label(card, MiniJSON.GetString(n, "message"), Theme.FontSm,
+            UIF.Label(card, Fmt.Plain(MiniJSON.GetString(n, "message")), Theme.FontSm,
                       Theme.Alpha(Theme.MutedForeground, dim)).Body();
 
             string ts = MiniJSON.GetString(n, "timestamp");

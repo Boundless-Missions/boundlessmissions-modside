@@ -1,13 +1,13 @@
 /*
  * CraftDelivery.cs – Fetching and installing the craft a completed contract earned you.
  *
- * This logic used to live inside MainWindow.DoDownloadCraft, where it reported progress
+ * This logic used to live inside the classic window's DoDownloadCraft, where it reported progress
  * by writing to the IMGUI status line and started its sub-coroutines with fire-and-forget
  * RunCoroutine calls. That shape works for a status line, but it has no completion point,
  * so nothing else could ever wait on it or know whether it worked.
  *
  * Extracted here as a single coroutine that yields its sub-steps and calls onDone exactly
- * once. MainWindow now wraps it to keep its status line; the web bridge wraps it as a
+ * once. ClientState wraps it for the sidebar; the web bridge wraps it as a
  * tracked job. One implementation, two front ends — a second copy would drift.
  *
  * Two delivery shapes, in priority order:

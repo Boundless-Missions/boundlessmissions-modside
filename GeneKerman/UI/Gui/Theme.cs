@@ -335,7 +335,7 @@ namespace GeneKerman.UI.Gui
         /// <summary>
         /// Contract status → accent, matching `STATUS_STYLE` in
         /// WebUI/src/screens/Contracts.tsx exactly. This is deliberately *not*
-        /// MainWindow.GetStatusColor: that mapping is older and different (it paints
+        /// the classic window's GetStatusColor: that mapping is older and different (it paints
         /// active green and completed cyan), and the sidebar's whole purpose is to
         /// read as the same product as the web UI. IMGUI keeps its own; the two
         /// palettes are a known, accepted difference rather than an oversight.

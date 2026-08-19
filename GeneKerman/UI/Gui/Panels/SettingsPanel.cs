@@ -28,6 +28,11 @@ namespace GeneKerman.UI.Gui
     {
         public override string Title => "Settings";
 
+        /// <summary>Reachable under the version gate, and the reason to be there:
+        /// pointing the mod at a server that accepts this build is how a player gets
+        /// out of limited mode without restarting.</summary>
+        internal override bool WorksOffline => true;
+
         /// <summary>
         /// The address box's contents, kept out here rather than read back off the
         /// field: a rebuild destroys the field, and the draft has to survive that.
@@ -154,6 +159,9 @@ namespace GeneKerman.UI.Gui
             // socket is still holding a connection to the old host, the new server has
             // its own version gate, and its own idea of whether we are linked.
             mod.OnServerChanged();
+            // Whatever was in flight belonged to the old host and its callbacks are
+            // dropped, so the caches and their loading flags have to be reset by hand.
+            mod.State?.ServerChanged();
 
             done(true, api.IsLinked
                 ? "Connected to " + api.ServerUrl + " as " + Username(mod) + "."
@@ -163,7 +171,7 @@ namespace GeneKerman.UI.Gui
 
         // ── Interface ───────────────────────────────────────────────────────
         //
-        // Moved here from the classic window's settings tab (MainWindow.cs), because
+        // Moved here from the classic window's settings tab, back when there was one, because
         // this panel is now what the toolbar button opens: a setting that decides
         // what that button does had become one you could only reach through the
         // window it was steering you away from.
@@ -180,16 +188,6 @@ namespace GeneKerman.UI.Gui
                        api.WebUiEnabled,
                        v => { mod.SetUiMode(v); MarkDirty(); });
 
-            UIF.Divider(card);
-
-            // The classic window is not a fallback here, it is the rest of the mod, and
-            // the sidebar says so where something is missing. That list keeps shrinking:
-            // issuing a rescue and spawning its wreck both live in the sidebar now, so
-            // submission — which needs the HUD hidden for a screenshot — is what is left.
-            UIF.Muted(card,
-                "The classic window has the one flow this sidebar does not carry: " +
-                "submitting work, which needs the HUD hidden for a screenshot.").Body();
-            UIF.Button(card, "Open the classic window", mod.OpenClassicWindow, BtnStyle.Ghost, 28);
         }
 
         // ── In-game behaviour ───────────────────────────────────────────────
@@ -204,10 +202,17 @@ namespace GeneKerman.UI.Gui
                        api.NotificationsEnabled,
                        v => { api.SetNotificationsEnabled(v); MarkDirty(); });
 
-            UIF.Switch(card, "Milestone photo prompts",
-                       "Offers a hero shot on a rendezvous, flyby or asteroid encounter.",
-                       api.CheckpointPhotosEnabled,
-                       v => { api.SetCheckpointPhotosEnabled(v); MarkDirty(); });
+            // Hidden while the server refuses hero-shot uploads (ApiClient
+            // .CheckpointPhotosAvailable): with the feature held off, this switch would
+            // be a control over nothing. The stored preference survives, so restoring
+            // the gate restores each player's own setting rather than a default.
+            if (ApiClient.CheckpointPhotosAvailable)
+            {
+                UIF.Switch(card, "Milestone photo prompts",
+                           "Offers a hero shot on a rendezvous, flyby or asteroid encounter.",
+                           api.CheckpointPhotosEnabled,
+                           v => { api.SetCheckpointPhotosEnabled(v); MarkDirty(); });
+            }
 
             UIF.Switch(card, "Emergency freeze on rescues",
                        "Stranded crew consume no life support until you reach them, whichever " +
@@ -235,8 +240,8 @@ namespace GeneKerman.UI.Gui
 
             UIF.Muted(block,
                 "The mod goes inert and this sidebar closes with it. Turning it back on is a " +
-                "consent decision and lives in the classic window, next to the panel that says " +
-                "what gets sent.").Body();
+                "consent decision, so it lives in the paused notice KSP shows in place of " +
+                "everything else — which also says what gets sent.").Body();
 
             var confirm = UIF.Box(block, "ConfirmRow").Row(Theme.Space2).H(28);
             UIF.Button(confirm, "Turn off", () =>

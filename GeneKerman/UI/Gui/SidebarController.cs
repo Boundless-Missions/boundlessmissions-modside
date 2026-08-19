@@ -152,6 +152,23 @@ namespace GeneKerman.UI.Gui
         private El windowLayer;
         private readonly List<FloatWindow> windows = new List<FloatWindow>();
 
+        /// <summary>The out-of-date notice above the tabs. Built once, shown only in
+        /// limited mode.</summary>
+        private El limitedBanner;
+
+        /// <summary>What Limited was when the banner and the tab strip were last built,
+        /// so the flip is noticed without rebuilding either every frame.</summary>
+        private bool lastLimited;
+
+        /// <summary>
+        /// The server refused this build and the player chose "continue anyway". The
+        /// sidebar keeps drawing — this is the only interface left — but narrows to the
+        /// panels that work with no server (SidebarPanel.WorksOffline), because every
+        /// fetch behind the others would come back 426.
+        /// </summary>
+        private static bool Limited =>
+            GeneKermanMod.Instance != null && GeneKermanMod.Instance.UpdateRequired;
+
         public bool IsOpen => open;
 
         // ── Construction ────────────────────────────────────────────────────
@@ -278,6 +295,10 @@ namespace GeneKerman.UI.Gui
 
             UIF.Divider(panel);
 
+            // Out-of-date notice. Above the switcher, because in limited mode it
+            // explains why the switcher has two buttons on it instead of seven.
+            limitedBanner = UIF.Box(panel, "Limited").Column(Theme.Space2).Active(false);
+
             // Panel switcher — only meaningful once there is more than one panel.
             // A Column of rows, not one Row: past four panels the captions no longer
             // fit a single strip (see RebuildTabStrip). No fixed height — the group
@@ -334,23 +355,36 @@ namespace GeneKerman.UI.Gui
 
         private bool AnyWindowOpen => TopWindow() != null;
 
+        /// <summary>The panels on offer right now — all of them, or just the ones that
+        /// work with no server while the version gate is up.</summary>
+        private List<SidebarPanel> Available()
+        {
+            if (!Limited) return panels;
+
+            var open = new List<SidebarPanel>();
+            foreach (var p in panels) if (p.WorksOffline) open.Add(p);
+            return open;
+        }
+
         private void RebuildTabStrip()
         {
+            var shown = Available();
+
             // One panel needs no switcher; the header already names the sidebar.
-            tabStrip.Active(panels.Count > 1);
-            if (panels.Count <= 1) return;
+            tabStrip.Active(shown.Count > 1);
+            if (shown.Count <= 1) return;
 
             tabStrip.ClearChildren();
 
             // Wrap onto two rows past four panels. Six tabs across 368px leaves each
             // caption about 60px, which truncates "Notifications" to noise; split in
             // half they get 120px, which fits every title the mod has.
-            int perRow = panels.Count <= 4 ? panels.Count : (panels.Count + 1) / 2;
+            int perRow = shown.Count <= 4 ? shown.Count : (shown.Count + 1) / 2;
             El row = null;
 
-            for (int i = 0; i < panels.Count; i++)
+            for (int i = 0; i < shown.Count; i++)
             {
-                var p = panels[i];
+                var p = shown[i];
                 var target = p;
 
                 if (i % perRow == 0) row = UIF.Box(tabStrip, "TabRow").Row(Theme.Space2).H(24);
@@ -366,6 +400,48 @@ namespace GeneKerman.UI.Gui
                 b.Label.Size(Theme.FontXs).Ellipsis();
                 b.E.PrefW(0).Flex(1f);
             }
+        }
+
+        /// <summary>
+        /// Build (or clear) the limited-mode notice, and make sure the panel on screen
+        /// is one that still works. Called when the gate flips, not every frame — the
+        /// text names a version, and the version is fixed once the gate is up.
+        /// </summary>
+        private void UpdateLimited()
+        {
+            bool limited = Limited;
+            if (limited == lastLimited && limitedBanner != null && built) return;
+            lastLimited = limited;
+
+            limitedBanner.ClearChildren();
+            limitedBanner.Active(limited);
+
+            if (limited)
+            {
+                var mod = GeneKermanMod.Instance;
+                var card = UIF.Card(limitedBanner, "Notice").Column(Theme.Space1).Pad(Theme.Space3);
+                UIF.Label(card, "Limited mode: this build is out of date",
+                          Theme.FontSm, Theme.Status("warning")).Bold();
+
+                string latest = string.IsNullOrEmpty(mod?.LatestVersion) ? "a newer build" : mod.LatestVersion;
+                UIF.Muted(card,
+                    "The server refused version " + ModVersion.Current + " and wants " + latest +
+                    ". Missions, contracts, the marketplace and sending craft are unavailable. " +
+                    "Exporting a craft and importing a flag still work, and you can point the mod " +
+                    "at another server in Settings.").Body();
+
+                var row = UIF.Box(card, "Actions").Row(Theme.Space2).H(26);
+                UIF.Button(row, "Re-check", () => mod?.RecheckVersion(), BtnStyle.Secondary, 26).E.Flex(1f);
+                if (!string.IsNullOrEmpty(mod?.UpdateDownloadUrl))
+                    UIF.Button(row, "Download latest", () => Application.OpenURL(mod.UpdateDownloadUrl),
+                               BtnStyle.Primary, 26).E.Flex(1f);
+            }
+
+            // The panel that was open may be one of the ones that just went away (or
+            // came back): land on something that exists either way.
+            var shown = Available();
+            if (shown.Count > 0 && (active == null || !shown.Contains(active))) Select(shown[0]);
+            else RebuildTabStrip();
         }
 
         private void Select(SidebarPanel panel)
@@ -490,6 +566,7 @@ namespace GeneKerman.UI.Gui
 
             UpdatePixelDensity();
             UpdateAssets();
+            UpdateLimited();
             AnimateExpand();
             viewer.Tick();
             toasts.Tick();
@@ -664,7 +741,10 @@ namespace GeneKerman.UI.Gui
             var mod = GeneKermanMod.Instance;
             if (mod == null || mod.Api == null) return false;
 
-            if (mod.UpdateRequired) return false;
+            // The update gate itself is IMGUI and exclusive: while it is up, nothing
+            // else in the mod draws. Once the player has dismissed it with "continue
+            // anyway", this panel *is* the limited UI — see UpdateLimited.
+            if (mod.UpdateRequired && !mod.UpdateAcknowledged) return false;
             if (!mod.Api.DataGatheringEnabled) return false;
             if (!Consent.Accepted) return false;
 

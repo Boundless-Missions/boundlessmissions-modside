@@ -119,8 +119,23 @@ namespace GeneKerman
             string.IsNullOrEmpty(marketplaceUrl) ? DefaultMarketplaceUrl : marketplaceUrl;
         /// <summary>Whether live notifications (toast popups + socket/poll) are enabled.</summary>
         public bool NotificationsEnabled => notificationsEnabled;
-        /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) are enabled.</summary>
-        public bool CheckpointPhotosEnabled => checkpointPhotosEnabled;
+        /// <summary>Feature gate for milestone hero shots. The server holds its own master
+        /// switch over this feature (<c>settings.CHECKPOINT_PHOTOS_ENABLED</c>) and it is
+        /// currently off, so every upload is refused — which makes the whole flow worse than
+        /// absent: a prompt interrupts a flight, the capture runs, and the photo goes nowhere.
+        /// So the feature is held here too, and the switch is hidden from both settings
+        /// screens rather than offering a choice that changes nothing. Flip this back to true
+        /// when the server accepts uploads again; the player's own preference sits untouched
+        /// underneath, so anyone who had prompts off keeps them off. Deliberately
+        /// <c>static readonly</c> rather than <c>const</c>, so the call sites that test it
+        /// don't fold away into unreachable-code warnings.</summary>
+        public static readonly bool CheckpointPhotosAvailable = false;
+
+        /// <summary>Whether milestone hero-shot prompts (rendezvous/flyby/asteroid) fire —
+        /// the player's preference AND the feature gate above. Every consumer (the detector's
+        /// per-event gate, the host's Tick gate) reads this one property, so the gate reaches
+        /// all of them.</summary>
+        public bool CheckpointPhotosEnabled => CheckpointPhotosAvailable && checkpointPhotosEnabled;
         /// <summary>Master opt-in: whether the mod may collect and transmit any data at
         /// all. False means the user opted out — the mod is inert and sends nothing.</summary>
         public bool DataGatheringEnabled => dataGatheringEnabled;

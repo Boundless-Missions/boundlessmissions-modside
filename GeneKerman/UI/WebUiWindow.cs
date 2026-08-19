@@ -9,7 +9,7 @@
  * to do nothing at all.
  *
  * So: always show where the UI is, always offer a way back to it, and always offer a
- * way out to the classic UI.
+ * way out to the in-game panel.
  */
 
 using UnityEngine;
@@ -103,7 +103,9 @@ namespace GeneKerman.UI
 
             GUILayout.Space(4);
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("Switch to classic UI", GUILayout.Height(24)))
+            // Back to the in-game sidebar: SetUiMode(false) is what the toolbar button
+            // then opens, so this is the recovery path when the browser never appeared.
+            if (GUILayout.Button("Use the in-game panel", GUILayout.Height(24)))
                 mod?.SetUiMode(false);
 
             if (GUILayout.Button("Close", GUILayout.Height(24)))

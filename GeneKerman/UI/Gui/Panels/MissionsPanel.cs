@@ -1,16 +1,16 @@
 /*
  * UI/Gui/Panels/MissionsPanel.cs – This week's missions, in uGUI.
  *
- * Visual spec: WebUI/src/screens/Missions.tsx. Data: MainWindow's cached
+ * Visual spec: WebUI/src/screens/Missions.tsx. Data: ClientState's cached
  * `missions` / `weekKey` / `missionsLocked`, filled by RefreshMissions().
  *
  * The difficulty thresholds are the ones both other front ends already use
- * (MainWindow.cs:689 and Missions.tsx:16) — <=3 Easy, <=6 Medium, <=8 Hard,
+ * (the classic window and Missions.tsx:16) — <=3 Easy, <=6 Medium, <=8 Hard,
  * else Extreme. They are duplicated here for the same reason they are duplicated
  * in the React app: the band is a rendering decision, and the alternative is a
  * bridge round-trip for four comparisons. If they ever move, all three move.
  *
- * Accept runs MainWindow.DoSelectMission through its Request wrapper rather than
+ * Accept runs ClientState.DoSelectMission through its Request wrapper rather than
  * reissuing the API call, because that coroutine also injects the accepted mission
  * into KSP's stock contract system.
  *
@@ -36,7 +36,7 @@ namespace GeneKerman.UI.Gui
         protected override void Rebuild()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             var missions = main.MissionList;
@@ -118,11 +118,11 @@ namespace GeneKerman.UI.Gui
             UIF.Muted(rewards, "Fine " + MiniJSON.GetInt(m, "fine").ToString("N0"));
             UIF.Grow(rewards);
 
-            // Accepting runs MainWindow's DoSelectMission, which also injects the
+            // Accepting runs ClientState's DoSelectMission, which also injects the
             // contract into KSP's stock contract system — reissuing the API call
             // from here would accept the mission but never make it appear in the
             // in-game contracts screen.
-            var main = GeneKermanMod.Instance?.MainWindowRef;
+            var main = GeneKermanMod.Instance?.State;
             if (main == null || main.MissionsLocked) return;
 
             int missionId = MiniJSON.GetInt(m, "id");
@@ -132,7 +132,7 @@ namespace GeneKerman.UI.Gui
                .Interactable(!Busy);
         }
 
-        /// <summary>The thresholds MainWindow.cs:689 and Missions.tsx:16 both use.</summary>
+        /// <summary>The thresholds the classic window and Missions.tsx:16 both use.</summary>
         private static Color BandFor(int difficulty, out string label)
         {
             if (difficulty <= 3) { label = "Easy"; return Theme.Status("success"); }
@@ -147,7 +147,7 @@ namespace GeneKerman.UI.Gui
         protected override void Poll()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             if (!requested && main.MissionList == null && !main.MissionsLoading &&

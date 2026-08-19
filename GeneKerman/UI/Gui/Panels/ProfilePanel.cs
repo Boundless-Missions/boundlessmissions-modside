@@ -2,8 +2,8 @@
  * UI/Gui/Panels/ProfilePanel.cs – Account summary, in uGUI.
  *
  * The React `ProfileCard` (WebUI/src/screens/ProfileCard.tsx) is the visual
- * specification; MainWindow.DrawProfileTab is the data specification. Neither is
- * re-implemented: the numbers come from MainWindow's cached `profile` blob, which
+ * specification; the classic window's profile tab is the data specification. Neither is
+ * re-implemented: the numbers come from ClientState's cached `profile` blob, which
  * is the same dictionary both other front ends render.
  *
  * Read-only, deliberately. Unlink, log-out-all and the privacy/terms links are
@@ -31,7 +31,7 @@ namespace GeneKerman.UI.Gui
         protected override void Rebuild()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             var profile = main.ProfileData;
@@ -44,7 +44,7 @@ namespace GeneKerman.UI.Gui
             if (mod.Api == null || !mod.Api.IsLinked)
             {
                 UIF.Notice(col, "Not linked to a Discord account.",
-                       "Link this install from the classic window to see your account here.");
+                       "Use the toolbar button to link it; your balance and XP appear here after that.");
                 return;
             }
 
@@ -107,7 +107,6 @@ namespace GeneKerman.UI.Gui
             UIF.Button(card, "Unlink this install", () =>
             {
                 mod.Api.ClearToken();
-                mod.ShowMainWindow = false;
                 mod.ShowLinkWindow = true;
                 MarkDirty();
             }, BtnStyle.Secondary, 28);
@@ -127,7 +126,7 @@ namespace GeneKerman.UI.Gui
                 UIF.Button(row, "Confirm", () =>
                 {
                     logoutConfirm = false;
-                    mod.MainWindowRef?.RequestLogoutAllDevices();
+                    mod.State?.RequestLogoutAllDevices();
                     MarkDirty();
                 }, BtnStyle.Destructive, 28).E.Flex(1f);
                 UIF.Button(row, "Cancel", () => { logoutConfirm = false; MarkDirty(); },
@@ -161,7 +160,7 @@ namespace GeneKerman.UI.Gui
             return int.TryParse(o?.ToString() ?? "", out parsed) ? parsed : 0;
         }
 
-        private void Snapshot(MainWindow main, Dictionary<string, object> profile)
+        private void Snapshot(ClientState main, Dictionary<string, object> profile)
         {
             lastLoading = main.ProfileLoading;
             lastHadProfile = profile != null;
@@ -172,10 +171,10 @@ namespace GeneKerman.UI.Gui
         protected override void Poll()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
-            // MainWindow only fetches when *it* is opened, so a player who never
+            // the classic window only fetched when it was opened, so a player who never
             // opens the classic window would otherwise see an empty panel forever.
             // Once per becoming-visible, not once per frame — a failed fetch leaves
             // profile null, and retrying on every frame would hammer the server.

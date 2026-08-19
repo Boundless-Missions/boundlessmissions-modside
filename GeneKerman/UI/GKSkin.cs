@@ -6,11 +6,13 @@
  * the native texture handle is destroyed (texture becomes null/invalid).
  *
  * All UI windows should use GKSkin.MakeTex() and GKSkin.CheckStyles()
- * instead of creating their own textures.
+ * instead of creating their own textures. "All" is now a short list: the gates
+ * (consent, update, data-sharing paused, device verify), the link screen, the
+ * checkpoint prompt and the browser-UI notice. Everything else is uGUI, on the
+ * sidebar's canvas, and gets its colours from UI/Gui/Theme.cs instead.
  */
 
 using System.Collections.Generic;
-using System.IO;
 using UnityEngine;
 
 namespace GeneKerman.UI
@@ -19,9 +21,6 @@ namespace GeneKerman.UI
     {
         // Cache textures by their RGBA color key
         private static readonly Dictionary<uint, Texture2D> texCache = new Dictionary<uint, Texture2D>();
-
-        // Cache icon textures loaded from disk, keyed by filename (e.g. "Refresh")
-        private static readonly Dictionary<string, Texture2D> iconCache = new Dictionary<string, Texture2D>();
 
         // Sentinel texture to detect scene-change destruction
         private static Texture2D sentinel;
@@ -111,51 +110,6 @@ namespace GeneKerman.UI
         }
 
         /// <summary>
-        /// Load a PNG icon from GameData/BoundlessMissions/Textures/{name}.png and
-        /// scale it to <paramref name="size"/> pixels (default 14).
-        /// Cached and marked HideAndDontSave to survive scene changes.
-        /// Returns null if the file doesn't exist.
-        /// </summary>
-        public static Texture2D LoadIcon(string name, int size = 14)
-        {
-            string cacheKey = name + "_" + size;
-            Texture2D tex;
-            if (iconCache.TryGetValue(cacheKey, out tex) && tex != null)
-                return tex;
-
-            string path = Path.Combine(GeneKermanMod.ModPath, "Textures", name + ".png");
-            if (!File.Exists(path))
-            {
-                Debug.LogWarning("[GeneKerman] Icon not found: " + path);
-                return null;
-            }
-
-            // Load at native resolution
-            var src = new Texture2D(2, 2, TextureFormat.ARGB32, false);
-            src.LoadImage(File.ReadAllBytes(path));
-
-            // Scale down via RenderTexture blit
-            RenderTexture rt = RenderTexture.GetTemporary(size, size, 0, RenderTextureFormat.ARGB32);
-            rt.filterMode = FilterMode.Bilinear;
-            RenderTexture prev = RenderTexture.active;
-            RenderTexture.active = rt;
-            GL.Clear(true, true, Color.clear);
-            Graphics.Blit(src, rt);
-
-            tex = new Texture2D(size, size, TextureFormat.ARGB32, false);
-            tex.hideFlags = HideFlags.HideAndDontSave;
-            tex.ReadPixels(new Rect(0, 0, size, size), 0, 0);
-            tex.Apply();
-
-            RenderTexture.active = prev;
-            RenderTexture.ReleaseTemporary(rt);
-            Object.Destroy(src);
-
-            iconCache[cacheKey] = tex;
-            return tex;
-        }
-
-        /// <summary>
         /// Force all windows to rebuild their styles next frame.
         /// Called on scene transitions.
         /// </summary>
@@ -171,16 +125,6 @@ namespace GeneKerman.UI
             }
             foreach (var key in keysToRemove)
                 texCache.Remove(key);
-
-            // Also purge destroyed icon textures so they reload from disk
-            var iconKeysToRemove = new List<string>();
-            foreach (var kvp in iconCache)
-            {
-                if (kvp.Value == null)
-                    iconKeysToRemove.Add(kvp.Key);
-            }
-            foreach (var key in iconKeysToRemove)
-                iconCache.Remove(key);
 
             // Drop the themed skin so it rebuilds with fresh (non-destroyed) textures.
             themedSkin = null;

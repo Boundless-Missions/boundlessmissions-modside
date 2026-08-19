@@ -25,6 +25,11 @@ namespace GeneKerman.UI.Gui
     {
         public override string Title => "Tools";
 
+        /// <summary>The local half of this panel is the reason limited mode exists:
+        /// exporting a craft, importing a flag and repairing the roster all happen on
+        /// this PC. The two cards that need the server are hidden there instead.</summary>
+        internal override bool WorksOffline => true;
+
         private const int CardSend = 0;
         private const int CardExport = 1;
         private const int CardFlag = 2;
@@ -80,20 +85,26 @@ namespace GeneKerman.UI.Gui
             if (brokenCrew > 0)
                 BuildRosterRepair(col);
 
+            // Two ways to have no server: not linked yet, and the version gate (limited
+            // mode, where the sidebar narrows to this panel and Settings). Neither is a
+            // reason to withhold the local tools — exporting a craft and importing a
+            // flag happen entirely on this PC — so the notice sits above them instead
+            // of replacing them.
+            bool offline = !mod.Api.IsLinked || mod.UpdateRequired;
             if (!mod.Api.IsLinked)
-            {
                 UIF.Notice(col, "Not linked to a Discord account.",
-                           "Link this install from the classic window to use these tools.");
-                return;
-            }
+                           "Use the toolbar button to link this install; the tools below " +
+                           "work either way.");
 
             El body;
             UIF.ScrollView(col, out body, "tools").Flex(1f, 1f);
 
-            BuildQuicksend(body, mod);
+            if (!offline) BuildQuicksend(body, mod);
             BuildExport(body);
             BuildImportFlag(body, mod);
-            BuildBugReport(body, mod);
+            // Filing a bug is an upload like any other: under the gate it would come
+            // back 426, and with no account there is nobody to open the ticket for.
+            if (!offline) BuildBugReport(body, mod);
         }
 
         // ── Quicksend ───────────────────────────────────────────────────────

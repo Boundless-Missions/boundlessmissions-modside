@@ -1,12 +1,12 @@
 /*
  * UI/Gui/Panels/NotificationsPanel.cs – The notification feed, in uGUI.
  *
- * This mirrors MainWindow.DrawNotificationsTab and reads the *same* list object —
- * MainWindow owns the fetch, the local-notification merge, the de-dup and the
+ * This mirrors the classic window's notifications tab and reads the *same* list object —
+ * ClientState owns the fetch, the local-notification merge, the de-dup and the
  * unread count, and none of that is forked here.
  *
  * The mutations are the same story: mark-read, dismiss and mark-all-read all run
- * MainWindow's Request* wrappers rather than calling the API from here. Each of
+ * ClientState's Request* wrappers rather than calling the API from here. Each of
  * them has to flip a flag on the feed object, recount the unread badge and talk to
  * the server together, and a local notification (id "local-…", no server record)
  * has to skip the call entirely — a second copy of that is how a badge ends up
@@ -33,7 +33,7 @@ namespace GeneKerman.UI.Gui
         public override string Title => "Feed";
 
         // What the last Rebuild drew, so Poll can notice a fetch landing without
-        // MainWindow having to call back into the sidebar.
+        // ClientState having to call back into the sidebar.
         private int lastCount = -1;
         private string lastTopId = "";
         private bool lastLoading;
@@ -51,7 +51,7 @@ namespace GeneKerman.UI.Gui
         protected override void Rebuild()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             var feed = main.NotificationFeed;
@@ -67,7 +67,7 @@ namespace GeneKerman.UI.Gui
             if (!linked)
             {
                 UIF.Notice(col, "Not linked to a Discord account.",
-                     "Open the classic window and link with a 6-digit code to see your feed here.");
+                     "Use the toolbar button and link with a 6-digit code to see your feed here.");
                 return;
             }
 
@@ -227,7 +227,7 @@ namespace GeneKerman.UI.Gui
             giftBlueprintLoading.Clear();
         }
 
-        private void BuildRow(El parent, Dictionary<string, object> n, MainWindow main)
+        private void BuildRow(El parent, Dictionary<string, object> n, ClientState main)
         {
             bool read = MiniJSON.GetBool(n, "read");
             string id = MiniJSON.GetString(n, "id");
@@ -261,7 +261,7 @@ namespace GeneKerman.UI.Gui
             BuildRowActions(card, n, main, id, read);
         }
 
-        private void BuildRowActions(El card, Dictionary<string, object> n, MainWindow main,
+        private void BuildRowActions(El card, Dictionary<string, object> n, ClientState main,
                                      string id, bool read)
         {
             if (string.IsNullOrEmpty(id)) return;
@@ -329,7 +329,7 @@ namespace GeneKerman.UI.Gui
             return unread;
         }
 
-        private void Snapshot(MainWindow main, IList<object> feed, bool linked)
+        private void Snapshot(ClientState main, IList<object> feed, bool linked)
         {
             lastCount = feed?.Count ?? -1;
             lastTopId = TopId(feed);
@@ -346,14 +346,29 @@ namespace GeneKerman.UI.Gui
         /// catches the third case, which the other two cannot see — a mark-read
         /// leaves the list exactly as long, in exactly the same order.
         /// </summary>
+        /// <summary>Whether this showing has already asked for the feed. See Poll.</summary>
+        private bool requested;
+
         protected override void Poll()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             var feed = main.NotificationFeed;
             bool linked = mod.Api != null && mod.Api.IsLinked;
+
+            // One fetch per opening. The feed used to be filled by the classic window
+            // refreshing everything as it opened; with that window gone this panel has
+            // to ask for its own data, or it shows only what the socket happened to
+            // push while it was closed. Latched, because a failed fetch must not be
+            // retried every frame.
+            if (!requested && linked && !main.NotificationsLoading)
+            {
+                requested = true;
+                main.RequestNotificationRefresh();
+                return;
+            }
 
             if ((feed?.Count ?? -1) != lastCount ||
                 TopId(feed) != lastTopId ||
@@ -376,6 +391,7 @@ namespace GeneKerman.UI.Gui
         internal override void OnShown()
         {
             ClearStatus();
+            requested = false;
             // Opening the feed is the natural "anything for me?" moment — don't make
             // an offer wait for the next timer tick to appear.
             GiftInbox.Refresh();

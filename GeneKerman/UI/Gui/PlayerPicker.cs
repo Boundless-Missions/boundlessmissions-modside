@@ -453,7 +453,7 @@ namespace GeneKerman.UI.Gui
 
         private static string OwnUserId()
         {
-            var profile = GeneKermanMod.Instance?.MainWindowRef?.ProfileData;
+            var profile = GeneKermanMod.Instance?.State?.ProfileData;
             return profile == null ? "" : MiniJSON.GetString(profile, "user_id");
         }
 

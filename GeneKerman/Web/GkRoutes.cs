@@ -291,6 +291,10 @@ namespace GeneKerman.Web
               .Append(",\"username\":").Append(JobResult.Quote(mod?.LinkedUsername ?? ""))
               .Append(",\"notifications\":").Append(Json(api.NotificationsEnabled))
               .Append(",\"checkpointPhotos\":").Append(Json(api.CheckpointPhotosEnabled))
+              // Whether the page should draw the milestone-photo switch at all. The
+              // feature gate lives in ApiClient, so the browser UI is told rather than
+              // keeping its own copy of the answer.
+              .Append(",\"checkpointPhotosAvailable\":").Append(Json(ApiClient.CheckpointPhotosAvailable))
               .Append(",\"dataGathering\":").Append(Json(api.DataGatheringEnabled))
               .Append(",\"updateRequired\":").Append(Json(mod?.UpdateRequired == true))
               .Append(",\"modVersion\":").Append(JobResult.Quote(ModVersion.Current))

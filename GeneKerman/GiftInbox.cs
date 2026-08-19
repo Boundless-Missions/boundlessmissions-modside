@@ -154,7 +154,7 @@ namespace GeneKerman
 
             if (CanDeliverHere(source))
             {
-                mod.MainWindowRef?.PollCraftImports();
+                mod.State?.PollCraftImports();
                 onDone(true, source == "gift_vessel"
                     ? "Accepted — spawning it into your save."
                     : "Accepted — installing to your Ships folder.");

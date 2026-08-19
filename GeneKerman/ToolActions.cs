@@ -267,7 +267,7 @@ namespace GeneKerman
             return state;
         }
 
-        /// <summary>Mirrors MainWindow.CaptureEditorCraft's lookup: save folder first, then stock.</summary>
+        /// <summary>Mirrors the classic window's CaptureEditorCraft lookup: save folder first, then stock.</summary>
         public static string FindSavedCraftPath(string name, string type)
         {
             try

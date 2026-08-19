@@ -182,7 +182,7 @@ namespace GeneKerman.UI.Gui
         {
             if (string.IsNullOrEmpty(dueText)) Reset();
 
-            var profile = GeneKermanMod.Instance?.MainWindowRef?.ProfileData;
+            var profile = GeneKermanMod.Instance?.State?.ProfileData;
             string currency = profile == null
                 ? "KCoins" : MiniJSON.GetString(profile, "currency_name", "KCoins");
             int balance = profile == null ? -1 : MiniJSON.GetInt(profile, "balance");

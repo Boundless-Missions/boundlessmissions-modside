@@ -111,9 +111,8 @@ KSP Mod Side/
 │   ├── GeneKerman.csproj             # .NET 4.7.2 project file
 │   ├── lib/                          # Pre-built dependency (websocket-sharp.dll)
 │   ├── UI/                           # IMGUI window classes
-│   │   ├── MainWindow.cs             # Primary mod window (~143KB)
+│   │   ├── Gui/                      # The uGUI sidebar: the interface (panels, windows)
 │   │   ├── Gui/Panels/SubmitPanel.cs # Mission submission window (uGUI, draggable)
-│   │   ├── CreateContractWindow.cs   # Contract creation wizard
 │   │   ├── LinkWindow.cs             # Discord account linking
 │   │   ├── GKSkin.cs                 # Custom IMGUI skin/style
 │   │   ├── CheckpointPrompt.cs       # Milestone capture prompt
@@ -172,9 +171,9 @@ KSP Mod Side/
 
 | File | Lines | Role |
 |------|------:|------|
-| `MainWindow.cs` | ~3,800 | Primary mod window — contract list, vessel browser, settings, notifications, submission flow |
+| `ClientState.cs` | ~890 | The account: profile, missions, contracts and the notification feed — fetch, cache, de-dup, unread count and every action coroutine. Headless; the sidebar's panels, the browser bridge and the notification socket all read this one copy |
 | `UI/Gui/Panels/SubmitPanel.cs` + `SubmissionSession.cs` | ~370 + ~1,290 | Mission submission — vessel selection, constraint validation, multi-vessel fleet. The screen is a draggable uGUI window (`UI/Gui/FloatWindow.cs`); every rule and the upload itself live in the session beside it |
-| `CreateContractWindow.cs` | ~900 | Contract creation wizard — description, rewards, constraints, mod-list selection |
+| `UI/Gui/ContractForm.cs` | ~600 | Contract creation — description, rewards, constraints, mod-list mode, auctions and rescues |
 | `LinkWindow.cs` | ~260 | Discord account linking flow |
 | `GKSkin.cs` | ~200 | Custom IMGUI `GUISkin` with styled buttons, labels, scrollviews |
 | `CheckpointPrompt.cs` | ~100 | Milestone capture yes/no prompt |
@@ -830,9 +829,9 @@ fields, and scroll views.
 
 | Window | Scene(s) | Purpose |
 |--------|----------|---------|
-| `MainWindow` | All | Primary interface — contract list, vessel browser, mission log, settings, notifications |
+| `SidebarController` (uGUI) | All | Primary interface — missions, contract inbox, profile, feed, marketplace, tools, settings |
 | `SubmitPanel` (draggable window) | Flight, Editor | Mission submission — vessel selection, blueprint render, constraint validation, multi-vessel fleet selection |
-| `CreateContractWindow` | SpaceCenter | Contract creation wizard — description, rewards, difficulty, constraints, mod-list |
+| `ContractForm` (sidebar) | All | Contract creation — description, rewards, difficulty, constraints, mod-list, auctions, rescues |
 | `LinkWindow` | All | Discord account linking flow — enter link code, paste in Discord |
 | `CheckpointPrompt` | Flight | "Capture this moment?" yes/no prompt for detected milestones |
 | `NotificationPopup` | All | Toast-style overlay — clickable text, auto-dismiss timer |

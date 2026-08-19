@@ -78,7 +78,7 @@ namespace GeneKerman.Web
             if (!staticFiles.BundleExists)
             {
                 Debug.LogError("[GeneKerman] Web UI bundle missing (GameData/BoundlessMissions/WebUI/). " +
-                               "Staying on the classic UI.");
+                               "Staying on the in-game panel.");
                 return null;
             }
 
@@ -87,7 +87,7 @@ namespace GeneKerman.Web
             if (!staticFiles.VersionMatches(out string found))
             {
                 Debug.LogError($"[GeneKerman] Web UI bundle is version '{found ?? "unknown"}' but this " +
-                               $"build is '{ModVersion.Current}'. Reinstall the mod. Staying on the classic UI.");
+                               $"build is '{ModVersion.Current}'. Reinstall the mod. Staying on the in-game panel.");
                 return null;
             }
 

@@ -27,7 +27,6 @@ namespace GeneKerman
         public ApiClient Api { get; private set; }
 
         // State
-        public bool ShowMainWindow { get; set; }
         public bool ShowLinkWindow { get; set; }
         public bool ShowConsentWindow { get; set; }     // first-run privacy/terms opt-in gate
         public bool ShowDataPausedWindow { get; set; }  // shown when data sharing is opted out
@@ -69,12 +68,15 @@ namespace GeneKerman
         private ApplicationLauncherButton toolbarButton;
         private Texture2D toolbarIcon;
 
+        // Everything the mod knows about the account, and every call that changes
+        // it. Not a window: the classic IMGUI window that used to own this state was
+        // replaced by the sidebar, and only its data half survived (ClientState.cs).
+        private ClientState clientState;
+
         // UI Windows
-        private UI.MainWindow mainWindow;
         private UI.LinkWindow linkWindow;
         private UI.ConsentWindow consentWindow;
         private UI.DataPausedWindow dataPausedWindow;
-        private UI.CreateContractWindow createContractWindow;
         private UI.CheckpointPrompt checkpointPrompt;
         private UI.DeviceVerifyWindow deviceVerifyWindow;
 
@@ -125,8 +127,10 @@ namespace GeneKerman
             if (!UpdateRequired) return;
             UpdateAcknowledged = true;
             updateWindow.Hide();
-            ShowMainWindow = true;
-            mainWindow.OnOpen();
+            // The sidebar draws while the gate is acknowledged (SidebarController
+            // .ShouldRender) and narrows itself to the panels that work without a
+            // server — which is the whole point of "continue anyway".
+            sidebar?.SetOpen(true);
             Debug.Log("[GeneKerman] Update gate acknowledged — limited (offline) features enabled.");
         }
 
@@ -179,11 +183,10 @@ namespace GeneKerman
             notifSocket.TicketProvider = onTicket => StartCoroutine(Api.GetWsTicket(onTicket));
 
             // Initialize UI windows
-            mainWindow = new UI.MainWindow();
+            clientState = new ClientState();
             linkWindow = new UI.LinkWindow();
             consentWindow = new UI.ConsentWindow();
             dataPausedWindow = new UI.DataPausedWindow();
-            createContractWindow = new UI.CreateContractWindow();
             checkpointPrompt = new UI.CheckpointPrompt();
             deviceVerifyWindow = new UI.DeviceVerifyWindow();
             updateWindow = new UI.UpdateRequiredWindow();
@@ -294,7 +297,7 @@ namespace GeneKerman
         public void ReopenWebUi()
         {
             if (!OpenWebUi())
-                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable, using classic UI.",
+                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable, using the in-game panel.",
                     5f, ScreenMessageStyle.UPPER_CENTER);
         }
 
@@ -404,7 +407,7 @@ namespace GeneKerman
                 Time.realtimeSinceStartup - lastImportCheck > ImportInterval)
             {
                 lastImportCheck = Time.realtimeSinceStartup;
-                mainWindow.PollCraftImports();
+                clientState.PollCraftImports();
             }
 
             // Friend-quicksend offers awaiting an accept/decline. Separate from the
@@ -518,7 +521,7 @@ namespace GeneKerman
             MaybeHandleRescueRemoval(notif);
 
             // Keep the panel in sync so the item is already there when opened.
-            mainWindow.AddNotification(notif);
+            clientState.AddNotification(notif);
 
             // Pulse the sidebar tab. Unconditional by design — every notification,
             // regardless of setting, regardless of whether the panel is already
@@ -766,14 +769,12 @@ namespace GeneKerman
                 return;
             }
 
-            // Acknowledged update gate: the main window is the only thing on offer, and
-            // it comes up in limited mode. Linking is a server call that would just 426,
-            // so an unlinked client goes here too rather than to the link window.
+            // Acknowledged update gate: the sidebar is the only thing on offer, and it
+            // comes up in limited mode. Linking is a server call that would just 426, so
+            // an unlinked client goes here too rather than to the link window.
             if (UpdateRequired)
             {
-                ShowMainWindow = !ShowMainWindow;
-                if (ShowMainWindow)
-                    mainWindow.OnOpen();
+                sidebar?.Toggle();
                 return;
             }
 
@@ -790,33 +791,18 @@ namespace GeneKerman
                 if (OpenWebUi()) return;
 
                 // Bridge could not start (missing or mismatched WebUI bundle, port
-                // trouble). Fall through to the classic window rather than strand the
-                // player on a button that does nothing.
-                Debug.LogWarning("[GeneKerman] Web UI unavailable — falling back to the classic window.");
-                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable, using classic UI.",
+                // trouble). Fall through to the sidebar rather than strand the player on
+                // a button that does nothing.
+                Debug.LogWarning("[GeneKerman] Web UI unavailable — falling back to the sidebar.");
+                ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable, using the in-game panel.",
                     5f, ScreenMessageStyle.UPPER_CENTER);
             }
 
-            // The sidebar is what the button opens now. The classic window is still
-            // built and still loaded, but nothing is left that only it can do —
-            // rescue contracts, submission and wreck spawning have all moved — so it
-            // is reached from Settings → Open the classic window rather than here.
+            // The sidebar is the interface. Nothing IMGUI is left except the gates
+            // (consent, update, data-sharing, device) and the link screen below, each
+            // of which draws precisely when the sidebar's canvas may not.
             if (Api.IsLinked) sidebar?.Toggle();
             else ShowLinkWindow = !ShowLinkWindow;
-        }
-
-        /// <summary>
-        /// Raise the classic IMGUI window. Called from the sidebar's Settings panel,
-        /// which is the only route to it now that the toolbar button opens the
-        /// sidebar. It is kept as a second opinion rather than as the owner of any
-        /// flow: every tab it draws has a sidebar equivalent, and the one thing only
-        /// it still draws is the limited (acknowledged-update) mode, where the
-        /// sidebar's canvas deliberately does not render at all.
-        /// </summary>
-        public void OpenClassicWindow()
-        {
-            ShowMainWindow = true;
-            mainWindow.OnOpen();
         }
 
         // ── GUI ─────────────────────────────────────────────────────────────
@@ -837,7 +823,7 @@ namespace GeneKerman
             {
                 // Outdated client: nothing but the update prompt is usable, until the
                 // player dismisses it with "Continue anyway" (see UpdateAcknowledged),
-                // which drops them into the limited main window below.
+                // which hands them the sidebar in limited mode.
                 if (UpdateRequired && !UpdateAcknowledged)
                 {
                     updateWindow.Draw();
@@ -857,29 +843,24 @@ namespace GeneKerman
                     if (ShowConsentWindow)
                         consentWindow.Draw();
                 }
-                // Acknowledged update gate: only the main window, and MainWindow itself
-                // narrows to the tabs that work without the server (Tools, Settings).
-                // Nothing that transmits is drawn — no submit/create/notification popups,
-                // no link window.
+                // Acknowledged update gate. The branch is empty and must stay: limited
+                // mode is the sidebar's now (it narrows itself to the panels that work
+                // with no server), and what this arm still does is stop the block below
+                // from running — nothing that transmits may be on screen here, which
+                // means no link window and no device prompt.
                 else if (UpdateRequired)
                 {
-                    if (ShowMainWindow)
-                        mainWindow.Draw();
                 }
                 else
                 {
-                    if (ShowMainWindow && Api.IsLinked)
-                        mainWindow.Draw();
-
                     // Unlinked client past the opt-in gate: offer the link menu.
                     if (!Api.IsLinked && (ShowLinkWindow || ShowConsentWindow))
                         linkWindow.Draw();
 
-                    // Where the UI is running, plus the escape hatches back to it and
-                    // to the classic windows. Drawn in web mode only.
+                    // Where the browser UI is running, plus the escape hatch back to
+                    // the in-game panel. Drawn in web mode only.
                     webUiWindow.Draw();
 
-                    createContractWindow.Draw();
 
                     // These stay IMGUI permanently, in every mode. The checkpoint
                     // prompt is time-critical and must appear over the game while the
@@ -1125,7 +1106,7 @@ namespace GeneKerman
             {
                 if (ok)
                 {
-                    mainWindow.UpdateProfile(data);
+                    clientState.UpdateProfile(data);
                     LinkedUsername = MiniJSON.GetString(data, "username");
                     Debug.Log("[GeneKerman] Profile loaded: " + LinkedUsername);
                 }
@@ -1204,8 +1185,11 @@ namespace GeneKerman
         public void OnAccountLinked(Dictionary<string, object> data)
         {
             ShowLinkWindow = false;
-            ShowMainWindow = true;
-            mainWindow.OnOpen();
+            // Straight into the interface, the way the classic window used to open
+            // itself here. The browser UI is not launched for them — that is a click
+            // on the toolbar button, not something linking should do behind their back.
+            sidebar?.SetOpen(true);
+            clientState.RefreshAll();
             StartCoroutine(InitialFetch());
             notifSocket.Connect();
 
@@ -1226,7 +1210,7 @@ namespace GeneKerman
         /// installed, device approved, …): toast it AND record it in the panel so
         /// it survives the 8-second toast fade. Unlike server notifications these
         /// have no Firestore record — they're session-local (see
-        /// MainWindow.AddLocalNotification) and disappear on a game restart.
+        /// ClientState.AddLocalNotification) and disappear on a game restart.
         /// </summary>
         /// <summary>
         /// Raise a transient top-right toast and nothing else. Everything the mod
@@ -1247,7 +1231,7 @@ namespace GeneKerman
         {
             Toast(title, message, contractId, localAction);
 
-            if (mainWindow == null) return;
+            if (clientState == null) return;
 
             var data = new Dictionary<string, object>();
             if (!string.IsNullOrEmpty(contractId)) data["contract_id"] = contractId;
@@ -1267,7 +1251,7 @@ namespace GeneKerman
             };
 
             UnreadNotifications++;
-            mainWindow.AddLocalNotification(notif);
+            clientState.AddLocalNotification(notif);
         }
 
         /// <summary>Called by the consent window once the user accepts the privacy
@@ -1299,7 +1283,8 @@ namespace GeneKerman
         public void OnConsentLapsed()
         {
             notifSocket.Disconnect();
-            ShowMainWindow = false;
+            // Nothing of ours is on screen after this: the sidebar's canvas stops
+            // rendering the moment consent lapses (SidebarController.ShouldRender).
             ShowLinkWindow = false;
             ShowConsentWindow = true;   // surface the re-accept gate immediately
             Debug.Log("[GeneKerman] Consent lapsed — re-accept required before any data is sent.");
@@ -1317,7 +1302,6 @@ namespace GeneKerman
             {
                 // Opt-out: shut everything down so nothing is collected or sent.
                 notifSocket.Disconnect();
-                ShowMainWindow = false;
                 ShowLinkWindow = false;
                 ShowConsentWindow = false;
                 Debug.Log("[GeneKerman] Data sharing disabled — mod is now inert.");
@@ -1371,21 +1355,15 @@ namespace GeneKerman
                         UpdateAcknowledged = false;
                         updateWindow.Hide();
 
-                        // Hand the player back a usable window. Coming out of limited mode
-                        // the main window is open but holds no data (nothing was fetched
-                        // while gated), and for an unlinked client OnGUI would stop drawing
-                        // it entirely — leaving the screen blank with no obvious next step.
-                        if (wasLimited && ShowMainWindow)
+                        // Hand the player back a usable interface. Coming out of limited
+                        // mode the sidebar is showing panels that hold no data — nothing
+                        // was fetched while gated — and an unlinked client has nothing to
+                        // fetch at all, which would leave them on a panel with no obvious
+                        // next step instead of on the link screen.
+                        if (wasLimited)
                         {
-                            if (Api.IsLinked)
-                            {
-                                mainWindow.OnOpen();     // now a real refresh
-                            }
-                            else
-                            {
-                                ShowMainWindow = false;
-                                ShowLinkWindow = true;   // this server accepts us — offer linking
-                            }
+                            if (Api.IsLinked) clientState.RefreshAll();
+                            else ShowLinkWindow = true;   // this server accepts us — offer linking
                         }
                     }
                     return;
@@ -1400,7 +1378,6 @@ namespace GeneKerman
                 // the limited UI instead of yanking the window back over it.
                 if (UpdateAcknowledged) return;
 
-                ShowMainWindow = false;
                 ShowLinkWindow = false;
                 updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
                 Debug.Log($"[GeneKerman] Update required: {ModVersion.Current} → {LatestVersion}");
@@ -1444,7 +1421,6 @@ namespace GeneKerman
             UpdateDownloadUrl = downloadUrl ?? "";
             if (UpdateRequired) return;   // window already up
             UpdateRequired = true;
-            ShowMainWindow = false;
             ShowLinkWindow = false;
             updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
             Debug.Log($"[GeneKerman] Update required (server-enforced): {ModVersion.Current} → {LatestVersion}");
@@ -1459,7 +1435,7 @@ namespace GeneKerman
         {
             if (!Api.IsLinked) return;   // already dropped
             Api.ClearToken();
-            ShowMainWindow = false;
+            sidebar?.SetOpen(false);
             ShowLinkWindow = true;   // drop the user straight onto the link screen
             // Transient toast, not a stored notification: like the device-denied
             // unlink, persisting it would resurface it after the user re-links.
@@ -1545,7 +1521,7 @@ namespace GeneKerman
                         Debug.Log($"[GeneKerman] Device report upload: ok={ok} ({s})"));
                 }
                 Api.ClearToken();
-                ShowMainWindow = false;
+                sidebar?.SetOpen(false);
                 ShowLinkWindow = true;   // drop the user straight onto the link screen
                 // Terminal unlink — keep this a transient toast. Persisting it would
                 // make it resurface in the panel the next time the user re-links.
@@ -1559,19 +1535,21 @@ namespace GeneKerman
             }
         }
 
-        /// <summary>Open the main window's Contracts tab focused on a specific contract.</summary>
+        /// <summary>Open the inbox on a specific contract — what clicking a toast
+        /// about one does. The sidebar owns the switching (SidebarController
+        /// .ShowContract), so the panel gets its OnShown either way.</summary>
         public void OpenContractDetail(string contractId)
         {
-            ShowMainWindow = true;
-            mainWindow.OpenContractDetail(contractId);
+            sidebar?.SetOpen(true);
+            sidebar?.ShowContract(contractId);
         }
 
-        /// <summary>Open the classic window on the feed — where a notification's own
-        /// action button lives (see LocalNotifActions).</summary>
+        /// <summary>Open the feed — where a notification's own action button lives
+        /// (see LocalNotifActions).</summary>
         public void OpenNotifications()
         {
-            ShowMainWindow = true;
-            if (mainWindow != null) mainWindow.OpenNotifications();
+            sidebar?.SetOpen(true);
+            sidebar?.ShowNotifications();
         }
 
         public void OpenSubmitWindow(string contractId, string mission,
@@ -1584,20 +1562,15 @@ namespace GeneKerman
         }
 
         /// <summary>
-        /// The classic main window, for front ends that display data it already
-        /// owns (currently the uGUI sidebar's notification feed). Internal, and
-        /// read-only by convention: MainWindow stays the one place that fetches.
+        /// The account state every front end reads: the sidebar's panels, the browser
+        /// bridge and the notification socket. One copy, by reference — see
+        /// ClientState.cs on why it is never handed out as a snapshot.
         /// </summary>
-        internal UI.MainWindow MainWindowRef => mainWindow;
+        internal ClientState State => clientState;
 
         public void RunCoroutine(IEnumerator routine)
         {
             StartCoroutine(routine);
-        }
-
-        public void OpenCreateContractWindow(int balance, string userId = "", string userName = "")
-        {
-            createContractWindow.Open(balance, userId, userName);
         }
 
         // ── Rescue vessel ops ───────────────────────────────────────────────
@@ -1923,7 +1896,7 @@ namespace GeneKerman
 
         public void RefreshContracts()
         {
-            mainWindow?.RefreshContracts();
+            clientState?.RefreshContracts();
         }
     }
 }

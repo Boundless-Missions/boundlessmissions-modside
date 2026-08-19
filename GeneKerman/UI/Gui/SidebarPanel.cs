@@ -26,6 +26,14 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         internal virtual bool WantsWide => false;
 
+        /// <summary>
+        /// True when this panel is worth showing with no server behind it. False for
+        /// every panel that fetches, because under the version gate each of those
+        /// requests comes back 426 — the sidebar hides them rather than offering a
+        /// screen that can only fail (see SidebarController's limited mode).
+        /// </summary>
+        internal virtual bool WorksOffline => false;
+
         /// <summary>The element this panel builds into. Null before Attach.</summary>
         protected El Host { get; private set; }
 
@@ -113,7 +121,7 @@ namespace GeneKerman.UI.Gui
 
         // ── Action feedback ─────────────────────────────────────────────────
         //
-        // The sidebar's equivalent of MainWindow's status line. An action's result
+        // The sidebar's equivalent of the classic window's status line. An action's result
         // has to land somewhere the player is actually looking: the classic window
         // may well be closed, and its status line with it.
 

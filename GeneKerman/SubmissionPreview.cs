@@ -1,13 +1,13 @@
 /*
  * SubmissionPreview.cs – Fetching the images a contractor submitted for review.
  *
- * This logic used to live inside MainWindow.FetchBlueprints, writing straight into
+ * This logic used to live inside the classic window's FetchBlueprints, writing straight into
  * that window's popup fields (blueprintTextures, telemetryTextures, blueprintStatus,
  * loadingBlueprints). Same shape as CraftDelivery before its extraction in 3b: no
  * completion point, so no second front end could use it.
  *
  * Extracted here as one coroutine that calls onDone exactly once with a result
- * object. MainWindow wraps it to keep its popup; the uGUI sidebar wraps it to show
+ * object. The classic window wrapped it for its popup; the uGUI sidebar wraps it to show
  * the submission inline. One implementation, two front ends.
  *
  * The `telemetry_urls` / `telemetry_url` fallback below is exactly the kind of

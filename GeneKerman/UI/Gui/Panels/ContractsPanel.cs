@@ -1,7 +1,7 @@
 /*
  * UI/Gui/Panels/ContractsPanel.cs – The contract inbox, in uGUI.
  *
- * Visual spec: WebUI/src/screens/Contracts.tsx. Data: MainWindow's cached
+ * Visual spec: WebUI/src/screens/Contracts.tsx. Data: ClientState's cached
  * `contracts`, filled by RefreshContracts() — which also uploads the part
  * catalogue, so this panel deliberately does not fetch by any other route.
  *
@@ -12,13 +12,13 @@
  * with the detail wastes half the width and loses your place in the inbox.
  *
  * The detail's action bar mirrors
- * MainWindow.DrawContractDetail's mapping — status crossed with is_outgoing —
+ * the classic window's contract detail mapping — status crossed with is_outgoing —
  * button for button. Nothing here reimplements an action: every one routes into
- * the same coroutine the classic window runs (see MainWindow's Request*
+ * the same coroutine the classic window runs (see ClientState's Request*
  * wrappers), because those bodies carry side effects a second copy would drop.
  *
  * Status colours come from Theme.ContractStatus, which matches the web UI's
- * STATUS_STYLE rather than MainWindow's older IMGUI palette — visual parity with
+ * STATUS_STYLE rather than the classic window's older IMGUI palette — visual parity with
  * the site is the whole point of this surface. See the note on Theme.ContractStatus.
  *
  * The list carries the classic window's mail furniture as well: week groups that
@@ -82,10 +82,10 @@ namespace GeneKerman.UI.Gui
         private string autoCollapsedFor;
 
         /// <summary>
-        /// Contracts past which older weeks start folded. The classic window has the
-        /// same rule written down (MainWindow.AutoCollapseWeeks) but never calls it;
-        /// here it runs, because a sidebar column shows fewer rows than a 550px window
-        /// and an inbox that opens on last spring's contracts is not an inbox.
+        /// Contracts past which older weeks start folded. The classic window wrote the
+        /// same rule down (AutoCollapseWeeks) and never called it; here it runs, because
+        /// a sidebar column shows fewer rows than that 550px window did and an inbox
+        /// that opens on last spring's contracts is not an inbox.
         /// </summary>
         private const int AutoCollapseAfter = 10;
 
@@ -140,7 +140,7 @@ namespace GeneKerman.UI.Gui
         protected override void Rebuild()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             var contracts = main.ContractList;
@@ -419,7 +419,7 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         private void BulkCancel(List<Dictionary<string, object>> shown)
         {
-            var main = GeneKermanMod.Instance?.MainWindowRef;
+            var main = GeneKermanMod.Instance?.State;
             if (main == null) return;
 
             var ids = new List<string>();
@@ -760,17 +760,17 @@ namespace GeneKerman.UI.Gui
             selected.Clear();
             Select(cid);
 
-            GeneKermanMod.Instance?.MainWindowRef?.RequestContractsRefresh();
+            GeneKermanMod.Instance?.State?.RequestContractsRefresh();
         }
 
         // ── Detail view ─────────────────────────────────────────────────────
         //
-        // The action bar mirrors MainWindow.DrawContractDetail's mapping exactly —
+        // The action bar mirrors the classic window's contract detail mapping exactly —
         // status crossed with is_outgoing — and every button routes into the same
-        // coroutine the classic window runs. See the note on MainWindow's
-        // Request* wrappers for why that matters rather than being tidiness.
+        // coroutine every other front end runs. See the note on ClientState's Request*
+        // wrappers for why that matters rather than being tidiness.
 
-        private void BuildDetail(El col, GeneKermanMod mod, MainWindow main, Dictionary<string, object> c)
+        private void BuildDetail(El col, GeneKermanMod mod, ClientState main, Dictionary<string, object> c)
         {
             string cid = MiniJSON.GetString(c, "contract_id");
             string status = MiniJSON.GetString(c, "status");
@@ -1094,7 +1094,7 @@ namespace GeneKerman.UI.Gui
         }
 
 
-        private void BuildActions(El col, GeneKermanMod mod, MainWindow main,
+        private void BuildActions(El col, GeneKermanMod mod, ClientState main,
                                   Dictionary<string, object> c, string cid, string status,
                                   bool isOutgoing, string mType)
         {
@@ -1200,7 +1200,7 @@ namespace GeneKerman.UI.Gui
             }
         }
 
-        private void BuildDisputeActions(El bar, MainWindow main, Dictionary<string, object> c,
+        private void BuildDisputeActions(El bar, ClientState main, Dictionary<string, object> c,
                                          string cid, bool isOutgoing)
         {
             var pendingReq = MiniJSON.GetDict(c, "pending_request");
@@ -1267,7 +1267,7 @@ namespace GeneKerman.UI.Gui
                            BtnStyle.Secondary, 28).Interactable(!Busy);
         }
 
-        private void BuildCompletedActions(El bar, MainWindow main, Dictionary<string, object> c,
+        private void BuildCompletedActions(El bar, ClientState main, Dictionary<string, object> c,
                                            string cid, bool isOutgoing, string mType)
         {
             // A flag has no craft to fetch — it is installed into the issuer's flag
@@ -1305,14 +1305,14 @@ namespace GeneKerman.UI.Gui
         /// The stranded vessel of an accepted rescue: spawn it, or — once it is in this
         /// save — say what state its crew are in.
         ///
-        /// Spawning runs MainWindow's coroutine rather than a copy: it carries the
+        /// Spawning runs ClientState's coroutine rather than a copy: it carries the
         /// per-save dedup (GKContractScenario.HasImportedVessel), the in-flight guard,
         /// the orbit-epoch freeze that puts the wreck where the issuer left it, and the
         /// emergency-freeze registration. A second implementation would drop some of
         /// those silently, and the ones it dropped would only show up as a wreck in the
         /// wrong place or a crew that starves on thaw.
         /// </summary>
-        private void BuildRescueWreck(El parent, MainWindow main, Dictionary<string, object> c, string cid)
+        private void BuildRescueWreck(El parent, ClientState main, Dictionary<string, object> c, string cid)
         {
             var box = UIF.Box(parent, "Wreck").Column(Theme.Space2);
             UIF.Label(box, "Stranded vessel", Theme.FontSm).Body();
@@ -1409,7 +1409,7 @@ namespace GeneKerman.UI.Gui
         protected override void Poll()
         {
             var mod = GeneKermanMod.Instance;
-            var main = mod?.MainWindowRef;
+            var main = mod?.State;
             if (main == null) return;
 
             // The form owns a player picker, which fetches a roster and downloads
@@ -1473,7 +1473,7 @@ namespace GeneKerman.UI.Gui
                 // the list the player is looking at rather than on the next poll.
                 creating = false;
                 form.Dispose();
-                GeneKermanMod.Instance?.MainWindowRef?.RequestContractsRefresh();
+                GeneKermanMod.Instance?.State?.RequestContractsRefresh();
             });
         }
 

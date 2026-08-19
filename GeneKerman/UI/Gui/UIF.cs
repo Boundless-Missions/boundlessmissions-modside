@@ -2,7 +2,7 @@
  * UI/Gui/UIF.cs – A small fluent builder over uGUI.
  *
  * Raw uGUI is ~20 lines of AddComponent per widget, which is how a screen file
- * grows to MainWindow's 3,244 lines. Everything in this file exists so a panel
+ * grows to the classic window's 3,274 lines. Everything in this file exists so a panel
  * reads as a description of what is on screen:
  *
  *     var card = UIF.Card(col).Pad(Theme.Space4).Column(Theme.Space2);

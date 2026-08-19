@@ -11,7 +11,7 @@
  * ToolActions.SellCurrentCraft is the implementation and is called unchanged: the
  * flags, mod list and thumbnail baked into the file, the blueprint render, the
  * listing thumbnail, the life-support flag and the price validation all live there,
- * so this panel and MainWindow.DoSellCraft cannot list two different things.
+ * so this panel and the classic window's sell action cannot list two different things.
  *
  * The craft is polled rather than read per frame, exactly as ToolsPanel does, and
  * for the same reason: nothing raises an event when a craft is loaded or saved, and
@@ -54,7 +54,7 @@ namespace GeneKerman.UI.Gui
             if (!mod.Api.IsLinked)
             {
                 UIF.Notice(col, "Not linked to a Discord account.",
-                           "Link this install from the classic window to sell crafts.");
+                           "Use the toolbar button to link it, then sell crafts from here.");
                 return;
             }
 

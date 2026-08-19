@@ -10,6 +10,24 @@ PROJECT_DIR="$SCRIPT_DIR/GeneKerman"
 # the two are kept in step here rather than by hand — see PACKAGING.md.
 RELEASE=0
 if [ "${1:-}" = "--release" ]; then RELEASE=1; fi
+
+# ── Build channel ────────────────────────────────────────────────────────────
+# 'production' (the default) ships a clean DLL with the in-game debug test panel
+# (DebugTestPanel.cs) COMPILED OUT — it is wrapped in #if GK_DEBUG_PANEL, which the
+# csproj defines ONLY when this is not 'production'. Set CHANNEL=dev here (or run
+# `GK_CHANNEL=dev ./build.sh`) to include the panel for the in-game live security
+# tests. A dev build must NEVER be published: it carries test-only code and its
+# DLL hash differs, so the server version gate would reject it anyway.
+#
+# >>> Keep this at 'production' for anything you ship. <<<
+CHANNEL="${GK_CHANNEL:-dev}"
+
+# A packaged release with the debug panel in it is almost certainly a mistake — refuse.
+if [ "$RELEASE" = "1" ] && [ "$CHANNEL" != "production" ]; then
+    echo "❌ Refusing to package a release on channel '$CHANNEL' — the debug test panel"
+    echo "   would be bundled. Run without --release, or set CHANNEL=production."
+    exit 1
+fi
 # Deploy to every KSP install here. FK-KSP is the heavily-modded dev instance (TweakScale /
 # mod-compatibility testing — its KSP.log is the "heavymod log"); KR-KSP carries its own
 # mod spread (SSPX, TAC-LS, Kerbalism, Deferred + TexturesUnlimited, …) and is the
@@ -31,12 +49,23 @@ echo ""
 echo "▶ Building GeneKerman.dll..."
 cd "$PROJECT_DIR"
 
-# Use dotnet build (works with .NET SDK + .NET 4.7.2 targeting pack)
-dotnet build -c Release 2>&1
+# Use dotnet build (works with .NET SDK + .NET 4.7.2 targeting pack).
+# GKChannel gates the debug test panel: 'production' compiles it out entirely.
+echo "  Channel: $CHANNEL$([ "$CHANNEL" != "production" ] && echo '  ⚠️  DEBUG TEST PANEL INCLUDED — do not publish')"
+dotnet build -c Release -p:GKChannel="$CHANNEL" 2>&1
 
 if [ ! -f "$PROJECT_DIR/bin/GeneKerman.dll" ]; then
     echo "❌ Build failed — DLL not found."
     exit 1
+fi
+
+if [ "$CHANNEL" != "production" ]; then
+    echo ""
+    echo "⚠️  ═══════════════════════════════════════════════════════════════════"
+    echo "⚠️   This is a '$CHANNEL' build: the in-game debug test panel (F12) is"
+    echo "⚠️   COMPILED IN. Do NOT publish it or register its hash. Rebuild with"
+    echo "⚠️   CHANNEL=production (the default) for anything you ship."
+    echo "⚠️  ═══════════════════════════════════════════════════════════════════"
 fi
 
 echo "✅ Build successful."

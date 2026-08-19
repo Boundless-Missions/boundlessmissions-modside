@@ -8,6 +8,7 @@
 
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 using UnityEngine;
 
 namespace GeneKerman
@@ -147,6 +148,21 @@ namespace GeneKerman
                 counter++;
             }
 
+            // The loop above renamed the FILE, but KSP's craft browser lists a craft by
+            // the `ship` field INSIDE it, and the editor saves under that name too. So two
+            // crafts landing as Station.craft / Station_1.craft would both read "Station"
+            // in the browser, and opening the second and hitting Save would write straight
+            // over the first — the dedup would have bought nothing. Point the ship field at
+            // the name the file actually got, but only when the loop above moved us: a
+            // craft that installed under its own name keeps whatever its author called it.
+            string installedName = Path.GetFileNameWithoutExtension(finalPath);
+            if (!string.Equals(installedName, Path.GetFileNameWithoutExtension(safeName),
+                               System.StringComparison.Ordinal))
+            {
+                rawData = RenameShip(rawData, installedName);
+                loadmetaContent = RenameLoadmetaShip(loadmetaContent, installedName);
+            }
+
             // Write craft file
             File.WriteAllBytes(finalPath, rawData);
             Debug.Log($"[GeneKerman] Craft installed: {finalPath} ({rawData.Length} bytes)");
@@ -168,6 +184,74 @@ namespace GeneKerman
             }
 
             return finalPath;
+        }
+
+        /// <summary>
+        /// Rewrite a craft's top-level `ship` field to <paramref name="newName"/>.
+        /// Only the header is considered — the match has to sit before the first PART
+        /// node, so a description line or a part field that happens to begin "ship ="
+        /// can't be mistaken for the real one. Returns the bytes unchanged if there is
+        /// no such field or anything throws: a craft that installs under a duplicate
+        /// display name is a nuisance, one that fails to install is not.
+        /// </summary>
+        private static byte[] RenameShip(byte[] data, string newName)
+        {
+            try
+            {
+                string text = Encoding.UTF8.GetString(data);
+                int bodyStart = text.IndexOf("\nPART", System.StringComparison.Ordinal);
+                if (bodyStart < 0) bodyStart = text.Length;
+
+                // [^\r\n]* rather than .* so a CRLF craft — which is what any craft
+                // authored on Windows is — keeps its \r: '.' matches it, and swallowing
+                // it would leave this one line ending differently from the rest. No '$'
+                // either, and that one is load-bearing: .NET's multiline '$' matches only
+                // before a '\n', so "[^\r\n]*$" cannot match a CRLF line at all. The
+                // class is greedy and can't cross a line break, so the anchor added
+                // nothing but a silent no-op on every Windows craft.
+                Match m = Regex.Match(text.Substring(0, bodyStart),
+                                      @"(?m)^([ \t]*ship[ \t]*=[ \t]*)([^\r\n]*)");
+                if (!m.Success)
+                {
+                    Debug.LogWarning("[GeneKerman] CraftInstaller: no 'ship' field to rename; " +
+                                     $"'{newName}' will show under its old name in the browser.");
+                    return data;
+                }
+
+                string renamed = text.Substring(0, m.Index) + m.Groups[1].Value + newName +
+                                 text.Substring(m.Index + m.Length);
+                Debug.Log($"[GeneKerman] CraftInstaller: renamed ship '{m.Groups[2].Value}' → " +
+                          $"'{newName}' to match the deduplicated filename.");
+                return Encoding.UTF8.GetBytes(renamed);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] CraftInstaller: ship rename failed: {ex.Message}");
+                return data;
+            }
+        }
+
+        /// <summary>
+        /// Point a loadmeta's `shipName` at the craft's installed name. The file is a
+        /// flat key = value list (see VesselDataCollector.ParseLoadmeta) and its
+        /// shipName is what GetCraftInfo reports, so leaving it on the old name would
+        /// undo half of the rename. No-op when the key isn't present.
+        /// </summary>
+        private static string RenameLoadmetaShip(string loadmeta, string newName)
+        {
+            if (string.IsNullOrEmpty(loadmeta)) return loadmeta;
+            try
+            {
+                // MatchEvaluator, not a "${1}" + newName replacement string: a '$' in the
+                // name would otherwise be read as a group reference.
+                return Regex.Replace(loadmeta, @"(?m)^([ \t]*shipName[ \t]*=[ \t]*)[^\r\n]*",
+                                     m => m.Groups[1].Value + newName);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] CraftInstaller: loadmeta rename failed: {ex.Message}");
+                return loadmeta;
+            }
         }
 
         /// <summary>

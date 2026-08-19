@@ -12,6 +12,19 @@
     <DebugType>portable</DebugType>
     <!-- Suppress warnings about .NET Framework compatibility -->
     <NoWarn>CS0618;CS0672</NoWarn>
+
+    <!-- Build channel. Defaults to 'production' so a plain `dotnet build` / `build.sh`
+         produces a shippable DLL with the debug test panel COMPILED OUT. Only a
+         non-production channel (e.g. `build.sh` with GK_CHANNEL=dev, which passes
+         -p:GKChannel=dev) defines GK_DEBUG_PANEL and includes DebugTestPanel.cs. -->
+    <GKChannel Condition="'$(GKChannel)' == ''">production</GKChannel>
+  </PropertyGroup>
+
+  <!-- Debug panel gate: define GK_DEBUG_PANEL only off-production. DebugTestPanel.cs
+       is wrapped entirely in #if GK_DEBUG_PANEL, so in a production build it compiles
+       to nothing and no test/debug code ships. -->
+  <PropertyGroup Condition="'$(GKChannel)' != 'production'">
+    <DefineConstants>$(DefineConstants);GK_DEBUG_PANEL</DefineConstants>
   </PropertyGroup>
 
   <!-- KSP Installation Path -->

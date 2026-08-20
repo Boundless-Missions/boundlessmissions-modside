@@ -874,6 +874,21 @@ namespace GeneKerman
                     processingImports.Remove(importId);
                     yield break;
                 }
+                // A rescue delivery is also reachable through the completed contract's
+                // manual Import button (CraftDelivery), which records the contract id
+                // in GKContractScenario. Same per-save dedup here, both ways: skip an
+                // entry whose craft is already in this save (and ack it, or it re-fires
+                // every poll), and record our own spawn so the manual path skips too.
+                string rescueCid = source == "rescue_delivery"
+                    ? MiniJSON.GetString(entry, "ref_id", "") : "";
+                if (!string.IsNullOrEmpty(rescueCid) && GKContractScenario.Instance != null
+                    && GKContractScenario.Instance.HasImportedVessel(rescueCid))
+                {
+                    yield return GeneKermanMod.Instance.Api.Post(
+                        $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
+                    processingImports.Remove(importId);
+                    yield break;
+                }
                 string myName = GeneKermanMod.Instance.LinkedUsername;
                 bool spawned = false;
                 yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
@@ -895,6 +910,8 @@ namespace GeneKerman
                     processingImports.Remove(importId);
                     yield break;
                 }
+                if (!string.IsNullOrEmpty(rescueCid))
+                    GKContractScenario.Instance?.MarkVesselImported(rescueCid);
                 yield return GeneKermanMod.Instance.Api.Post(
                     $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
                 processingImports.Remove(importId);

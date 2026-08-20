@@ -89,6 +89,17 @@ namespace GeneKerman
         private static IEnumerator ImportVessel(string contractId, string vesselNodeUrl,
                                                 string ownerName, Action<bool, string> onDone)
         {
+            // Per-save dedup at the choke point, not just in the sidebar's button
+            // guard: the web bridge reaches Deliver too, and a rescue's craft is
+            // also pushed through the import queue — every path that can spawn this
+            // vessel shares the one mark, so whichever runs first wins alone.
+            if (GKContractScenario.Instance != null
+                && GKContractScenario.Instance.HasImportedVessel(contractId))
+            {
+                onDone(true, "Vessel already imported into this save.");
+                yield break;
+            }
+
             var mod = GeneKermanMod.Instance;
             string myName = mod.LinkedUsername;
 

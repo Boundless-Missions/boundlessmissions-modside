@@ -1427,6 +1427,27 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
+            // A rescue's craft is pushed to the issuer automatically through the
+            // import queue on approval — offering the manual import here as well is
+            // how the same vessel ended up in the save twice. This must run before
+            // the HasImportedVessel check below: on the RESCUER's save that mark was
+            // set by the wreck spawn, and would read as "Vessel imported." for a
+            // craft that was in fact handed over.
+            if (mType == "rescue")
+            {
+                if (!isOutgoing)
+                {
+                    UIF.Notice(bar, "Rescue craft delivered to the issuer.");
+                    return;
+                }
+                bool arrived = GKContractScenario.Instance != null
+                               && GKContractScenario.Instance.HasImportedVessel(cid);
+                UIF.Notice(bar, arrived
+                    ? "Rescue craft arrived in your save."
+                    : "Rescue craft arrives automatically (visit the Space Center).");
+                return;
+            }
+
             if (GKContractScenario.Instance != null && GKContractScenario.Instance.HasImportedVessel(cid))
             {
                 UIF.Notice(bar, "Vessel imported.");

@@ -66,6 +66,43 @@ namespace GeneKerman
             "elliptical", "stationary", "synchronous", "molniya", "tundra",
         };
 
+        /// <summary>
+        /// Regime pairs no single orbit can satisfy, derived from the same check maths
+        /// OrbitConstraint enforces (polar needs inclination ≈90° while equatorial needs
+        /// ≈0°/180°; Molniya's half-day period contradicts a synchronous one; …). The
+        /// form de-selects a token's conflicts when it is picked, and Validate refuses a
+        /// set containing one — a contradictory requirement isn't "strict", it is a
+        /// rescue nobody can ever deliver. Redundant pairs (stationary already implies
+        /// circular) stay allowed: satisfiable is the test, not sensible.
+        /// Mirrors _CONFLICTS in data/orbit_constraints.py — keep the two in sync (same
+        /// convention as OrbitTypeTokens ↔ REQUIREMENTS).
+        /// </summary>
+        private static readonly Dictionary<string, string[]> OrbitTypeConflictMap =
+            new Dictionary<string, string[]>(StringComparer.Ordinal)
+        {
+            { "prograde",    new[] { "retrograde" } },
+            { "retrograde",  new[] { "prograde", "molniya", "tundra" } },
+            { "polar",       new[] { "equatorial", "stationary", "molniya", "tundra" } },
+            { "equatorial",  new[] { "polar", "molniya", "tundra" } },
+            { "circular",    new[] { "elliptical", "molniya", "tundra" } },
+            { "elliptical",  new[] { "circular", "stationary" } },
+            { "stationary",  new[] { "polar", "elliptical", "molniya", "tundra" } },
+            { "synchronous", new[] { "molniya" } },
+            { "molniya",     new[] { "retrograde", "polar", "equatorial", "circular",
+                                     "stationary", "synchronous", "tundra" } },
+            { "tundra",      new[] { "retrograde", "polar", "equatorial", "circular",
+                                     "stationary", "molniya" } },
+        };
+
+        private static readonly string[] NoConflicts = new string[0];
+
+        /// <summary>The regime tokens that cannot be combined with <paramref name="token"/>.</summary>
+        public static string[] OrbitTypeConflicts(string token)
+        {
+            string[] found;
+            return OrbitTypeConflictMap.TryGetValue(token ?? "", out found) ? found : NoConflicts;
+        }
+
         /// <summary>Player-facing name for an orbit-regime token.</summary>
         public static string OrbitTypeLabel(string token)
         {
@@ -282,7 +319,7 @@ namespace GeneKerman
             var v = HighLogic.LoadedSceneIsFlight ? FlightGlobals.ActiveVessel : null;
             if (v == null) return ctx;
 
-            ctx.VesselName = v.vesselName ?? "";
+            ctx.VesselName = LocalizedVesselName(v);
             // Off the parts, not KSP's cached crew list — a stranded kerbal missing from
             // the list here would never make it into the rescue contract at all.
             foreach (var pcm in VesselTransfer.CrewOf(v))
@@ -411,9 +448,23 @@ namespace GeneKerman
                         { error = "Enter a valid inclination margin in degrees."; return false; }
                     }
 
-                    foreach (var t in r.OrbitTypes ?? new List<string>())
+                    var types = r.OrbitTypes ?? new List<string>();
+                    foreach (var t in types)
                         if (Array.IndexOf(OrbitTypeTokens, t) < 0)
                         { error = "Unknown orbit type: " + t; return false; }
+
+                    // No orbit can be, say, polar and equatorial at once — a set
+                    // containing a conflicting pair is a contract nobody can fill.
+                    // The form de-selects conflicts as they are picked, so this only
+                    // fires for the bridge or a stale UI; the server refuses it too.
+                    for (int i = 0; i < types.Count; i++)
+                        foreach (var other in OrbitTypeConflicts(types[i]))
+                            if (types.IndexOf(other) > i)
+                            {
+                                error = OrbitTypeLabel(types[i]) + " and " + OrbitTypeLabel(other) +
+                                        " contradict each other — no orbit can be both.";
+                                return false;
+                            }
                 }
                 else if (!Finite(r.Lat) || !Finite(r.Lon) || !Finite(r.MarginPosDeg) ||
                          r.Lat < -90 || r.Lat > 90)
@@ -536,7 +587,7 @@ namespace GeneKerman
 
             var vessel = FlightGlobals.ActiveVessel;
             string pid = vessel.id.ToString();
-            string vesselName = vessel.vesselName;
+            string vesselName = LocalizedVesselName(vessel);
 
             string myName = mod.LinkedUsername ?? "";
             var taggedKerbals = new List<object>();
@@ -581,6 +632,21 @@ namespace GeneKerman
                           "time you visit the Space Center.";
 
             onDone(ok, message);
+        }
+
+        /// <summary>
+        /// A vessel's display name. KSP stores an unnamed craft's name as a raw
+        /// localization tag ("#autoLOC_501232" — "Untitled Space Craft") and localizes
+        /// it at display time; anything we show or send as a *name* has to do the
+        /// same, or the permanence gate reads "#autoLOC_501232 and its crew leave my
+        /// save". The snapshot node keeps the raw tag — that is KSP's own storage
+        /// format, and the rescuer's game localizes it exactly like any other vessel.
+        /// </summary>
+        private static string LocalizedVesselName(Vessel v)
+        {
+            string raw = v != null ? (v.vesselName ?? "") : "";
+            try { return KSP.Localization.Localizer.Format(raw); }
+            catch (Exception) { return raw; }
         }
 
         /// <summary>

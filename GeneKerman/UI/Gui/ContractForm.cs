@@ -396,16 +396,24 @@ namespace GeneKerman.UI.Gui
                 UIF.TextField(parent, peText, "100").OnChanged(s => peText = s);
                 Caption(parent, "MARGIN (KM, MIN " + ContractCreation.MinMarginOrbitKm + ")");
                 UIF.TextField(parent, marginAltText, "10").OnChanged(s => marginAltText = s);
+                UIF.Muted(parent, "How far off each of Ap and Pe may be (±km) and still "
+                                  + "count as delivered. Bigger is easier for the rescuer.").Body();
                 BuildOrbitShape(parent);
             }
             else
             {
                 Caption(parent, "LATITUDE (°)");
                 UIF.TextField(parent, latText, "0").OnChanged(s => latText = s);
+                UIF.Muted(parent, "North–south position: 0° is the equator, +90° the "
+                                  + "north pole, −90° the south pole.").Body();
                 Caption(parent, "LONGITUDE (°)");
                 UIF.TextField(parent, lonText, "0").OnChanged(s => lonText = s);
+                UIF.Muted(parent, "East–west position, −180° to 180° around the body's "
+                                  + "prime meridian; east is positive.").Body();
                 Caption(parent, "MARGIN (°, MIN " + ContractCreation.MinMarginSurfaceDeg + ")");
                 UIF.TextField(parent, marginPosText, "1").OnChanged(s => marginPosText = s);
+                UIF.Muted(parent, "Radius around that spot that still counts, in degrees "
+                                  + "— 1° is about 10.5 km on Kerbin's surface.").Body();
             }
 
             Caption(parent, "Δv THEY MUST HAVE LEFT (M/S, 0 = ANY)");
@@ -448,6 +456,8 @@ namespace GeneKerman.UI.Gui
                 Caption(parent, "PLANE MARGIN (°, MIN " + ContractCreation.MinMarginInclDeg + ")");
                 UIF.TextField(parent, marginInclText, Round(ContractCreation.DefaultMarginInclDeg))
                    .OnChanged(s => marginInclText = s);
+                UIF.Muted(parent, "How far off the inclination may be (±°). Matching a plane "
+                                  + "costs the rescuer Δv, so a tight margin is an expensive ask.").Body();
                 if (rescue != null && rescue.InOrbit)
                     UIF.Muted(parent, $"You are in a {rescue.InclDeg:F1}° orbit right now.").Body();
             }
@@ -466,7 +476,16 @@ namespace GeneKerman.UI.Gui
                     var b = UIF.Button(row, ContractCreation.OrbitTypeLabel(tok), () =>
                     {
                         if (orbitTypes.Contains(tok)) orbitTypes.Remove(tok);
-                        else orbitTypes.Add(tok);
+                        else
+                        {
+                            // Picking a regime drops anything it contradicts (polar vs
+                            // equatorial, circular vs elliptical, …) rather than letting
+                            // both stand: a contradictory pair is a rescue nobody can
+                            // ever deliver, and Validate/the server refuse it anyway.
+                            foreach (var other in ContractCreation.OrbitTypeConflicts(tok))
+                                orbitTypes.Remove(other);
+                            orbitTypes.Add(tok);
+                        }
                         markDirty?.Invoke();
                     }, on ? BtnStyle.Primary : BtnStyle.Ghost, 24, Theme.Space1);
                     b.Label.Size(Theme.FontXs);
@@ -474,7 +493,9 @@ namespace GeneKerman.UI.Gui
                 }
             }
             UIF.Muted(parent, "Checked against the rescuer's own orbit when they submit. "
-                              + "None selected = any orbit that meets the numbers above.").Body();
+                              + "None selected = any orbit that meets the numbers above. "
+                              + "Picking one deselects anything it contradicts — no orbit "
+                              + "can be both polar and equatorial.").Body();
         }
 
         private void BuildSend(El parent, bool busy, int balance, string currency)

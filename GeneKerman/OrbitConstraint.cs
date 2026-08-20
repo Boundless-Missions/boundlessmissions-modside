@@ -20,6 +20,17 @@ namespace GeneKerman
         public List<string> Requirements = new List<string>();
         public string Notes = "";
 
+        // Numeric altitude requirement parsed from the mission text by the server
+        // ("a 100x100 km orbit", "orbit above 400 km"). Metres above the surface,
+        // NaN = unset. The margin arrives materialised from the server (explicit
+        // "within N km" or its default formula), so the two ends verify against the
+        // same number; the local default below is only for a dict that predates it.
+        public double AltAp = double.NaN;
+        public double AltPe = double.NaN;
+        public double AltMargin = double.NaN;
+        public double AltMin = double.NaN;
+        public double AltMax = double.NaN;
+
         // Tolerances — keep in sync with settings.py (ORBIT_*).
         private const double PolarInclTol = 10.0;
         private const double EquatorialInclTol = 5.0;
@@ -31,8 +42,14 @@ namespace GeneKerman
         private const double FrozenInclTol = 5.0;
         private const double MolniyaEccMin = 0.50;
         private const double TundraEccMin = 0.20;
+        // Altitude-target tolerance default — mirrors ORBIT_ALT_MARGIN_MIN / _FRAC.
+        private const double AltMarginMin = 10000.0;
+        private const double AltMarginFrac = 0.05;
 
-        public bool IsEmpty => Requirements.Count == 0;
+        public bool HasAltitude => !double.IsNaN(AltAp) || !double.IsNaN(AltPe)
+                                   || !double.IsNaN(AltMin) || !double.IsNaN(AltMax);
+
+        public bool IsEmpty => Requirements.Count == 0 && !HasAltitude;
 
         public static OrbitConstraint Parse(Dictionary<string, object> dict)
         {
@@ -44,7 +61,23 @@ namespace GeneKerman
                 if (!string.IsNullOrEmpty(v)) o.Requirements.Add(v.Trim().ToLowerInvariant());
             }
             o.Notes = MiniJSON.GetString(dict, "notes", "");
+
+            var alt = MiniJSON.GetDict(dict, "alt");
+            if (alt != null)
+            {
+                o.AltAp = PositiveOrNaN(alt, "ap");
+                o.AltPe = PositiveOrNaN(alt, "pe");
+                o.AltMargin = PositiveOrNaN(alt, "margin");
+                o.AltMin = PositiveOrNaN(alt, "min");
+                o.AltMax = PositiveOrNaN(alt, "max");
+            }
             return o;
+        }
+
+        private static double PositiveOrNaN(Dictionary<string, object> dict, string key)
+        {
+            double v = MiniJSON.GetDouble(dict, key, double.NaN);
+            return (double.IsNaN(v) || double.IsInfinity(v) || v <= 0) ? double.NaN : v;
         }
 
         /// <summary>
@@ -63,6 +96,7 @@ namespace GeneKerman
             {
                 var names = new List<string>();
                 foreach (var r in Requirements) names.Add(Label(r));
+                if (HasAltitude) names.Add(AltSummary());
                 violations.Add($"Craft must be in orbit ({string.Join(", ", names.ToArray())}); " +
                                $"it is currently {(sit.Length == 0 ? "not orbiting" : sit)}.");
                 return violations;
@@ -74,7 +108,71 @@ namespace GeneKerman
                                     snap.period, snap.rotationPeriod);
                 if (m != null) violations.Add(m);
             }
+            CheckAlt(snap.apoapsis, snap.periapsis, violations);
             return violations;
+        }
+
+        /// <summary>Verify the craft's Ap/Pe (metres above the surface) against the
+        /// altitude requirement. Mirrors _check_alt in data/orbit_constraints.py.</summary>
+        private void CheckAlt(double apo, double peri, List<string> violations)
+        {
+            bool hasAp = !double.IsNaN(AltAp), hasPe = !double.IsNaN(AltPe);
+            if (hasAp || hasPe)
+            {
+                double margin = double.IsNaN(AltMargin) || AltMargin <= 0
+                                ? DefaultAltMargin() : AltMargin;
+                bool badAp = hasAp && Math.Abs(apo - AltAp) > margin;
+                bool badPe = hasPe && Math.Abs(peri - AltPe) > margin;
+                if (badAp || badPe)
+                {
+                    string need = hasAp && hasPe ? $"Ap {Km(AltAp)} / Pe {Km(AltPe)}"
+                                : hasAp ? $"Ap {Km(AltAp)}" : $"Pe {Km(AltPe)}";
+                    string have = hasAp && hasPe ? $"Ap {Km(apo)} / Pe {Km(peri)}"
+                                : hasAp ? $"Ap {Km(apo)}" : $"Pe {Km(peri)}";
+                    violations.Add($"Orbit off target: need {need} (±{Km(margin)}); " +
+                                   $"current is {have}.");
+                }
+            }
+            if (!double.IsNaN(AltMin) && peri < AltMin)
+                violations.Add($"The whole orbit must stay above {Km(AltMin)}; " +
+                               $"current periapsis is {Km(peri)}.");
+            if (!double.IsNaN(AltMax) && apo > AltMax)
+                violations.Add($"The whole orbit must stay below {Km(AltMax)}; " +
+                               $"current apoapsis is {Km(apo)}.");
+        }
+
+        /// <summary>Backstop for a constraint dict that carried targets but no margin
+        /// (older server) — same formula the server materialises.</summary>
+        private double DefaultAltMargin()
+        {
+            double target = Math.Max(double.IsNaN(AltAp) ? 0 : AltAp,
+                                     double.IsNaN(AltPe) ? 0 : AltPe);
+            return Math.Max(AltMarginMin, target * AltMarginFrac);
+        }
+
+        private static string Km(double metres)
+        {
+            double km = metres / 1000.0;
+            return Math.Abs(km) < 10 ? $"{km:N1} km" : $"{km:N0} km";
+        }
+
+        /// <summary>"100 km (±10 km)", "250 km × 80 km (±13 km)", "above 400 km".</summary>
+        private string AltSummary()
+        {
+            var bits = new List<string>();
+            bool hasAp = !double.IsNaN(AltAp), hasPe = !double.IsNaN(AltPe);
+            if (hasAp || hasPe)
+            {
+                double margin = double.IsNaN(AltMargin) || AltMargin <= 0
+                                ? DefaultAltMargin() : AltMargin;
+                string core = hasAp && hasPe
+                              ? (AltAp == AltPe ? Km(AltAp) : $"{Km(AltAp)} × {Km(AltPe)}")
+                              : hasAp ? $"Ap {Km(AltAp)}" : $"Pe {Km(AltPe)}";
+                bits.Add($"{core} (±{Km(margin)})");
+            }
+            if (!double.IsNaN(AltMin)) bits.Add($"above {Km(AltMin)}");
+            if (!double.IsNaN(AltMax)) bits.Add($"below {Km(AltMax)}");
+            return string.Join(", ", bits.ToArray());
         }
 
         private string CheckOne(string req, double incl, double ecc, double period, double rot)
@@ -169,14 +267,16 @@ namespace GeneKerman
             return null;
         }
 
-        /// <summary>Just the regime names ("polar, circular"), or empty. For callers
-        /// that supply their own heading — Describe() adds one.</summary>
+        /// <summary>The regime names plus any altitude requirement ("polar, circular",
+        /// "100 km (±10 km)"), or empty. For callers that supply their own heading —
+        /// Describe() adds one.</summary>
         public string LabelList()
         {
             if (IsEmpty) return "";
             if (!string.IsNullOrEmpty(Notes)) return Notes;
             var names = new List<string>();
             foreach (var r in Requirements) names.Add(Label(r));
+            if (HasAltitude) names.Add(AltSummary());
             return string.Join(", ", names.ToArray());
         }
 

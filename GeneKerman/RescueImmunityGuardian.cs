@@ -263,6 +263,7 @@ namespace GeneKerman
             LsFreeze.Thaw(names);
             string rations = LsRations.Provision(wreck, rec.Crew.Count);
 
+            ResyncCrewSkills(seated);
             SpawnMissingIvas(wreck, seated);
             NotifyCrewChanged(wreck);
             PersistIfPossible(wreck);
@@ -398,6 +399,7 @@ namespace GeneKerman
                 // Nothing from the pre-freeze vessel may carry over; then ask for the seat
                 // this kerbal actually sat in.
                 ClearSeatRefs(pcm);
+                ClearIncapacitation(pcm);
                 pcm.seatIdx = c.SeatIdx;
 
                 if (wreck.loaded)
@@ -460,6 +462,25 @@ namespace GeneKerman
             pcm.seat = null;
             pcm.seatIdx = -1;
             pcm.KerbalRef = null;
+        }
+
+        /// <summary>
+        /// Make sure a kerbal coming out of the freeze counts as *able*. Every control
+        /// check consults <c>inactive</c> — <c>ModuleCommand</c> skips an inactive kerbal
+        /// when counting pilots and crew (a crewed pod then reads PARTIAL_MANNED: some
+        /// control, no SAS), CommNet's manned test skips them, and an inactive EVA kerbal
+        /// can't even board — and <c>inactive</c> is persisted in the roster, so a stale
+        /// true survives a save. A kerbal we froze was never meant to carry a G-blackout
+        /// or an incapacitation across the freeze: whatever set it happened to a vessel
+        /// state that no longer exists, the same reasoning as ClearSeatRefs.
+        /// </summary>
+        private static void ClearIncapacitation(ProtoCrewMember pcm)
+        {
+            if (pcm == null) return;
+            pcm.inactive = false;
+            pcm.inactiveTimeEnd = 0;
+            pcm.outDueToG = false;
+            pcm.gExperienced = 0;
         }
 
         /// <summary>Seat a kerbal in its own chair when that chair exists and is free, and
@@ -557,14 +578,50 @@ namespace GeneKerman
                     {
                         pcm.rosterStatus = ProtoCrewMember.RosterStatus.Available;
                         // They are aboard nothing, so they hold no seat either — a leftover
-                        // index would follow them into whatever they are next assigned to.
+                        // index would follow them into whatever they are next assigned to,
+                        // and a leftover inactive flag would make that a pod with no SAS.
                         ClearSeatRefs(pcm);
+                        ClearIncapacitation(pcm);
                         Debug.Log($"[GeneKerman] RescueFreeze: {name} released to the roster.");
                     }
                 }
                 catch (System.Exception ex)
                 {
                     Debug.LogWarning($"[GeneKerman] RescueFreeze: could not release {name}: {ex.Message}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Re-derive the experience-trait registrations of every part we just seated
+        /// crew into, on a loaded wreck.
+        ///
+        /// SAS hangs off these registrations: a pilot's <c>AutopilotSkill</c> effect is a
+        /// delegate registered on the part (<c>PartValues.AutopilotSkill</c>), and both
+        /// the SAS gate (<c>APSkillExtensions.AvailableAtLevel</c>) and ModuleCommand's
+        /// pilot count read only what is registered — a seated kerbal whose traits never
+        /// registered, or were unregistered behind our back, is a crewed pod flying with
+        /// no SAS, and nothing in KSP re-checks it until the vessel is reloaded.
+        /// <c>Part.AddCrewmember(At)</c> does register, so this is a backstop, not the
+        /// mechanism — but the pair below is KSP's own (ProtoPartSnapshot.CreatePart runs
+        /// RegisterCrew on every load) and re-deriving from <c>protoModuleCrew</c> is
+        /// idempotent, so running it costs nothing when everything already held.
+        /// </summary>
+        private static void ResyncCrewSkills(List<Part> parts)
+        {
+            if (parts == null) return;
+            foreach (Part p in parts)
+            {
+                if (p == null) continue;
+                try
+                {
+                    p.UnregisterCrew();
+                    p.RegisterCrew();
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] RescueStasis: skill resync failed for " +
+                                     $"'{PartLabel(p)}': {ex.Message}");
                 }
             }
         }

@@ -10,10 +10,12 @@
  * the panel. Typing in the search box must filter as you type, and rebuilding the panel
  * would destroy the box being typed into — so RefreshList() refills the host in place.
  *
- * The list does not scroll. It is a fixed-height host that clips, so with a big planet
- * pack installed the matches past MaxRows are counted rather than drawn and the search
- * box is how you reach them. A nested ScrollRect inside the panel's own scroll view
- * would fight it for the wheel.
+ * The list scrolls, exactly like PlayerPicker's: a fixed-height host with a nested
+ * ScrollView inside, so every body is reachable by wheel as well as by search — a big
+ * planet pack used to be cut off at six rows with a "N more; type to narrow" line that
+ * overflowed into the fields below. ScrollForwarder/ScrollRelay already make a nested
+ * ScrollRect coexist with the panel's own scroll view (the wheel goes to whichever list
+ * the pointer is over), so the old no-scroll rule no longer applies.
  */
 
 using System;
@@ -25,13 +27,17 @@ namespace GeneKerman.UI.Gui
     internal sealed class BodyPicker
     {
         private const float ListHeight = 150f;
-        private const int MaxRows = 6;
 
         private readonly List<ContractCreation.BodyInfo> bodies = new List<ContractCreation.BodyInfo>();
         private string query = "";
         private El listHost;
         private El chosenHost;
         private Action markDirty;
+
+        /// <summary>Names this picker's scroll offset (see ScrollMemory). Per instance,
+        /// like PlayerPicker's: two forms each holding a picker are two lists.</summary>
+        private readonly string scrollKey = "body-picker#" + (++instances);
+        private static int instances;
 
         public string Selected { get; private set; }
 
@@ -79,6 +85,9 @@ namespace GeneKerman.UI.Gui
             Selected = null;
             listHost = null;
             chosenHost = null;
+            // A fresh form is a fresh list; resuming the last one's offset would open
+            // a new rescue part-way down the last one's planet pack.
+            ScrollMemory.Forget(scrollKey);
         }
 
         public void Build(El parent)
@@ -86,9 +95,9 @@ namespace GeneKerman.UI.Gui
             var box = UIF.Box(parent, "BodyPicker").Column(Theme.Space2);
 
             // Stated outside the list, because the list is the one place it can go
-            // missing: the search filters it, and MaxRows truncates it, so the chosen
-            // body is routinely not among the rows on screen. No Clear — a rescue is
-            // always somewhere, and "no body" is not an answer this form accepts.
+            // missing: the search filters it, and the chosen row may be scrolled out
+            // of view. No Clear — a rescue is always somewhere, and "no body" is not
+            // an answer this form accepts.
             chosenHost = UIF.Box(box, "Chosen").Column(0);
             RefreshChosen();
 
@@ -142,10 +151,10 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
-            int drawn = Math.Min(shown.Count, MaxRows);
-            for (int i = 0; i < drawn; i++) Row(listHost, shown[i]);
-            if (shown.Count > drawn)
-                UIF.Muted(listHost, (shown.Count - drawn) + " more; type to narrow.").Body();
+            // Every match, in a scroll view — the search narrows, the wheel reaches.
+            El content;
+            UIF.ScrollView(listHost, out content, scrollKey).Flex(1f, 1f);
+            foreach (var b in shown) Row(content, b);
         }
 
         private void Row(El parent, ContractCreation.BodyInfo b)

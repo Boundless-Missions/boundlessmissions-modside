@@ -36,6 +36,7 @@ fi
 KSP_PATHS=(
     "/home/ayd/Documents/KSP DEV Instances/FK-KSP"
     "/home/ayd/Documents/KSP DEV Instances/KR-KSP"
+    "/home/ayd/Documents/KSP DEV Instances/KR2-KSP"
     "/home/ayd/Documents/KSP DEV Instances/RSS-RO"
 )
 GAMEDATA_SRC="$SCRIPT_DIR/GameData/BoundlessMissions"

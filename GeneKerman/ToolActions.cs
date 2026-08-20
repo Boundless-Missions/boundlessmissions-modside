@@ -512,6 +512,7 @@ namespace GeneKerman
             byte[] craftBytes;
             string craftMods;
             string craftParts;
+            bool craftCustomTextures;
             try
             {
                 craftBytes = File.ReadAllBytes(state.EditorPath);
@@ -530,6 +531,11 @@ namespace GeneKerman
                 var modFolders = CkanGenerator.ModFoldersForCraft(craftBytes);
                 foreach (var f in TextureTransfer.TexturePackFoldersForCraft(craftBytes))
                     if (!modFolders.Contains(f)) modFolders.Add(f);
+                // And say so as a flag of its own, so the listing can be *tagged* as
+                // painted rather than leaving a buyer to spot a recolour pack among a long
+                // mod row. Not derived from the folders above: a set the sender can't
+                // resolve either resolves to nothing while the paint job is still there.
+                craftCustomTextures = TextureTransfer.CraftHasCustomTextures(craftBytes);
                 // RealFuels/RO add no parts either: union the fuel-config folders in so
                 // an RO craft is tagged (and filterable) as one instead of as stock.
                 foreach (var f in RealFuelsTransfer.FuelConfigFoldersForCraft(craftBytes))
@@ -596,6 +602,7 @@ namespace GeneKerman
                 state.EditorCraft, state.EditorType, state.EditorParts, mass, cost, price,
                 blueprintBytes, thumbnailBytes, craftMods, craftParts,
                 ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
+                craftCustomTextures,
                 (success, resp, status) =>
                 {
                     if (success && !string.IsNullOrEmpty(resp))

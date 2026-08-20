@@ -505,6 +505,43 @@ namespace GeneKerman
             return folders;
         }
 
+        /// <summary>Whether a .craft carries a Textures Unlimited paint job at all — the
+        /// flag behind the marketplace's "Modded Textures Available" tag.
+        ///
+        /// Separate from TexturePackFoldersForCraft because the two answer different
+        /// questions. That one is "which packs must the buyer install", which comes back
+        /// empty when every referenced set is unresolvable (a pack the SENDER hasn't got
+        /// either, on a craft passed on from someone who had it); this is "does the craft
+        /// carry TU texture state", which such a craft still does. So a listing can be
+        /// tagged without naming a pack, and the tag never depends on the local index.
+        ///
+        /// The test is deliberately "carries TU state", not TweakScaleGuard's stricter
+        /// "is anything actually changed" — that comparison isn't available here. TU
+        /// writes its persistent fields (the selected set plus the packed colour channels)
+        /// into every craft saved on a TU install whether or not the player touched the
+        /// recolour GUI, and the unpainted baseline is TU's own runtime derivation from
+        /// the set, recoverable from neither the craft file nor the part prefab. What the
+        /// file does support is the claim the tag makes: this craft was built with TU and
+        /// needs it to look like its blueprint. That is also the same evidence that puts
+        /// TU's folder in the listing's mod row, so the tag and the row beside it can't
+        /// contradict each other.
+        ///
+        /// Run on the ORIGINAL craft bytes, before any block is appended.</summary>
+        public static bool CraftHasCustomTextures(byte[] craftBytes)
+        {
+            if (craftBytes == null || craftBytes.Length == 0) return false;
+            try
+            {
+                foreach (var r in ScanCraftText(Encoding.UTF8.GetString(craftBytes)))
+                    if (r != null && !string.IsNullOrEmpty(r.TextureSet)) return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] TextureTransfer.CraftHasCustomTextures failed: {ex.Message}");
+            }
+            return false;
+        }
+
         // ── Scanning ─────────────────────────────────────────────────────────
 
         /// <summary>One paint-job module found on a craft: which part carries it, which

@@ -1663,6 +1663,7 @@ namespace GeneKerman
             float mass, float cost, int price,
             byte[] blueprintData, byte[] thumbnailData, string mods, string parts,
             string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
+            bool customTextures,
             ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
@@ -1716,6 +1717,12 @@ namespace GeneKerman
                 AddText("ls_endurance_days", lsEnduranceDays.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (lsCrewCapacity > 0)
                 AddText("ls_crew_capacity", lsCrewCapacity.ToString());
+
+            // Whether the craft carries a Textures Unlimited paint job, so the website can
+            // tag the listing "Modded Textures Available". Sent only when true — AddText
+            // skips empty values anyway, and the server defaults it to false, which is
+            // also what an older client (sending nothing) means.
+            if (customTextures) AddText("custom_textures", "1");
 
             using (var req = UnityWebRequest.Post(url, form))
             {

@@ -103,10 +103,14 @@ namespace GeneKerman.UI
                 "Boundless Missions Discord community. To do that, this add-on gathers " +
                 "and sends the following to the Boundless Missions servers:\n\n" +
                 "• Your Discord account link (so contracts, balance and missions are tied to you)\n" +
-                "• A device identifier and MAC address (account-security / anti-abuse only)\n" +
+                "• A random device identifier (account security only; not your MAC address " +
+                "or any other hardware data)\n" +
                 "• Gameplay data: vessel telemetry, craft files, part lists and screenshots " +
-                "you submit to contracts or share\n" +
-                "• Your KSP.log, only when you choose to file a moderation report\n\n" +
+                "you submit to contracts or share; submissions may be reviewed by Google's " +
+                "Gemini AI\n" +
+                "• Your MAC address and KSP.log, only inside a report you or the account " +
+                "owner files: a bug report attaches your (trimmed) log, and a device report " +
+                "collects the reported device's MAC and log\n\n" +
                 "No data is sent until you accept below, and you can turn all data sharing " +
                 "off again at any time from the toolbar (Settings ▸ Data sharing).",
                 bodyStyle);

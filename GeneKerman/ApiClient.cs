@@ -927,6 +927,7 @@ namespace GeneKerman
             string lifeSupport,
             double lsEnduranceDays,
             int lsCrewCapacity,
+            string cheatReport,
             ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
@@ -1001,6 +1002,12 @@ namespace GeneKerman
                 form.Add(new MultipartFormDataSection("ls_endurance_days", lsEnduranceDays.ToString(inv)));
             if (lsCrewCapacity > 0)
                 form.Add(new MultipartFormDataSection("ls_crew_capacity", lsCrewCapacity.ToString()));
+
+            // Cheat report for the submitted vessels (see CheatDetection). Sent even
+            // when clean — an explicit clean report is distinct from an old client
+            // that never checked, and the server treats only the former as verified.
+            if (!string.IsNullOrEmpty(cheatReport))
+                form.Add(new MultipartFormDataSection("cheat_report", cheatReport));
 
             using (var req = UnityWebRequest.Post(url, form))
             {

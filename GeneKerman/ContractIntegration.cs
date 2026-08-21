@@ -181,6 +181,12 @@ namespace GeneKerman
             rescueSubmittedPids.Clear();
             pendingRescueRemovals.Clear();
 
+            // The cheat-taint store lives in CheatDetection (static, so flight-scene
+            // writers never race the scenario's lifecycle); this scenario is only its
+            // persistence. Must run before the null-node return: loading a save with
+            // no taints has to CLEAR taints carried over from another save.
+            CheatDetection.LoadFrom(node);
+
             if (node == null) return;
 
             try
@@ -271,6 +277,8 @@ namespace GeneKerman
                     rec.AddValue("cid", kvp.Key);
                     rec.AddValue("pid", kvp.Value);
                 }
+
+                CheatDetection.SaveTo(node);
 
                 var pend = node.AddNode("RESCUE_PENDING_REMOVALS");
                 foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, PendingRescueRemoval>()))

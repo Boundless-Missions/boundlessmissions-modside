@@ -33,6 +33,12 @@ namespace GeneKerman
         public string Name;
         public VesselTransfer.CrewFate CrewFate = VesselTransfer.CrewFate.LeavesWithCraft;
 
+        /// <summary>The kerbal names this contract hands over — settled by name at
+        /// removal time so a kerbal who stepped off the hull still leaves with it
+        /// (see VesselTransfer.RemoveContractCrew). Empty on entries queued by older
+        /// builds or without a contract in hand; those settle hull crew only.</summary>
+        public List<string> Crew = new List<string>();
+
         /// <summary>Read a saved fate, falling back to the one that was implicit before
         /// this field existed — so an entry queued by an older build still does what it
         /// was queued to do.</summary>
@@ -88,6 +94,56 @@ namespace GeneKerman
         }
 
         /// <summary>
+        /// Make sure this scenario exists in the loaded game, installing it when
+        /// KSP's [KSPScenario] injection didn't.
+        ///
+        /// Observed in the wild (2026-08-20, an old pre-mod sandbox save): the save
+        /// went through SPACECENTER → TRACKSTATION → FLIGHT without the module ever
+        /// being created, despite AddToAllGames. With Instance null, every guard
+        /// hanging off it silently no-ops — the wreck-spawn dedup, the emergency-
+        /// freeze records, the removal queue — and the visible result was six
+        /// identical wrecks spawned from six clicks, with no defreeze button and
+        /// nothing persisted. Belt over stock's braces: check the game's proto list
+        /// ourselves and add/instantiate what's missing. Cheap when healthy (one
+        /// null check), loud when it has to act, so the logs say which saves ever
+        /// needed it.
+        /// </summary>
+        public static void EnsureExists()
+        {
+            if (Instance != null) return;
+            var game = HighLogic.CurrentGame;
+            if (game == null || ScenarioRunner.Instance == null) return;
+            var scene = HighLogic.LoadedScene;
+            if (scene != GameScenes.SPACECENTER && scene != GameScenes.FLIGHT &&
+                scene != GameScenes.TRACKSTATION) return;
+
+            try
+            {
+                ProtoScenarioModule psm = null;
+                if (game.scenarios != null)
+                    psm = game.scenarios.Find(s => s != null && s.moduleName == "GKContractScenario");
+
+                if (psm == null)
+                {
+                    Debug.LogWarning("[GeneKerman] GKContractScenario is missing from this save " +
+                                     "(KSPScenario injection didn't run) — installing it now.");
+                    psm = game.AddProtoScenarioModule(typeof(GKContractScenario),
+                        GameScenes.SPACECENTER, GameScenes.FLIGHT, GameScenes.TRACKSTATION);
+                }
+                if (psm != null && psm.moduleRef == null)
+                {
+                    Debug.LogWarning("[GeneKerman] GKContractScenario not instantiated in this " +
+                                     "scene — loading it now.");
+                    psm.Load(ScenarioRunner.Instance);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] GKContractScenario.EnsureExists failed: {ex.Message}");
+            }
+        }
+
+        /// <summary>
         /// Clear the static handle when KSP tears this module down — it is registered
         /// for SPACECENTER/FLIGHT/TRACKSTATION only, so in the editor (and mid scene
         /// change) there is no live instance at all.
@@ -124,6 +180,12 @@ namespace GeneKerman
             immunities.Clear();
             rescueSubmittedPids.Clear();
             pendingRescueRemovals.Clear();
+
+            // The cheat-taint store lives in CheatDetection (static, so flight-scene
+            // writers never race the scenario's lifecycle); this scenario is only its
+            // persistence. Must run before the null-node return: loading a save with
+            // no taints has to CLEAR taints carried over from another save.
+            CheatDetection.LoadFrom(node);
 
             if (node == null) return;
 
@@ -172,13 +234,16 @@ namespace GeneKerman
                     {
                         string pid = rec.GetValue("pid");
                         if (string.IsNullOrEmpty(pid)) continue;
-                        pendingRescueRemovals[pid] = new PendingRescueRemoval
+                        var entry = new PendingRescueRemoval
                         {
                             Name = rec.GetValue("name") ?? pid,
                             // Absent on records queued before the fate was recorded: keep
                             // what those records meant when they were written.
                             CrewFate = PendingRescueRemoval.ParseFate(rec.GetValue("crewFate")),
                         };
+                        foreach (var cn in rec.GetValues("crew"))
+                            if (!string.IsNullOrEmpty(cn)) entry.Crew.Add(cn);
+                        pendingRescueRemovals[pid] = entry;
                     }
                 }
             }
@@ -213,6 +278,8 @@ namespace GeneKerman
                     rec.AddValue("pid", kvp.Value);
                 }
 
+                CheatDetection.SaveTo(node);
+
                 var pend = node.AddNode("RESCUE_PENDING_REMOVALS");
                 foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, PendingRescueRemoval>()))
                 {
@@ -221,6 +288,8 @@ namespace GeneKerman
                     rec.AddValue("pid", kvp.Key);
                     rec.AddValue("name", kvp.Value.Name ?? kvp.Key);
                     rec.AddValue("crewFate", kvp.Value.CrewFate.ToString());
+                    foreach (var cn in (kvp.Value.Crew ?? new List<string>()))
+                        rec.AddValue("crew", cn);
                 }
             }
             catch (Exception ex)

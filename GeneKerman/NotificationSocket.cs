@@ -291,6 +291,15 @@ namespace GeneKerman
                 //     so accept whatever it presents.
                 if (url.StartsWith("wss://"))
                 {
+                    // websocket-sharp's default SslProtocols still offers TLS 1.0/SSL3,
+                    // which any current server (Caddy included) refuses outright with a
+                    // protocol_version alert — the handshake died before certificate
+                    // validation ever ran, which is why the socket never once connected
+                    // in production and every client silently lived on HTTP polling.
+                    // Reproduced and fixed outside KSP with this same DLL (2026-08-20).
+                    ws.SslConfiguration.EnabledSslProtocols =
+                        System.Security.Authentication.SslProtocols.Tls12;
+
                     if (IsLocalDevHost(HostOf(url)))
                         ws.SslConfiguration.ServerCertificateValidationCallback =
                             (s, c, ch, e) => true;

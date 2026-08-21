@@ -627,7 +627,8 @@ namespace GeneKerman
             // The stranded crew are the contract: they leave with the ship, and come back
             // as an import (tag stripped) if and when the rescue is delivered.
             if (ok && !mod.QueueRescueVesselRemoval(pid, vesselName,
-                                                    VesselTransfer.CrewFate.LeavesWithCraft))
+                                                    VesselTransfer.CrewFate.LeavesWithCraft,
+                                                    ctx.Crew))
                 message = $"Rescue sent to {who}. Your vessel will be removed the next " +
                           "time you visit the Space Center.";
 

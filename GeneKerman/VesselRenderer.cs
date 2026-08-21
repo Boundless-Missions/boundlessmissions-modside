@@ -261,7 +261,7 @@ namespace GeneKerman
             ViewDef v = VIEWS[3];
             ViewDef nw = new ViewDef(v.label,
                 vesselRotation * v.direction, vesselRotation * v.up, v.perspective);
-            ConfigureCamera(cam, nw, bounds);
+            ConfigureCamera(cam, nw, bounds, DeferredPresent);
 
             cam.backgroundColor = Color.black;
             cam.Render();
@@ -429,7 +429,48 @@ namespace GeneKerman
 
         // ── Core Rendering ──────────────────────────────────────────────────
 
+        /// <summary>
+        /// Render the blueprint, with one retry on the opposite rendering path.
+        ///
+        /// With Deferred installed the first attempt runs on the deferred path (the
+        /// forward path is the one its shader replacement blanks in flight) — but on
+        /// this project's OpenGL install the deferred path has now been seen to
+        /// rasterize nothing in flight too, and which path survives appears to depend
+        /// on scene state we don't control. A forward retry costs one extra render
+        /// and turns "fallback screenshot" back into a blueprint whenever either path
+        /// still works; the per-view stats logged by the failing pass say which end
+        /// of the chain died (zero fragments vs dead readback).
+        /// </summary>
         private static string RenderBlueprint(
+            Renderer[] renderers, Bounds bounds, Quaternion vesselRotation,
+            string vesselName, int partCount, float mass, float cost,
+            List<Part> isolationParts)
+        {
+            // One line per capture stating what the camera is being framed from — the
+            // cheapest possible way to make a "blank blueprint" report diagnosable
+            // from the log alone.
+            Debug.Log($"[GeneKerman] Blueprint: {renderers.Length} renderer(s), bounds centre " +
+                      $"{bounds.center}, size {bounds.size}, path {(DeferredPresent ? "deferred" : "forward")}.");
+
+            string path = RenderBlueprintPass(DeferredPresent, renderers, bounds, vesselRotation,
+                                              vesselName, partCount, mass, cost, isolationParts);
+            if (path == null && DeferredPresent)
+            {
+                Debug.LogWarning("[GeneKerman] Deferred-path capture drew nothing — retrying once on the forward path.");
+                path = RenderBlueprintPass(false, renderers, bounds, vesselRotation,
+                                           vesselName, partCount, mass, cost, isolationParts);
+            }
+            if (path != null) return path;
+
+            Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot."
+                + (DeferredPresent ? " Deferred is installed and both rendering paths drew nothing." : ""));
+            return VesselDataCollector.CaptureScreenshot();
+        }
+
+        /// <summary>One capture attempt on the given rendering path. Returns the saved
+        /// PNG's path, or null when no view rasterized any vessel pixels.</summary>
+        private static string RenderBlueprintPass(
+            bool deferred,
             Renderer[] renderers, Bounds bounds, Quaternion vesselRotation,
             string vesselName, int partCount, float mass, float cost,
             List<Part> isolationParts)
@@ -456,7 +497,7 @@ namespace GeneKerman
             // SUPERSAMPLE× and box-filter down after readback — that restores the
             // fractional edge coverage the dual-pass alpha math turns into soft
             // edges, same as the MSAA resolve does on the forward path.
-            int ss = DeferredPresent ? SUPERSAMPLE : 1;
+            int ss = deferred ? SUPERSAMPLE : 1;
             int renderSize = RENDER_SIZE * ss;
             // The deferred path must run HDR: Deferred forces HDR on the cameras it
             // manages and its replacement lighting shaders assume it, so an LDR
@@ -465,8 +506,8 @@ namespace GeneKerman
             // comes out as unlit silhouettes). Render to an HDR target and let the
             // resolve blit below clamp back down to ARGB32 for readback.
             var rt = new RenderTexture(renderSize, renderSize, 24,
-                DeferredPresent ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32);
-            rt.antiAliasing = DeferredPresent ? 1 : 4;
+                deferred ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32);
+            rt.antiAliasing = deferred ? 1 : 4;
             rt.Create();
 
             // ReadPixels cannot read directly from an MSAA RenderTexture on many
@@ -485,9 +526,9 @@ namespace GeneKerman
             cam.cullingMask = layerMask;
             cam.nearClipPlane = 0.01f;
             cam.clearFlags = CameraClearFlags.SolidColor;
-            cam.allowHDR = DeferredPresent;
-            cam.allowMSAA = !DeferredPresent;
-            if (DeferredPresent)
+            cam.allowHDR = deferred;
+            cam.allowMSAA = !deferred;
+            if (deferred)
                 cam.renderingPath = RenderingPath.DeferredShading;
 
             // ConformalDecals decals have no Renderer to isolate — the module draws
@@ -513,7 +554,7 @@ namespace GeneKerman
                     vesselRotation * v.up,
                     v.perspective
                 );
-                ConfigureCamera(cam, rotated, bounds);
+                ConfigureCamera(cam, rotated, bounds, deferred);
 
                 // Black pass
                 cam.backgroundColor = Color.black;
@@ -543,6 +584,22 @@ namespace GeneKerman
                     CenterViewPasses(blackPass[i], whitePass[i], RENDER_SIZE);
             }
 
+            // ── Safety net: if the off-screen camera captured nothing (e.g. an
+            // unsupported readback path on some GPU/driver), every view is pure
+            // background. Diagnose while the rig is still alive (the probes need the
+            // camera and the isolated layers), report null so the wrapper can retry
+            // on the other rendering path (and only then fall back to a screenshot),
+            // and log per-view pass statistics: a pure-black black pass with a
+            // pure-white white pass means the camera cleared but rasterized zero
+            // fragments, while two identical mid-grey passes mean the readback died.
+            bool hasContent = HasVesselContent(blackPass, whitePass);
+            if (!hasContent)
+            {
+                LogPassStats(blackPass, whitePass, deferred);
+                ProbeEmptyCapture(cam, rt, resolveRt, readTex, renderSize, bounds,
+                                  isolationParts, layerMask, vesselRotation, deferred);
+            }
+
             // ── Cleanup render resources ──
             DecalCapture.EndCapture();  // unhook before the camera it draws for goes away
             UnityEngine.Object.DestroyImmediate(readTex);
@@ -559,16 +616,7 @@ namespace GeneKerman
             RenderSettings.ambientMode  = origAmbientMode;
             RenderSettings.ambientLight = origAmbientLight;
 
-            // ── Safety net: if the off-screen camera captured nothing (e.g. an
-            // unsupported readback path on some GPU/driver), every view is pure
-            // background. Rather than submit a blank blueprint, fall back to a
-            // normal in-game screenshot so a submission is never empty.
-            if (!HasVesselContent(blackPass, whitePass))
-            {
-                Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot."
-                    + (DeferredPresent ? " Deferred is installed and its compatibility path still drew nothing." : ""));
-                return VesselDataCollector.CaptureScreenshot();
-            }
+            if (!hasContent) return null;
 
             // ── Composite blueprint image ──
             Color32[] blueprint = new Color32[IMG_W * IMG_H];
@@ -617,7 +665,8 @@ namespace GeneKerman
 
         // ── Camera Configuration ────────────────────────────────────────────
 
-        private static void ConfigureCamera(Camera cam, ViewDef view, Bounds bounds)
+        private static void ConfigureCamera(Camera cam, ViewDef view, Bounds bounds,
+                                            bool deferred)
         {
             Vector3 center = bounds.center;
             Vector3 ext = bounds.extents;
@@ -647,7 +696,7 @@ namespace GeneKerman
 
             if (!view.perspective)
             {
-                if (DeferredPresent)
+                if (deferred)
                 {
                     // Unity's deferred path silently reverts an orthographic camera
                     // to forward — under Deferred's replaced shaders, exactly the
@@ -766,15 +815,61 @@ namespace GeneKerman
 
         // ── Layer Isolation ─────────────────────────────────────────────────
 
+        /// <summary>How far a renderer's bounds may sit from the craft's own centroid,
+        /// and how big it may claim to be, before it is treated as a framing hazard
+        /// rather than craft geometry. One rogue renderer — an uninitialized prop, a
+        /// mod object parked at a world offset, a skinned mesh with garbage bounds —
+        /// poisons the AABB the camera is framed from: the camera parks kilometres
+        /// out, the craft goes sub-pixel, and every view reads back pure background.
+        /// The largest real crafts are tens of metres; these caps are 10× that.</summary>
+        private const float MaxRendererOffset = 250f;
+        private const float MaxRendererSize = 500f;
+
         private static Renderer[] CollectRenderers(List<Part> parts)
         {
-            return parts
-                .SelectMany(p => p.GetComponentsInChildren<Renderer>(false))
-                .Where(r => r.enabled && r.gameObject.activeInHierarchy
-                    && (r is MeshRenderer || r is SkinnedMeshRenderer)
-                    && r.bounds.size.sqrMagnitude > 0.0001f)
-                .ToArray();
+            Vector3 centroid = Vector3.zero;
+            int n = 0;
+            foreach (var p in parts)
+                if (p != null) { centroid += p.transform.position; n++; }
+            if (n > 0) centroid /= n;
+
+            var kept = new List<Renderer>();
+            var dropped = new List<Renderer>();
+            foreach (var r in parts.SelectMany(p => p.GetComponentsInChildren<Renderer>(false)))
+            {
+                if (!(r.enabled && r.gameObject.activeInHierarchy
+                      && (r is MeshRenderer || r is SkinnedMeshRenderer)
+                      && r.bounds.size.sqrMagnitude > 0.0001f))
+                    continue;
+
+                Bounds rb = r.bounds;
+                if (!Finite(rb.center) || !Finite(rb.size)
+                    || (rb.center - centroid).magnitude > MaxRendererOffset
+                    || rb.size.magnitude > MaxRendererSize)
+                    dropped.Add(r);
+                else
+                    kept.Add(r);
+            }
+
+            if (dropped.Count > 0)
+            {
+                var names = new List<string>();
+                for (int i = 0; i < dropped.Count && i < 3; i++)
+                {
+                    var r = dropped[i];
+                    names.Add($"'{r.gameObject.name}' (centre {r.bounds.center}, size {r.bounds.size})");
+                }
+                Debug.LogWarning($"[GeneKerman] Blueprint: dropped {dropped.Count} renderer(s) with " +
+                                 $"out-of-craft bounds — they would poison the camera framing: " +
+                                 string.Join("; ", names.ToArray()) +
+                                 (dropped.Count > 3 ? "; …" : "") + ".");
+            }
+            return kept.ToArray();
         }
+
+        private static bool Finite(Vector3 v) =>
+            !(float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z)
+              || float.IsInfinity(v.x) || float.IsInfinity(v.y) || float.IsInfinity(v.z));
 
         private static Bounds ComputeBounds(Renderer[] renderers)
         {
@@ -1032,6 +1127,125 @@ namespace GeneKerman
         /// Uses the same dual-pass test as BlitView: a pixel is background when
         /// (white - black) averages ~255 across channels.
         /// </summary>
+        /// <summary>
+        /// Two probe renders that split "zero vessel pixels" into its two possible
+        /// causes, while the capture rig is still alive:
+        ///
+        ///   A — same framing, every layer visible. Draws something ⇒ the camera and
+        ///       framing are fine and the failure is the isolation layer / culling.
+        ///   B — isolation layer only, but framed from the part *transforms* instead
+        ///       of renderer bounds. Draws something ⇒ ComputeBounds was poisoned
+        ///       (a rogue renderer's bounds pushed the camera off the craft).
+        ///
+        /// Both drawing nothing means the layer contents themselves never rasterize
+        /// (the original Deferred symptom). Failure path only; one log line.
+        /// </summary>
+        private static void ProbeEmptyCapture(Camera cam, RenderTexture rt, RenderTexture resolveRt,
+                                              Texture2D readTex, int renderSize, Bounds bounds,
+                                              List<Part> parts, int layerMask,
+                                              Quaternion vesselRotation, bool deferred)
+        {
+            try
+            {
+                var front = new ViewDef("PROBE", vesselRotation * VIEWS[0].direction,
+                                        vesselRotation * VIEWS[0].up, false);
+
+                ConfigureCamera(cam, front, bounds, deferred);
+                cam.cullingMask = ~0;
+                cam.backgroundColor = Color.black;
+                cam.Render();
+                int a = CountLitPixels(rt, resolveRt, readTex, renderSize);
+
+                Bounds tb = TransformBounds(parts);
+                cam.cullingMask = layerMask;
+                ConfigureCamera(cam, front, tb, deferred);
+                cam.backgroundColor = Color.black;
+                cam.Render();
+                int b = CountLitPixels(rt, resolveRt, readTex, renderSize);
+
+                Debug.LogWarning($"[GeneKerman] Blueprint probe ({(deferred ? "deferred" : "forward")}): " +
+                                 $"A all-layers/original-framing lit {a} px, " +
+                                 $"B isolation-layer/transform-framing lit {b} px " +
+                                 $"(of {renderSize * renderSize}). Original bounds centre {bounds.center} " +
+                                 $"size {bounds.size}; transform bounds centre {tb.center} size {tb.size}.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Blueprint probe failed: {ex.Message}");
+            }
+            finally
+            {
+                try { cam.cullingMask = layerMask; } catch (Exception) { }
+            }
+        }
+
+        /// <summary>AABB of the parts' transform positions — framing that no renderer
+        /// can poison. Padded so a one-part craft still has volume.</summary>
+        private static Bounds TransformBounds(List<Part> parts)
+        {
+            var b = new Bounds();
+            bool first = true;
+            foreach (var p in parts)
+            {
+                if (p == null) continue;
+                if (first) { b = new Bounds(p.transform.position, Vector3.zero); first = false; }
+                else b.Encapsulate(p.transform.position);
+            }
+            b.Expand(10f);
+            return b;
+        }
+
+        /// <summary>Pixels meaningfully brighter than the black clear color, after the
+        /// same resolve-blit readback chain the real passes use.</summary>
+        private static int CountLitPixels(RenderTexture rt, RenderTexture resolveRt,
+                                          Texture2D readTex, int renderSize)
+        {
+            Graphics.Blit(rt, resolveRt);
+            RenderTexture.active = resolveRt;
+            readTex.ReadPixels(new Rect(0, 0, renderSize, renderSize), 0, 0);
+            readTex.Apply();
+            RenderTexture.active = null;
+
+            int lit = 0;
+            var px = readTex.GetPixels32();
+            for (int i = 0; i < px.Length; i++)
+                if (px[i].r + px[i].g + px[i].b > 24) lit++;
+            return lit;
+        }
+
+        /// <summary>One line per view describing what the failed pass actually read
+        /// back, so a report with the log pins the failure mode without a repro:
+        /// luminance min/mean/max of each pass plus the max white−black difference.
+        /// Only runs on the failure path, so the cost never touches a working capture.</summary>
+        private static void LogPassStats(Color32[][] black, Color32[][] white, bool deferred)
+        {
+            try
+            {
+                for (int i = 0; i < black.Length; i++)
+                {
+                    Color32[] bl = black[i], wh = white[i];
+                    if (bl == null || wh == null || bl.Length == 0) continue;
+                    int bMin = 255, bMax = 0, wMin = 255, wMax = 0, dMax = 0;
+                    long bSum = 0, wSum = 0;
+                    for (int p = 0; p < bl.Length; p++)
+                    {
+                        int b = (bl[p].r + bl[p].g + bl[p].b) / 3;
+                        int w = (wh[p].r + wh[p].g + wh[p].b) / 3;
+                        if (b < bMin) bMin = b;
+                        if (b > bMax) bMax = b;
+                        if (w < wMin) wMin = w;
+                        if (w > wMax) wMax = w;
+                        int d = Math.Abs(w - b);
+                        if (d > dMax) dMax = d;
+                        bSum += b; wSum += w;
+                    }
+                    Debug.LogWarning($"[GeneKerman] Blueprint diag ({(deferred ? "deferred" : "forward")}, view {VIEWS[i].label}): " +
+                                     $"black {bMin}/{bSum / bl.Length}/{bMax}, white {wMin}/{wSum / bl.Length}/{wMax}, maxDiff {dMax}.");
+                }
+            }
+            catch (Exception) { /* diagnostics must never break the capture */ }
+        }
+
         private static bool HasVesselContent(Color32[][] black, Color32[][] white)
         {
             for (int i = 0; i < black.Length; i++)

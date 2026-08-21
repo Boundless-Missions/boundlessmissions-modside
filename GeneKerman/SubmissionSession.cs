@@ -960,6 +960,7 @@ namespace GeneKerman
             string loadmeta = null;
             string vesselDataJson = null;
             string vesselNodeData = null;
+            string cheatReport = null;
 
             if (MissionType == "craft_build" && !string.IsNullOrEmpty(EditorCraftPath))
             {
@@ -1006,6 +1007,14 @@ namespace GeneKerman
                 }
 
                 vesselDataJson = MiniJSON.Serialize(submission);
+
+                // Cheat report covering exactly the vessels this submission claims flew
+                // here (active + selected extras). Editor builds carry none — a blueprint
+                // has no flight state to have cheated. See CheatDetection for what
+                // taints a vessel and why an explicit clean report is still sent.
+                var judged = new List<Vessel> { FlightGlobals.ActiveVessel };
+                judged.AddRange(selectedExtras);
+                cheatReport = CheatDetection.BuildReportJson(judged);
 
                 // Also try to get the craft file for the active vessel
                 string craftPath = VesselDataCollector.FindCraftFile(ActiveVessel.vesselName);
@@ -1127,6 +1136,7 @@ namespace GeneKerman
                 vesselNodeData, screenshots, ssNames, modlist, usedModlist, usedParts,
                 deltaVField,
                 ls.ModKey, ls.EnduranceDaysPerKerbal, ls.CrewCapacity,
+                cheatReport,
                 (ok, resp, status) =>
                 {
                     IsSubmitting = false;
@@ -1134,6 +1144,19 @@ namespace GeneKerman
                     {
                         var result = MiniJSON.DeserializeDict(resp);
                         string reviewStatus = MiniJSON.GetString(result, "review_status", "");
+
+                        // A server-side gate can refuse with HTTP 200 + success:false
+                        // (mission limits, illegal mods, cheat disqualification, …).
+                        // That is a rejection, not "submitted": show the reason and
+                        // record nothing — a refused rescue craft was NOT handed over,
+                        // so it must not be queued for removal on approval.
+                        if (!MiniJSON.GetBool(result, "success", true))
+                        {
+                            StatusMsg = MiniJSON.GetString(result, "message", "Submission refused.");
+                            StatusIsError = true;
+                            Touch();
+                            return;
+                        }
 
                         if (!string.IsNullOrEmpty(submittedPid))
                             GeneKermanMod.Instance.RecordRescueSubmission(ContractId, submittedPid);

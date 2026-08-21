@@ -371,6 +371,11 @@ namespace GeneKerman
             // will disappear. Unlinking, pausing data-sharing or a server policy bump
             // forcing re-consent must not strand a ship in a save it was promised to
             // leave — those gates govern what we *send*, not what we owe the player.
+            // The scenario is the save-side memory every rescue guard reads (spawn
+            // dedup, freeze records, removal queue) — self-heal it before anything
+            // consults it. One null check per frame when healthy.
+            if (initialized) GKContractScenario.EnsureExists();
+
             if (initialized) ProcessPendingRescueRemovals();
 
             // Same reasoning, and the same gates deliberately skipped: this only ever
@@ -529,6 +534,12 @@ namespace GeneKerman
         {
             if (notif == null) return;
 
+            // Server text is written for Discord — emoji and <:name:id> markup that
+            // KSP's fonts can't draw. Cleaned once here so the toast, the feeds and
+            // the log all see the same renderable string.
+            notif["title"] = TextSanitizer.CleanNotif(MiniJSON.GetString(notif, "title"));
+            notif["message"] = TextSanitizer.CleanNotif(MiniJSON.GetString(notif, "message"));
+
             string id = MiniJSON.GetString(notif, "id");
             if (!string.IsNullOrEmpty(id) && !seenNotifIds.Add(id))
                 return; // already toasted
@@ -549,6 +560,10 @@ namespace GeneKerman
             // and removed from the rescuer's save. Queue removal of the craft this
             // client submitted for that contract.
             MaybeHandleRescueRemoval(notif);
+
+            // Quicksend: an acceptance confirms the hand-over — re-assert the removal
+            // if a quickload rolled it back while the offer was pending.
+            MaybeHandleGiftAccepted(notif);
 
             // Keep the panel in sync so the item is already there when opened.
             clientState.AddNotification(notif);
@@ -1209,12 +1224,15 @@ namespace GeneKerman
                         // its rescue-craft removal must still fire — so act on it now. If
                         // the save (scenario) isn't loaded yet we can't resolve the craft,
                         // so leave it unseen and let a later poll retry it once a save is in.
-                        bool isRescueRemoval =
-                            MiniJSON.GetString(notif, "type") == "rescue_craft_removed";
-                        if (isRescueRemoval && GKContractScenario.Instance == null)
+                        string ntype = MiniJSON.GetString(notif, "type");
+                        bool isRescueRemoval = ntype == "rescue_craft_removed";
+                        bool isGiftAccepted = ntype == "craft_gift_accepted";
+                        if ((isRescueRemoval || isGiftAccepted) &&
+                            GKContractScenario.Instance == null)
                             continue; // retry on a later poll; don't mark seen
 
                         if (isRescueRemoval) MaybeHandleRescueRemoval(notif);
+                        if (isGiftAccepted) MaybeHandleGiftAccepted(notif);
 
                         string id = MiniJSON.GetString(notif, "id");
                         if (!string.IsNullOrEmpty(id)) seenNotifIds.Add(id);
@@ -1278,6 +1296,11 @@ namespace GeneKerman
         public void RaiseLocalNotification(string title, string message, string contractId = null,
                                           string localAction = null)
         {
+            // Local strings historically carry Discord-style emoji too (🛟, 🗑) — the
+            // game fonts draw them as tofu, so every notification goes through the
+            // same wash the server ones get.
+            title = TextSanitizer.CleanNotif(title);
+            message = TextSanitizer.CleanNotif(message);
             Toast(title, message, contractId, localAction);
 
             if (clientState == null) return;
@@ -1752,8 +1775,61 @@ namespace GeneKerman
             // could not land.
             string pid;
             if (scenario.PeekRescueSubmission(contractId, out pid) &&
-                QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly))
+                QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly,
+                                         crewNames: RescueKerbalsOf(contractId)))
                 scenario.ForgetRescueSubmission(contractId);
+        }
+
+        /// <summary>On a "craft_gift_accepted" notification, make sure the quicksent
+        /// vessel it names really is out of this save.
+        ///
+        /// The normal case is a no-op: the vessel was queued out at send time and is
+        /// long gone. What this catches is the rollback — a quickload or revert after
+        /// the send restores the vessel AND wipes the queued removal from the scenario,
+        /// while the offer lives on server-side. Quicksends have no contract for
+        /// ReconcileRescueVessels to re-derive that intent from, so the acceptance echo
+        /// (which carries the pid we reported at send time) is the backstop. No crew
+        /// list survives the rollback; the hull removal still settles everyone aboard,
+        /// which after a rollback is exactly where they are.</summary>
+        private void MaybeHandleGiftAccepted(Dictionary<string, object> notif)
+        {
+            if (notif == null) return;
+            if (MiniJSON.GetString(notif, "type") != "craft_gift_accepted") return;
+
+            var data = MiniJSON.GetDict(notif, "data");
+            string pid = data != null ? MiniJSON.GetString(data, "vessel_pid") : "";
+            if (string.IsNullOrEmpty(pid)) return;              // blueprint gift, or an old server
+            if (GKContractScenario.Instance == null) return;    // no save loaded — nothing to check
+            if (!VesselTransfer.VesselExists(pid)) return;      // already gone: the normal case
+
+            Debug.Log($"[GeneKerman] Accepted quicksend {pid} is still in this save " +
+                      "(rolled-back removal?) — re-queueing.");
+            QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.LeavesWithCraft);
+        }
+
+        /// <summary>Whether a removal for this pid is still queued — including the
+        /// half-done state where the hull is gone but the entry is still settling
+        /// crew who stepped off it.</summary>
+        public bool HasQueuedRemoval(string pid)
+        {
+            var pending = GKContractScenario.Instance?.PendingRescueRemovals;
+            return pending != null && !string.IsNullOrEmpty(pid) && pending.ContainsKey(pid);
+        }
+
+        /// <summary>Drop a queued removal that must no longer run — the recipient
+        /// declined the quicksend, so the vessel it targets stays ours. Returns true
+        /// when an entry was actually removed.</summary>
+        public bool CancelQueuedRemoval(string pid)
+        {
+            var pending = GKContractScenario.Instance?.PendingRescueRemovals;
+            if (pending == null || string.IsNullOrEmpty(pid) || !pending.ContainsKey(pid))
+                return false;
+            pending.Remove(pid);
+            // Persist the cancellation where a save is allowed (same rule as the
+            // removal pass): a crash before KSP's next autosave would otherwise
+            // resurrect the entry and delete a ship the player was told is staying.
+            if (!HighLogic.LoadedSceneIsFlight) VesselTransfer.SaveNow();
+            return true;
         }
 
         /// <summary>Queue a vessel (by pid) for removal at the next safe scene. Pass a
@@ -1768,7 +1844,8 @@ namespace GeneKerman
         /// caller may forget about it. False means nothing was recorded and the caller
         /// must keep whatever state would let it try again.</summary>
         public bool QueueRescueVesselRemoval(string pid, string vesselName = null,
-            VesselTransfer.CrewFate crewFate = VesselTransfer.CrewFate.LeavesWithCraft)
+            VesselTransfer.CrewFate crewFate = VesselTransfer.CrewFate.LeavesWithCraft,
+            IEnumerable<string> crewNames = null)
         {
             if (string.IsNullOrEmpty(pid)) return false;
             var pending = GKContractScenario.Instance?.PendingRescueRemovals;
@@ -1790,13 +1867,26 @@ namespace GeneKerman
                     CrewFate = crewFate,
                 };
 
-            ProcessPendingRescueRemovals(); // run now if we're already somewhere safe
+            // The crew list is what makes the removal exploit-proof (a kerbal who
+            // stepped off the hull still leaves by name), so a caller that has it
+            // enriches even an entry that already existed without one.
+            if (crewNames != null)
+            {
+                var entry = pending[pid];
+                foreach (var n in crewNames)
+                    if (!string.IsNullOrEmpty(n) && !entry.Crew.Contains(n))
+                        entry.Crew.Add(n);
+            }
 
-            // Still queued → we couldn't delete it yet (player is in flight). Warn them so
-            // the craft doesn't silently vanish the next time they reach the Space Center.
+            ProcessPendingRescueRemovals(); // run now wherever it's currently safe
+
+            // Still queued → we couldn't delete it yet (it's the craft the player is
+            // flying, or something aboard is still being untangled). Warn them so it
+            // doesn't silently vanish later.
             if (pending.ContainsKey(pid))
                 RaiseLocalNotification("Craft scheduled for removal",
-                    $"\"{pending[pid].Name}\" will be deleted when you return to the Space Center.");
+                    $"\"{pending[pid].Name}\" will be deleted when you leave it — at the " +
+                    "latest, on your next visit to the Space Center.");
 
             return true;
         }
@@ -1806,6 +1896,27 @@ namespace GeneKerman
         public void RecordRescueSubmission(string contractId, string pid)
         {
             GKContractScenario.Instance?.RecordRescueSubmission(contractId, pid);
+        }
+
+        /// <summary>The tagged kerbal names a rescue contract hands over, read from the
+        /// cached contract list — on the rescuer's side these are the roster names
+        /// exactly ("{issuer}'s {name}"). Null when the contract isn't in the cache;
+        /// the removal then settles hull crew only, and the Space Center ghost sweep
+        /// remains the backstop.</summary>
+        private List<string> RescueKerbalsOf(string contractId)
+        {
+            var list = clientState?.ContractList;
+            if (list == null || string.IsNullOrEmpty(contractId)) return null;
+            foreach (var o in list)
+            {
+                var c = o as Dictionary<string, object>;
+                if (c == null || MiniJSON.GetString(c, "contract_id") != contractId) continue;
+                var names = new List<string>();
+                foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
+                    if (k != null && !string.IsNullOrEmpty(k.ToString())) names.Add(k.ToString());
+                return names.Count > 0 ? names : null;
+            }
+            return null;
         }
 
         /// <summary>
@@ -1853,6 +1964,7 @@ namespace GeneKerman
             if (scenario == null) yield break;
 
             var rescueStatus = new Dictionary<string, string>();
+            var rescueCrews = new Dictionary<string, List<string>>();
             foreach (var o in contracts)
             {
                 var c = o as Dictionary<string, object>;
@@ -1862,6 +1974,10 @@ namespace GeneKerman
                 string cid = MiniJSON.GetString(c, "contract_id");
                 if (string.IsNullOrEmpty(cid)) continue;
                 rescueStatus[cid] = MiniJSON.GetString(c, "status");
+                var kerbalNames = new List<string>();
+                foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
+                    if (k != null && !string.IsNullOrEmpty(k.ToString())) kerbalNames.Add(k.ToString());
+                rescueCrews[cid] = kerbalNames;
 
                 if (!MiniJSON.GetBool(c, "is_outgoing")) continue;
 
@@ -1874,9 +1990,16 @@ namespace GeneKerman
 
                 Debug.Log($"[GeneKerman] Reconcile: rescue {cid} is live but its craft " +
                           $"(pid {issuedPid}) is still in this save — queueing removal.");
-                // Issuer side: the stranded crew are what was issued, so they go too.
+                // Issuer side: the stranded crew are what was issued, so they go too —
+                // by name as well as by hull, or one who EVA'd off beforehand stays
+                // behind while their copy rides the contract. The contract carries them
+                // tagged ("{me}'s {name}"); this roster holds them bare.
+                var issuedCrew = new List<string>();
+                foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
+                    if (k != null) issuedCrew.Add(VesselTransfer.StripOwnershipTag(k.ToString()));
                 QueueRescueVesselRemoval(issuedPid,
-                    crewFate: VesselTransfer.CrewFate.LeavesWithCraft);
+                    crewFate: VesselTransfer.CrewFate.LeavesWithCraft,
+                    crewNames: issuedCrew);
             }
 
             // Rescuer side. Iterating a copy of the keys, since both branches mutate the map.
@@ -1899,8 +2022,13 @@ namespace GeneKerman
                 Debug.Log($"[GeneKerman] Reconcile: rescue {cid} was approved — queueing " +
                           $"removal of the craft we submitted (pid {pid}).");
                 // Rescuer side: the ship and the kerbals we picked up are the hand-over.
-                // The pilots who flew it there are not, and stay in our roster.
-                if (QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly))
+                // The pilots who flew it there are not, and stay in our roster. The
+                // contract's tagged names ride along so a rescued kerbal who stepped
+                // off the craft still leaves by name (BorrowedOnly keeps our own out).
+                List<string> handedOver;
+                rescueCrews.TryGetValue(cid, out handedOver);
+                if (QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly,
+                                             crewNames: handedOver))
                     scenario.ForgetRescueSubmission(cid);
             }
         }
@@ -1983,18 +2111,42 @@ namespace GeneKerman
                 $"defining it is installed: {NameList(restored, 6)}.");
         }
 
+        /// <summary>Paces in-flight removal retries — see ProcessPendingRescueRemovals.</summary>
+        private float nextFlightRemovalPass;
+
         private void ProcessPendingRescueRemovals()
         {
             var pending = GKContractScenario.Instance?.PendingRescueRemovals;
             if (pending == null || pending.Count == 0) return;
-            if (HighLogic.LoadedScene != GameScenes.SPACECENTER &&
+
+            // Flight now processes too, so a hand-over doesn't sit in the save (with
+            // an exploitable window: EVA the crew off and they used to survive the
+            // eventual removal) until the player happens to visit the Space Center.
+            // In flight only vessels that are NOT loaded are touched: Die() on a
+            // loaded craft detonates it in front of the player, and the focused
+            // vessel is refused by RemoveVesselFromSave anyway.
+            bool inFlight = HighLogic.LoadedSceneIsFlight;
+            if (!inFlight &&
+                HighLogic.LoadedScene != GameScenes.SPACECENTER &&
                 HighLogic.LoadedScene != GameScenes.TRACKSTATION)
-                return; // can't safely Die() the focused flight vessel — wait
+                return;
+
+            // This is called from Update. At the Space Center a pass terminal-dequeues
+            // everything it can and the queue empties; in flight an entry can legally
+            // wait (craft still loaded, kerbal on EVA), so pace the retries or every
+            // deferral becomes a per-frame log line and roster scan.
+            if (inFlight)
+            {
+                if (Time.realtimeSinceStartup < nextFlightRemovalPass) return;
+                nextFlightRemovalPass = Time.realtimeSinceStartup + 10f;
+            }
 
             // Removed = we deleted it (announce); NotFound = already gone (dequeue
-            // silently). Both are terminal — dropping them stops the per-frame retry
-            // that otherwise floods the log when a queued pid isn't in this save.
-            // Deferred/Failed stay queued for a later safe-scene pass.
+            // silently). Both are terminal for the hull — but an entry only leaves the
+            // queue once its *crew list* is settled too: RemoveContractCrew hunts the
+            // contract's kerbals by name wherever they are, and a kerbal it must defer
+            // (on EVA next to the player) keeps the entry alive for the next pass.
+            // Deferred/Failed hulls stay queued as before.
             //
             // Saving is deferred to the end for both halves of the problem it causes
             // per-vessel: N removals meant N full game saves, and each of those ran
@@ -2007,11 +2159,32 @@ namespace GeneKerman
             {
                 var entry = pending[pid];
                 var fate = entry != null ? entry.CrewFate : VesselTransfer.CrewFate.LeavesWithCraft;
-                switch (VesselTransfer.RemoveVesselFromSave(pid, fate, persist: false))
+
+                if (inFlight)
                 {
-                    case VesselTransfer.RemovalResult.Removed: removed.Add(pid); break;
-                    case VesselTransfer.RemovalResult.NotFound: gone.Add(pid); break;
+                    var v = VesselTransfer.FindVessel(pid);
+                    if (v != null && v.loaded) continue;   // too close — next pass
                 }
+
+                var result = VesselTransfer.RemoveVesselFromSave(pid, fate, persist: false);
+                if (result != VesselTransfer.RemovalResult.Removed &&
+                    result != VesselTransfer.RemovalResult.NotFound)
+                    continue;
+
+                bool crewSettled = entry == null ||
+                    VesselTransfer.RemoveContractCrew(entry.Crew, fate);
+
+                if (!crewSettled)
+                {
+                    // Hull handled; somebody walked off and can't be settled yet. The
+                    // entry stays queued — the next pass finds the hull NotFound and
+                    // retries only the crew, until the list comes back clean.
+                    Debug.Log($"[GeneKerman] Rescue removal {pid}: hull done, crew pending — kept queued.");
+                    continue;
+                }
+
+                if (result == VesselTransfer.RemovalResult.Removed) removed.Add(pid);
+                else gone.Add(pid);
             }
             if (removed.Count == 0 && gone.Count == 0) return;
 
@@ -2032,7 +2205,11 @@ namespace GeneKerman
 
             // The queue lives in the scenario, so this write persists the dequeues as
             // well as the destroyed vessels — the two must not be able to disagree.
-            VesselTransfer.SaveNow();
+            // In flight the write is skipped (saving mid-flight is not this mod's call
+            // to make); the scenario carries the dequeues into KSP's next autosave,
+            // and a crash before one costs nothing — ReconcileRescueVessels re-derives
+            // the queue from contract state.
+            if (!inFlight) VesselTransfer.SaveNow();
 
             foreach (var name in announce)
                 RaiseLocalNotification("Craft removed",

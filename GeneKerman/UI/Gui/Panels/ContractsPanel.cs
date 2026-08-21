@@ -120,6 +120,10 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>Proposed date for a "More Time" request on a human-issued contract.</summary>
         private DateTime moreTimeDate = DateTime.Now.Date.AddDays(7);
+        /// <summary>Contract whose more-time date form is expanded. The picker used to
+        /// sit permanently above the button, where it read as furniture rather than as
+        /// part of the ask and was easy to miss — now the button opens it.</summary>
+        private string moreTimeOpenId;
 
         private readonly DatePicker moreTimePicker = new DatePicker();
 
@@ -876,6 +880,7 @@ namespace GeneKerman.UI.Gui
             ClearStatus();
             confirmActionId = null;
             rescueAcceptConfirmId = null;
+            moreTimeOpenId = null;
             moreTimeDate = DateTime.Now.Date.AddDays(7);
             moreTimePicker.Close();
             MarkDirty();
@@ -1288,21 +1293,40 @@ namespace GeneKerman.UI.Gui
                     // this save on demand. That is a separate step so a failure is
                     // retryable and so it never lands in a scene that cannot take a
                     // vessel — and it is why this has to be reachable from here.
-                    if (mType == "rescue" && !isOutgoing) BuildRescueWreck(bar, main, c, cid);
+                    if (mType == "rescue" && !isOutgoing)
+                    {
+                        BuildRescueWreck(bar, main, c, cid);
+                        // More time was granted after a refusal but the delivery craft
+                        // was recovered/lost in the meantime — offer the server's copy.
+                        BuildRestoreSubmitted(bar, c, cid);
+                    }
 
                     // Submission is inherently an in-game act — it needs live
                     // telemetry and a render of the craft in front of the player — so
                     // this raises the submit window (UI/Gui/Panels/SubmitPanel.cs,
                     // draggable, on this same canvas) rather than reimplementing it.
-                    UIF.Button(bar, "Submit in KSP", () =>
+                    // Contractor only: the issuer is the one being delivered to, and a
+                    // submit button on their side is a trap — the server would refuse
+                    // the submission after they'd staged a whole craft for it.
+                    if (!isOutgoing)
                     {
-                        var done = BeginAction();
-                        mod.RunCoroutine(Web.GkRoutes.OpenSubmitRoutine(cid, (ok, msg) =>
+                        UIF.Button(bar, "Submit in KSP", () =>
                         {
-                            done(ok, ok ? "Submit window opened in KSP. Switch to the game." : msg);
-                            if (ok) openId = null;
-                        }));
-                    }, BtnStyle.Primary, 28).Interactable(!Busy);
+                            var done = BeginAction();
+                            mod.RunCoroutine(Web.GkRoutes.OpenSubmitRoutine(cid, (ok, msg) =>
+                            {
+                                done(ok, ok ? "Submit window opened in KSP. Switch to the game." : msg);
+                                if (ok) openId = null;
+                            }));
+                        }, BtnStyle.Primary, 28).Interactable(!Busy);
+                    }
+                    else
+                    {
+                        UIF.Notice(bar, "Waiting for " +
+                                   (MiniJSON.GetString(c, "contractor_name", "").Length > 0
+                                        ? MiniJSON.GetString(c, "contractor_name")
+                                        : "the contractor") + " to deliver.");
+                    }
 
                     // Giving up costs the agreed fine, so it gets a confirm. The
                     // issuer side has nothing to give up — they would cancel.
@@ -1348,21 +1372,44 @@ namespace GeneKerman.UI.Gui
             if (isOutgoing)
             {
                 // An open settle / more-time request puts the ball in the issuer's
-                // court, and answering one is browser-UI and Discord only — so say
-                // who is being waited on rather than implying the contractor stalls.
-                if (reqKind == "settle")
-                    UIF.Notice(bar, "They asked to settle.", "Answer in the browser UI or on Discord.");
-                else if (reqKind == "more_time")
-                    UIF.Notice(bar, "They asked for more time (" +
-                               MiniJSON.GetString(pendingReq, "new_date") + ").",
-                               "Answer in the browser UI or on Discord.");
+                // court — answer it here, the same /{kind}_response the browser UI
+                // uses, rather than sending the player to Discord for a yes/no.
+                if (reqKind == "settle" || reqKind == "more_time")
+                {
+                    UIF.Notice(bar, reqKind == "settle"
+                               ? "They ask to settle: no payment, no fine."
+                               : "They ask to move the deadline to " +
+                                 MiniJSON.GetString(pendingReq, "new_date") + ".");
+                    UIF.Button(bar, "Approve", () => main.RequestDisputeResponse(cid, reqKind, true, Done()),
+                               BtnStyle.Primary, 28).Interactable(!Busy);
+                    UIF.Button(bar, "Refuse", () => main.RequestDisputeResponse(cid, reqKind, false, Done()),
+                               BtnStyle.Ghost, 28).Interactable(!Busy);
+                }
                 else
+                {
                     UIF.Notice(bar, "Waiting for the contractor to resolve this.");
+                }
 
                 // Changing your mind about a refusal is the one exit from a dispute
                 // that favours the contractor, so it is offered whatever is pending.
                 UIF.Button(bar, "Accept after all", () => main.RequestReviewContract(cid, true, Done()),
                            BtnStyle.Primary, 28).Interactable(!Busy);
+                return;
+            }
+
+            // Whatever else the dispute is doing, a contractor whose submitted craft
+            // has left the save (stock recovery after landing is the usual way) can
+            // pull the server's copy back — they may need it to re-deliver.
+            BuildRestoreSubmitted(bar, c, cid);
+
+            // The contractor already asked; the issuer owes the answer — repeating the
+            // action buttons here would only produce "already pending" refusals.
+            if (reqKind == "settle" || reqKind == "more_time")
+            {
+                UIF.Notice(bar, reqKind == "settle"
+                           ? "Waiting for the issuer to answer your settlement request."
+                           : "Waiting for the issuer to answer your extension request (" +
+                             MiniJSON.GetString(pendingReq, "new_date") + ").");
                 return;
             }
 
@@ -1373,23 +1420,47 @@ namespace GeneKerman.UI.Gui
 
             if (!moreTimeUsed)
             {
-                // A human-issued contract must name the date it is asking for. Pick
-                // only, unlike the contract form: this is a single date on a card
-                // that is already dense, and there is nothing to type it against.
-                // Tomorrow at the earliest — "more time" that has already elapsed is
-                // meaningless, and the API refuses it anyway.
-                if (!botIssued)
+                if (botIssued)
                 {
+                    // A bot issuer has nobody to ask: it extends on its own schedule
+                    // and needs no date, so the button acts directly.
+                    UIF.Button(bar, "More time", () => main.RequestDispute(cid, "more_time", null, Done()),
+                               BtnStyle.Secondary, 28).Interactable(!Busy);
+                }
+                else if (moreTimeOpenId != cid)
+                {
+                    // The date form opens on demand instead of sitting above the
+                    // button permanently — half-hidden furniture nobody connected to
+                    // the ask, and easy to submit with a date never actually chosen.
+                    UIF.Button(bar, "Ask for more time", () =>
+                    {
+                        moreTimeOpenId = cid;
+                        moreTimeDate = DateTime.Now.Date.AddDays(7);
+                        MarkDirty();
+                    }, BtnStyle.Secondary, 28).Interactable(!Busy);
+                }
+                else
+                {
+                    // Pick only, unlike the contract form: a single date on an already
+                    // dense card. Tomorrow at the earliest — "more time" that has
+                    // already elapsed is meaningless, and the API refuses it anyway.
                     moreTimePicker.Build(bar, DatePicker.Print(moreTimeDate),
                                          DateTime.Now.Date.AddDays(1),
-                                         picked => moreTimeDate = DatePicker.Parse(picked, moreTimeDate),
+                                         picked =>
+                                         {
+                                             moreTimeDate = DatePicker.Parse(picked, moreTimeDate);
+                                             MarkDirty();  // the send button carries the date
+                                         },
                                          null, "New date");
+                    UIF.Muted(bar, "One ask per dispute — the issuer approves or refuses it.").Body();
+                    UIF.Button(bar, "Request until " + DatePicker.Print(moreTimeDate), () =>
+                    {
+                        moreTimeOpenId = null;
+                        main.RequestDispute(cid, "more_time", DatePicker.Print(moreTimeDate), Done());
+                    }, BtnStyle.Primary, 28).Interactable(!Busy);
+                    UIF.Button(bar, "Never mind", () => { moreTimeOpenId = null; MarkDirty(); },
+                               BtnStyle.Ghost, 28).Interactable(!Busy);
                 }
-
-                UIF.Button(bar, "More time", () => main.RequestDispute(
-                               cid, "more_time",
-                               botIssued ? null : DatePicker.Print(moreTimeDate), Done()),
-                           BtnStyle.Secondary, 28).Interactable(!Busy);
             }
 
             UIF.Button(bar, "Pay fine", () => main.RequestDispute(cid, "pay_fine", null, Done()),
@@ -1404,6 +1475,64 @@ namespace GeneKerman.UI.Gui
             if (!botIssued)
                 UIF.Button(bar, "Settle", () => main.RequestDispute(cid, "settle", null, Done()),
                            BtnStyle.Secondary, 28).Interactable(!Busy);
+        }
+
+        /// <summary>
+        /// "Restore submitted craft": the contractor's delivery craft, back from the
+        /// server's stored copy of their own submission.
+        ///
+        /// Exists for one sequence — land at the target, submit, hit KSP's Recover
+        /// button, then have the issuer refuse and grant more time. The contract is
+        /// active again but the craft that has to be re-delivered left the save
+        /// through stock recovery. The server has held the full vessel node since the
+        /// submission (approval delivers it to the issuer from the same copy), so the
+        /// restore is a queued live-vessel import of that node back to its builder,
+        /// spawning where it sat when it was submitted.
+        ///
+        /// Drawn only when this save's own submission record says the craft is gone —
+        /// the server cannot know that, which is why the restore is client-initiated.
+        /// The gate on assigned crew is the duplication guard: import reuses roster
+        /// entries by name, but a listed kerbal already seated on another vessel
+        /// would end up existing in two places at once.
+        /// </summary>
+        private void BuildRestoreSubmitted(El bar, Dictionary<string, object> c, string cid)
+        {
+            var scenario = GKContractScenario.Instance;
+            string pid;
+            if (scenario == null || !scenario.PeekRescueSubmission(cid, out pid)) return;
+            if (VesselTransfer.VesselExists(pid)) return;   // still here — nothing to restore
+
+            var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
+            foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
+            {
+                string name = k != null ? k.ToString() : null;
+                if (string.IsNullOrEmpty(name) || roster == null) continue;
+                var pcm = roster[name];
+                if (pcm != null && pcm.rosterStatus == ProtoCrewMember.RosterStatus.Assigned)
+                {
+                    UIF.Notice(bar, "The craft you submitted is no longer in this save.",
+                               name + " is assigned to another vessel — free them up first, " +
+                               "then the craft can be restored.");
+                    return;
+                }
+            }
+
+            UIF.Notice(bar, "The craft you submitted is no longer in this save.",
+                       "Recovered or lost — the server still holds your submission, and can " +
+                       "put it back where it was for another delivery attempt.");
+            UIF.Button(bar, "Restore submitted craft", () =>
+            {
+                var done = BeginAction();
+                GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.Post(
+                    $"/api/v1/contracts/{cid}/reimport_submission", "{}", (ok, resp, status) =>
+                {
+                    var d = MiniJSON.DeserializeDict(resp);
+                    bool success = ok && (d == null || MiniJSON.GetBool(d, "success", true));
+                    string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+                    done(success, !string.IsNullOrEmpty(msg) ? msg
+                         : success ? "Restore queued." : "Restore failed.");
+                }));
+            }, BtnStyle.Secondary, 28).Interactable(!Busy);
         }
 
         private void BuildCompletedActions(El bar, ClientState main, Dictionary<string, object> c,

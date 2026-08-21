@@ -396,6 +396,69 @@ namespace GeneKerman.UI.Gui
         }
     }
 
+    /// <summary>
+    /// The missing cull for an input field's value.
+    ///
+    /// TMP_InputField scrolls a long value by sliding the text component's rect
+    /// sideways out of the field's viewport, so its OnEnable exempts that text
+    /// from RectMask2D culling (and TMP_SelectionCaret.Cull is an unconditional
+    /// no-op) — rect-based culling would hide the value exactly while a long one
+    /// is being edited. But per-pixel clipping is only armed while the mask
+    /// chain's intersection is non-empty: scroll the whole field past a panel
+    /// viewport's edge and uGUI answers the empty intersection by *disabling*
+    /// clipping and falling back on the cull the field just opted out of, so the
+    /// value renders whole, floating over the game. This supplies that one
+    /// missing cull, keyed to the field's viewport rect rather than the slid
+    /// text rect: while the viewport still intersects every enclosing mask,
+    /// per-pixel clipping is in charge and the renderers are left alone. It is
+    /// the only writer of these renderers' cull flag — the mask machinery's own
+    /// writes are exactly what the two components above ignore.
+    /// </summary>
+    internal sealed class FieldCullGuard : MonoBehaviour
+    {
+        internal RectTransform Viewport;
+        internal Graphic Text;
+
+        private RectMask2D[] masks;
+        private readonly Vector3[] corners = new Vector3[4];
+
+        private void LateUpdate()
+        {
+            if (Viewport == null || Text == null) return;
+            // The chain is fixed once built — a panel changes by being rebuilt,
+            // which replaces the field, guard and all.
+            if (masks == null) masks = Viewport.GetComponentsInParent<RectMask2D>(false);
+
+            float xMin = float.NegativeInfinity, yMin = float.NegativeInfinity;
+            float xMax = float.PositiveInfinity, yMax = float.PositiveInfinity;
+            bool visible = Intersect(Viewport, ref xMin, ref yMin, ref xMax, ref yMax);
+            for (int i = 0; visible && i < masks.Length; i++)
+                if (masks[i] != null && masks[i].isActiveAndEnabled)
+                    visible = Intersect(masks[i].rectTransform, ref xMin, ref yMin, ref xMax, ref yMax);
+
+            Apply(Text.canvasRenderer, !visible);
+            // Created lazily on focus, so looked up rather than cached; it draws
+            // the selection highlight too, which floats just as visibly.
+            var caret = Viewport.GetComponentInChildren<TMP_SelectionCaret>(true);
+            if (caret != null) Apply(caret.canvasRenderer, !visible);
+        }
+
+        private static void Apply(CanvasRenderer cr, bool cull)
+        {
+            if (cr != null && cr.cull != cull) cr.cull = cull;
+        }
+
+        // World space is shared by every mask on the canvas and nothing here
+        // rotates, so an axis-aligned corner intersection is exact.
+        private bool Intersect(RectTransform rt, ref float xMin, ref float yMin, ref float xMax, ref float yMax)
+        {
+            rt.GetWorldCorners(corners);
+            xMin = Mathf.Max(xMin, corners[0].x); yMin = Mathf.Max(yMin, corners[0].y);
+            xMax = Mathf.Min(xMax, corners[2].x); yMax = Mathf.Min(yMax, corners[2].y);
+            return xMin < xMax && yMin < yMax;
+        }
+    }
+
     /// <summary>A button: the clickable element plus its caption.</summary>
     internal sealed class Btn
     {
@@ -851,6 +914,12 @@ namespace GeneKerman.UI.Gui
                 input.caretColor = Theme.Foreground;
                 input.caretWidth = 1;
                 input.selectionColor = Theme.Alpha(Theme.Primary, 0.35f);
+                // TMP exempts the value and caret from mask culling, which leaks
+                // them over the game when the field scrolls fully past a panel
+                // edge — see FieldCullGuard. Legacy InputField culls normally.
+                var guard = e.Go.AddComponent<FieldCullGuard>();
+                guard.Viewport = area.Rt;
+                guard.Text = txt.Tmp;
                 fld = new Fld(e, input, null);
                 sel = input;
             }

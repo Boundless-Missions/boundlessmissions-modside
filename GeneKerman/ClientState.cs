@@ -184,6 +184,12 @@ namespace GeneKerman
         internal void RequestDispute(string contractId, string action, string newDate, Action<bool, string> onDone)
             => GeneKermanMod.Instance.RunCoroutine(DoDispute(contractId, action, newDate, onDone));
 
+        /// <summary>Answer the contractor's pending settle / more-time request as the
+        /// issuer. <paramref name="kind"/> is "settle" or "more_time" — the same two
+        /// the browser UI answers via /{kind}_response.</summary>
+        internal void RequestDisputeResponse(string contractId, string kind, bool approve, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoDisputeResponse(contractId, kind, approve, onDone));
+
         internal void RequestDownloadCraft(string contractId, string ownerName, Action<bool, string> onDone)
             => GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(contractId, ownerName, onDone));
 
@@ -535,6 +541,15 @@ namespace GeneKerman
                 if (ok)
                 {
                     notifications = MiniJSON.GetList(data, "notifications") ?? new List<object>();
+                    // Discord-authored text: wash out emoji and <:name:id> markup the
+                    // game fonts can't draw, once, before any renderer sees it.
+                    foreach (var o in notifications)
+                    {
+                        var nd = o as Dictionary<string, object>;
+                        if (nd == null) continue;
+                        nd["title"] = TextSanitizer.CleanNotif(MiniJSON.GetString(nd, "title"));
+                        nd["message"] = TextSanitizer.CleanNotif(MiniJSON.GetString(nd, "message"));
+                    }
                     int unread = MiniJSON.GetInt(data, "unread_count");
                     // Re-attach session-local notifications the server doesn't know
                     // about (newest first), and fold their unread count into the badge.
@@ -621,6 +636,20 @@ namespace GeneKerman
 
         private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals, string builtWithLs = "none", Action<bool, string> onDone = null)
         {
+            // The scenario is what makes every guard below real: without it the dedup
+            // and the freeze records have nowhere to live, and a null-Instance spawn
+            // used to silently skip them all — six identical wrecks from six clicks in
+            // an old save KSP never injected the module into. Heal it, and if it still
+            // isn't there, refuse to spawn at all rather than spawn unaccountably.
+            GKContractScenario.EnsureExists();
+            if (GKContractScenario.Instance == null)
+            {
+                SetStatus("(No) This save's contract records aren't available.");
+                onDone?.Invoke(false, "Couldn't prepare this save's contract records — " +
+                                      "visit the Space Center once and try again.");
+                yield break;
+            }
+
             // Permanent, per-save dedup: if the wreck is already in this save, never
             // spawn a second one. This is persisted in GKContractScenario, so it holds
             // across restarts (the in-memory set below only guards a double-click while
@@ -728,6 +757,29 @@ namespace GeneKerman
                     SetStatus("(No) " + (string.IsNullOrEmpty(msg) ? "Action failed." : msg));
                     onDone?.Invoke(false, string.IsNullOrEmpty(msg) ? "Action failed." : msg);
                 }
+            });
+        }
+
+        private System.Collections.IEnumerator DoDisputeResponse(string contractId, string kind,
+                                                                 bool approve, Action<bool, string> onDone = null)
+        {
+            string body = approve ? "{\"approve\":true}" : "{\"approve\":false}";
+            yield return GeneKermanMod.Instance.Api.Post(
+                $"/api/v1/contracts/{contractId}/{kind}_response", body,
+                (ok, resp, status) =>
+            {
+                // Same soft-failure contract as the dispute endpoint: HTTP 200 with
+                // success=false when the request was already answered or withdrawn.
+                var d = MiniJSON.DeserializeDict(resp);
+                bool success = ok && (d == null || MiniJSON.GetBool(d, "success", true));
+                string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+                if (string.IsNullOrEmpty(msg))
+                    msg = success ? (approve ? "Request approved." : "Request refused.")
+                                  : "Could not answer the request.";
+
+                if (success) { SetStatus(msg); RefreshContracts(); }
+                else SetStatus("(No) " + msg);
+                onDone?.Invoke(success, msg);
             });
         }
 
@@ -861,10 +913,13 @@ namespace GeneKerman
 
             // Rescue deliveries and friend quicksends are LIVE vessels. Rescue: the
             // rescued kerbals coming home (or a cancelled rescue returning to its spot).
-            // gift_vessel: a vessel a friend sent straight to your save. Crew are
-            // tagged/stripped by owner on import — your own kerbals come back to their
-            // original names; anyone else's keep their owner tag.
-            if ((source == "rescue_delivery" || source == "gift_vessel") && !string.IsNullOrEmpty(vesselNodeUrl))
+            // gift_vessel: a vessel a friend sent straight to your save.
+            // submission_restore: the contractor's own submitted craft coming back
+            // after they recovered it and a dispute made the contract active again.
+            // Crew are tagged/stripped by owner on import — your own kerbals come back
+            // to their original names; anyone else's keep their owner tag.
+            if ((source == "rescue_delivery" || source == "gift_vessel" ||
+                 source == "submission_restore") && !string.IsNullOrEmpty(vesselNodeUrl))
             {
                 // The poll also runs in the editor now (for blueprint installs), but a
                 // live vessel cannot spawn there — leave the entry queued for a scene
@@ -874,7 +929,41 @@ namespace GeneKerman
                     processingImports.Remove(importId);
                     yield break;
                 }
+
+                // gift_vessel doubles as the decline-return of our own quicksend, and
+                // the pid we reported at send time decides what "delivering" means:
+                //  • the original is still in this save (its removal is deferred while
+                //    we fly it, or a quickload rolled it back) → the return is a no-op.
+                //    Cancel the removal and keep the ship; spawning the snapshot next
+                //    to it would duplicate hull and crew.
+                //  • the hull is gone but its removal entry is still settling crew (a
+                //    straggler on EVA) → defer to the next poll; spawning now would
+                //    re-create the very names the entry is hunting.
+                //  • fully gone → spawn from the snapshot like any other delivery.
+                // A friend's normal gift carries THEIR save's pid, which can't match
+                // anything here, so it falls through to the spawn as before.
+                string returnPid = MiniJSON.GetString(entry, "vessel_pid", "");
+                if (source == "gift_vessel" && !string.IsNullOrEmpty(returnPid))
+                {
+                    if (VesselTransfer.VesselExists(returnPid))
+                    {
+                        GeneKermanMod.Instance.CancelQueuedRemoval(returnPid);
+                        GeneKermanMod.Instance.ShowNotification("📪 Vessel Returned",
+                            $"{craftName} was declined and hadn't left yet — it stays right where it is.");
+                        yield return GeneKermanMod.Instance.Api.Post(
+                            $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
+                        processingImports.Remove(importId);
+                        yield break;
+                    }
+                    if (GeneKermanMod.Instance.HasQueuedRemoval(returnPid))
+                    {
+                        processingImports.Remove(importId);
+                        yield break;
+                    }
+                }
+
                 string myName = GeneKermanMod.Instance.LinkedUsername;
+                string refId = MiniJSON.GetString(entry, "ref_id", "");
                 bool spawned = false;
                 yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
                 {
@@ -884,10 +973,28 @@ namespace GeneKerman
                     if (!string.IsNullOrEmpty(vesselName))
                     {
                         spawned = true;
-                        string title = source == "gift_vessel" ? "🎁 Vessel Received" : "🛟 Rescue Delivered";
-                        string from = string.IsNullOrEmpty(ownerName) ? "" : $" from {ownerName}";
-                        GeneKermanMod.Instance.ShowNotification(title,
-                            $"{vesselName}{(source == "gift_vessel" ? from : "")} has arrived in your save.");
+                        // A restored submission is still what this save owes the
+                        // contract: re-key the contract→pid record to the spawned copy,
+                        // or a later approval's removal targets the pid the player
+                        // recovered and the restored hull would survive the hand-over.
+                        if (source == "submission_restore" && !string.IsNullOrEmpty(refId))
+                            GeneKermanMod.Instance.RecordRescueSubmission(
+                                refId, VesselTransfer.LastImportedPid);
+
+                        // A gift_vessel whose owner is *us* is our own quicksend coming
+                        // home after a decline, not a present from ourselves.
+                        bool isReturn = source == "gift_vessel" &&
+                                        !string.IsNullOrEmpty(myName) && ownerName == myName;
+                        string title = isReturn ? "📪 Vessel Returned"
+                                     : source == "gift_vessel" ? "🎁 Vessel Received"
+                                     : source == "submission_restore" ? "Craft restored"
+                                     : "🛟 Rescue Delivered";
+                        string body = isReturn
+                            ? $"{vesselName} was declined and is back in your save."
+                            : source == "submission_restore"
+                            ? $"{vesselName} is back where it was when you submitted. It still belongs to the contract."
+                            : $"{vesselName}{(source == "gift_vessel" && !string.IsNullOrEmpty(ownerName) ? $" from {ownerName}" : "")} has arrived in your save.";
+                        GeneKermanMod.Instance.ShowNotification(title, body);
                     }
                 });
                 if (!spawned)

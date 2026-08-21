@@ -194,7 +194,8 @@ namespace GeneKerman.UI.Gui
             UIF.Label(titleRow, name, Theme.FontSm).Bold();
 
             UIF.Label(card, from + " sent you " + (vessel
-                          ? "a live vessel. Accepting spawns it into your save."
+                          ? "a live vessel — it left their save to come here. Accepting " +
+                            "spawns it into yours; declining sends it back to them."
                           : "a craft blueprint. Accepting saves it to your Ships folder."),
                       Theme.FontSm, Theme.MutedForeground).Body();
 

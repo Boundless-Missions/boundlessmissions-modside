@@ -1750,7 +1750,8 @@ namespace GeneKerman
         /// </summary>
         public IEnumerator SendCraftToFriend(
             string recipientId, string kind, string craftName,
-            byte[] fileData, string fileName, byte[] blueprintPng, ApiCallback callback)
+            byte[] fileData, string fileName, byte[] blueprintPng, string vesselPid,
+            ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/craft/send";
@@ -1765,6 +1766,13 @@ namespace GeneKerman
             form.Add(new MultipartFormDataSection("recipient_id", recipientId ?? ""));
             form.Add(new MultipartFormDataSection("kind", kind ?? "craft"));
             form.Add(new MultipartFormDataSection("craft_name", craftName ?? "Craft"));
+            // Live vessel only: its pid in THIS save. The send is a hand-over — we
+            // remove the vessel once the server confirms — and the pid is how the
+            // decision comes back addressed to the right hull (a decline-return
+            // cancels a removal that hasn't run; an accept re-asserts one a
+            // quickload rolled back).
+            if (!string.IsNullOrEmpty(vesselPid))
+                form.Add(new MultipartFormDataSection("vessel_pid", vesselPid));
 
             using (var req = UnityWebRequest.Post(url, form))
             {

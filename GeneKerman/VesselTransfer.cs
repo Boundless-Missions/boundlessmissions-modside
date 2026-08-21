@@ -384,6 +384,16 @@ namespace GeneKerman
                    name.IndexOf("'s ", StringComparison.Ordinal) > 0;
         }
 
+        /// <summary>"{owner}'s {Name}" → "Name"; an untagged name unchanged. For reading
+        /// a contract's tagged kerbal list against the *issuer's own* roster, where the
+        /// same kerbals live under their bare names.</summary>
+        public static string StripOwnershipTag(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            int idx = name.IndexOf("'s ", StringComparison.Ordinal);
+            return idx > 0 ? name.Substring(idx + 3) : name;
+        }
+
         // ── Import ───────────────────────────────────────────────────────────
 
         /// <summary>
@@ -561,6 +571,12 @@ namespace GeneKerman
             return true;
         }
 
+        /// <summary>pid assigned to the most recently imported vessel (PrepareInnerNode
+        /// mints a fresh one per import). For callers that must re-key bookkeeping to
+        /// the spawned copy — a restored rescue submission has to update the
+        /// contract→pid record or a later approval's removal targets the old, dead pid.</summary>
+        public static string LastImportedPid { get; private set; }
+
         /// <summary>Parse a vessel string to its inner VESSEL node and assign a fresh
         /// pid/persistentId so it can't collide with an existing vessel.</summary>
         private static ConfigNode LoadInnerVesselNode(string vesselNodeStr)
@@ -614,6 +630,7 @@ namespace GeneKerman
             Guid newGuid = Guid.NewGuid();
             innerNode.SetValue("pid", newGuid.ToString("D"), true);
             innerNode.SetValue("persistentId", ((uint)rng.Next(100000, int.MaxValue)).ToString(), true);
+            LastImportedPid = newGuid.ToString("D");
 
             // Install any custom mission flags this vessel carried (and strip the
             // GKFLAG nodes) before the ProtoVessel is built, so its parts resolve
@@ -827,6 +844,17 @@ namespace GeneKerman
         /// Used for player-facing removal notices so the message can name the craft
         /// even after it's been destroyed. Falls back to a generic label.
         /// </summary>
+        /// <summary>The live vessel with this pid, or null. For callers that need more
+        /// than existence — e.g. "is it loaded right now?".</summary>
+        public static Vessel FindVessel(string pid)
+        {
+            Guid g;
+            if (string.IsNullOrEmpty(pid) || !Guid.TryParse(pid, out g)) return null;
+            foreach (var v in FlightGlobals.Vessels)
+                if (v != null && v.id == g) return v;
+            return null;
+        }
+
         public static string GetVesselName(string pid)
         {
             Guid g;
@@ -1010,6 +1038,159 @@ namespace GeneKerman
                 Debug.LogError($"[GeneKerman] RemoveVessel failed: {ex}");
                 return RemovalResult.Failed;
             }
+        }
+
+        /// <summary>
+        /// Remove the crew a contract hands over *by name*, wherever they are now.
+        ///
+        /// The vessel removal above settles whoever is aboard the recorded hull — and
+        /// only them. A kerbal who stepped off before it ran (EVA'd away, boarded a
+        /// different pod, was even the "vessel" a crew-only delivery was submitted as)
+        /// used to survive the removal while their copy was delivered to the other
+        /// player — a duplicate the server has no way to see. This walks the contract's
+        /// own crew list against the whole save: still-present names are lifted out of
+        /// whatever vessel holds them (loaded part or proto snapshot, the same two
+        /// shapes the emergency freeze edits) and dropped from the roster.
+        ///
+        /// Returns true when every listed kerbal is settled (or was already gone).
+        /// False means at least one could not be settled yet — a kerbal currently ON
+        /// EVA as a loaded vessel of their own is deferred rather than killed under
+        /// the player — and the caller must keep its queue entry so a later pass
+        /// (Space Center at the latest) finishes the job.
+        /// </summary>
+        public static bool RemoveContractCrew(List<string> names, CrewFate fate)
+        {
+            if (names == null || names.Count == 0 || fate == CrewFate.StaysInRoster) return true;
+            var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
+            if (roster == null) return false;
+
+            bool allSettled = true;
+            foreach (var name in names)
+            {
+                if (string.IsNullOrEmpty(name)) continue;
+                if (fate == CrewFate.BorrowedOnly && !IsBorrowedCrewName(name)) continue;
+
+                try
+                {
+                    ProtoCrewMember pcm = FindRosterMember(roster, name);
+                    if (pcm == null) continue;  // already gone — the normal case
+
+                    // Where are they? A kerbal on EVA *is* a vessel; one aboard a ship
+                    // is a crew entry on it; one in the roster alone is neither.
+                    Vessel host = null;
+                    bool isEvaVessel = false;
+                    foreach (var v in FlightGlobals.Vessels)
+                    {
+                        if (v == null) continue;
+                        if (v.isEVA && VesselHoldsCrew(v, name)) { host = v; isEvaVessel = true; break; }
+                        if (VesselHoldsCrew(v, name)) { host = v; break; }
+                    }
+
+                    if (isEvaVessel)
+                    {
+                        if (host.loaded)
+                        {
+                            // Killing a loaded EVA kerbal detonates them in front of the
+                            // player; wait for a pass where they're aboard something or
+                            // out of range.
+                            Debug.LogWarning($"[GeneKerman] RemoveContractCrew: {name} is on EVA " +
+                                             "nearby — deferring until they board or leave range.");
+                            allSettled = false;
+                            continue;
+                        }
+                        host.Die();
+                        var fs = HighLogic.CurrentGame.flightState;
+                        if (fs != null && fs.protoVessels != null)
+                        {
+                            Guid gid = host.id;
+                            fs.protoVessels.RemoveAll(pv => pv != null && pv.vesselID == gid);
+                        }
+                    }
+                    else if (host != null)
+                    {
+                        RemoveCrewFromVessel(host, name);
+                    }
+
+                    pcm.rosterStatus = ProtoCrewMember.RosterStatus.Dead;
+                    if (!roster.Remove(pcm))
+                        Debug.LogWarning($"[GeneKerman] RemoveContractCrew: {name} was not in the roster to drop.");
+                    Debug.Log($"[GeneKerman] RemoveContractCrew: {name} left with the contract" +
+                              (host != null ? $" (was {(isEvaVessel ? "on EVA" : "aboard '" + host.vesselName + "'")})." : "."));
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] RemoveContractCrew: could not settle {name}: {ex.Message}");
+                    allSettled = false;
+                }
+            }
+            return allSettled;
+        }
+
+        /// <summary>Is this kerbal aboard the vessel, loaded or proto?</summary>
+        private static bool VesselHoldsCrew(Vessel v, string name)
+        {
+            if (v.loaded)
+            {
+                if (v.parts == null) return false;
+                foreach (var p in v.parts)
+                    if (p?.protoModuleCrew != null &&
+                        p.protoModuleCrew.Exists(c => c != null && c.name == name))
+                        return true;
+                return false;
+            }
+            var snaps = v.protoVessel?.protoPartSnapshots;
+            if (snaps == null) return false;
+            foreach (var pps in snaps)
+                if (pps?.protoModuleCrew != null &&
+                    pps.protoModuleCrew.Exists(c => c != null && c.name == name))
+                    return true;
+            return false;
+        }
+
+        /// <summary>Lift a kerbal out of a vessel in place — the loaded and proto
+        /// shapes both, mirroring the emergency freeze's removal.</summary>
+        private static void RemoveCrewFromVessel(Vessel v, string name)
+        {
+            if (v.loaded)
+            {
+                foreach (var p in v.parts)
+                {
+                    if (p?.protoModuleCrew == null) continue;
+                    var pcm = p.protoModuleCrew.Find(c => c != null && c.name == name);
+                    if (pcm == null) continue;
+                    p.RemoveCrewmember(pcm);
+                    Vessel.CrewWasModified(v);
+                    GameEvents.onVesselWasModified.Fire(v);
+                    return;
+                }
+                return;
+            }
+            var snaps = v.protoVessel?.protoPartSnapshots;
+            if (snaps == null) return;
+            foreach (var pps in snaps)
+            {
+                if (pps?.protoModuleCrew == null) continue;
+                var pcm = pps.protoModuleCrew.Find(c => c != null && c.name == name);
+                if (pcm == null) continue;
+                pps.protoModuleCrew.Remove(pcm);
+                pps.protoCrewNames?.Remove(name);
+                try { v.protoVessel.RemoveCrew(pcm); } catch { /* best-effort */ }
+                return;
+            }
+        }
+
+        private static ProtoCrewMember FindRosterMember(KerbalRoster roster, string name)
+        {
+            var statuses = new[]
+            {
+                ProtoCrewMember.RosterStatus.Assigned,
+                ProtoCrewMember.RosterStatus.Available,
+                ProtoCrewMember.RosterStatus.Dead,
+                ProtoCrewMember.RosterStatus.Missing,
+            };
+            foreach (var pcm in roster.Kerbals(statuses))
+                if (pcm != null && pcm.name == name) return pcm;
+            return null;
         }
 
         /// <summary>Does this kerbal stay in the roster when their ship is given up?</summary>

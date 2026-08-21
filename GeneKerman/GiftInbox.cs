@@ -6,8 +6,9 @@
  * holds it as an OFFER (status "offered", invisible to the auto-import poll) and
  * this class is the client's view of those offers: the poll, the accept (which
  * moves the entry into the normal import queue and, where the scene allows,
- * delivers it on the spot) and the decline (which deletes it server-side and
- * notifies the sender).
+ * delivers it on the spot) and the decline (which notifies the sender — and,
+ * for a live vessel, returns it to their save, since it left theirs at send
+ * time; a declined blueprint is simply deleted).
  *
  * The state is static and UI-free for the same reason ToolActions is: the sidebar
  * renders it, but the decision logic must not live in a panel. Panels notice
@@ -106,7 +107,8 @@ namespace GeneKerman
             if (HighLogic.CurrentGame == null) return false;
             var scene = HighLogic.LoadedScene;
 
-            if (source == "rescue_delivery" || source == "gift_vessel")
+            if (source == "rescue_delivery" || source == "gift_vessel" ||
+                source == "submission_restore")
                 return scene == GameScenes.FLIGHT ||
                        scene == GameScenes.SPACECENTER ||
                        scene == GameScenes.TRACKSTATION;
@@ -165,13 +167,16 @@ namespace GeneKerman
             }
         }
 
-        /// <summary>Decline an offer. The server deletes it and tells the sender.</summary>
+        /// <summary>Decline an offer. The server tells the sender; a declined live
+        /// vessel is returned to the sender's save (it left theirs at send time),
+        /// while a declined blueprint is simply deleted.</summary>
         public static IEnumerator Reject(Dictionary<string, object> offer, Action<bool, string> onDone)
         {
             var mod = GeneKermanMod.Instance;
             if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
 
             string id = MiniJSON.GetString(offer, "import_id", "");
+            bool vessel = MiniJSON.GetString(offer, "source", "") == "gift_vessel";
 
             bool ok = false;
             string msg = null;
@@ -187,7 +192,9 @@ namespace GeneKerman
 
             if (ok) RemoveLocal(id);
             else Refresh();
-            onDone(ok, ok ? "Declined — the sender has been told." : (msg ?? "Could not decline the offer."));
+            onDone(ok, ok ? (vessel ? "Declined — it's on its way back to the sender."
+                                    : "Declined — the sender has been told.")
+                          : (msg ?? "Could not decline the offer."));
         }
 
         private static void RemoveLocal(string importId)

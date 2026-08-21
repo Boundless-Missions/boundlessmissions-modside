@@ -126,6 +126,12 @@ namespace GeneKerman
         /// Sends the active vessel ("vessel") or the loaded editor craft ("craft") to
         /// another player. The payload is read from the game here — the browser has no
         /// access to craft files, which is the whole reason this is a /gk route.
+        ///
+        /// A "vessel" send is a hand-over, not a copy: once the server confirms, the
+        /// vessel and its crew are queued out of this save exactly like the issuer
+        /// side of a rescue (the active vessel can't die under the player, so the
+        /// removal lands when they leave it). The server keeps the snapshot — a
+        /// decline re-queues it to us as a normal import, so the ship comes home.
         /// </summary>
         public static IEnumerator Quicksend(string recipientId, string recipientName, string kind,
                                             string editorCraftPath, string editorCraftName,
@@ -136,6 +142,8 @@ namespace GeneKerman
 
             byte[] payload;
             string fileName, craftName;
+            string vesselPid = null;
+            List<string> vesselCrew = null;
 
             if (kind == "vessel")
             {
@@ -144,7 +152,19 @@ namespace GeneKerman
 
                 payload = Encoding.UTF8.GetBytes(node);
                 fileName = "vessel.cfg";
-                craftName = FlightGlobals.ActiveVessel != null ? FlightGlobals.ActiveVessel.vesselName : "Vessel";
+                var v = FlightGlobals.ActiveVessel;
+                craftName = v != null ? v.vesselName : "Vessel";
+                // Captured at the same instant as the snapshot: the pid addresses the
+                // removal below (and the server's echo of the decision), and the crew
+                // names make it exploit-proof — a kerbal who EVAs off between now and
+                // the removal still leaves by name, like a rescue's stranded crew.
+                if (v != null)
+                {
+                    vesselPid = v.id.ToString();
+                    vesselCrew = new List<string>();
+                    foreach (var pcm in v.GetVesselCrew())
+                        if (pcm != null) vesselCrew.Add(pcm.name);
+                }
             }
             else
             {
@@ -184,20 +204,37 @@ namespace GeneKerman
 
             string message = null;
             bool ok = false;
+            bool returnable = false;
             yield return mod.Api.SendCraftToFriend(recipientId, kind, craftName, payload, fileName,
-                blueprintBytes,
+                blueprintBytes, vesselPid,
                 (success, resp, _) =>
                 {
                     if (success && !string.IsNullOrEmpty(resp))
                     {
                         var d = MiniJSON.DeserializeDict(resp);
                         ok = MiniJSON.GetBool(d, "success", false);
+                        // The server's promise that a decline gives the vessel back.
+                        // An older server never makes it, and without it the send
+                        // stays a copy — removing the ship on our own say-so would
+                        // mean a decline deletes it with nothing to return.
+                        returnable = MiniJSON.GetBool(d, "vessel_returnable", false);
                         message = ok
-                            ? $"Sent to {recipientName}. They'll be asked in-game to accept it."
+                            ? (kind == "vessel" && returnable
+                                ? $"Sent to {recipientName} — {craftName} and its crew leave " +
+                                  "your save. It comes back if they decline."
+                                : $"Sent to {recipientName}. They'll be asked in-game to accept it.")
                             : MiniJSON.GetString(d, "message", "Failed to send.");
                     }
                     else message = "Failed to send.";
                 });
+
+            // Only once the server holds the snapshot — losing the vessel on a failed
+            // send would destroy the ship and deliver nothing. Same rule and same
+            // machinery as issuing a rescue: the queue defers while the player is
+            // still flying it, and QueueRescueVesselRemoval says so out loud.
+            if (ok && kind == "vessel" && returnable && !string.IsNullOrEmpty(vesselPid))
+                mod.QueueRescueVesselRemoval(vesselPid, craftName,
+                    VesselTransfer.CrewFate.LeavesWithCraft, vesselCrew);
 
             onDone(ok, message ?? "Failed to send.");
         }

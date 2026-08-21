@@ -263,13 +263,18 @@ namespace GeneKerman
             LsFreeze.Thaw(names);
             string rations = LsRations.Provision(wreck, rec.Crew.Count);
 
-            ResyncCrewSkills(seated);
+            StockReseatCycle(wreck, names, seated);
             SpawnMissingIvas(wreck, seated);
             NotifyCrewChanged(wreck);
             PersistIfPossible(wreck);
             GKContractScenario.Instance?.RemoveImmunity(rec.ContractId);
             Debug.Log($"[GeneKerman] RescueFreeze: thawed {revived}/{rec.Crew.Count} kerbal(s) " +
                       $"for contract {rec.ContractId}.");
+
+            // The SAS-after-thaw bug has outlived two fixes; until a dump from a real
+            // repro names the broken link, every thaw records its own control chain
+            // (now, in 5 s, and when the player switches to the wreck).
+            ControlDiag.Arm(wreck, "post-thaw");
 
             if (revived > 0 && !manual) Announce(revived, rations);
         }
@@ -593,35 +598,72 @@ namespace GeneKerman
         }
 
         /// <summary>
-        /// Re-derive the experience-trait registrations of every part we just seated
-        /// crew into, on a loaded wreck.
+        /// Run each thawed kerbal through a full stock crew-transfer cycle, in place:
+        /// <c>RemoveCrewmember</c> → seat back in the same chair → fire
+        /// <c>GameEvents.onCrewTransferred</c>. The non-visual equivalent of the folk
+        /// remedy for a crewed pod with no SAS — EVA out and board again, or transfer
+        /// to another part and back — which works because it makes KSP's own machinery
+        /// re-derive every crew-dependent cache from scratch.
         ///
-        /// SAS hangs off these registrations: a pilot's <c>AutopilotSkill</c> effect is a
-        /// delegate registered on the part (<c>PartValues.AutopilotSkill</c>), and both
-        /// the SAS gate (<c>APSkillExtensions.AvailableAtLevel</c>) and ModuleCommand's
-        /// pilot count read only what is registered — a seated kerbal whose traits never
-        /// registered, or were unregistered behind our back, is a crewed pod flying with
-        /// no SAS, and nothing in KSP re-checks it until the vessel is reloaded.
-        /// <c>Part.AddCrewmember(At)</c> does register, so this is a backstop, not the
-        /// mechanism — but the pair below is KSP's own (ProtoPartSnapshot.CreatePart runs
-        /// RegisterCrew on every load) and re-deriving from <c>protoModuleCrew</c> is
-        /// idempotent, so running it costs nothing when everything already held.
+        /// Three things happen that plain seating doesn't guarantee: the experience
+        /// traits are unregistered and re-registered on the part (SAS hangs off those
+        /// delegates — <c>PartValues.AutopilotSkill</c> is what the SAS gate and
+        /// ModuleCommand's pilot count read); every listener of
+        /// <c>onCrewTransferred</c> — stock caches and mods alike — is told this crew
+        /// member moved, which is the one event a hand-seated thaw never fired; and it
+        /// all runs through the exact code path a normal in-flight transfer uses, so
+        /// anything a Harmony patch hooks onto that path runs too. Idempotent and
+        /// per-kerbal guarded: a cycle that fails puts the kerbal back and moves on.
         /// </summary>
-        private static void ResyncCrewSkills(List<Part> parts)
+        private static void StockReseatCycle(Vessel wreck, List<string> ourNames, List<Part> parts)
         {
-            if (parts == null) return;
+            if (wreck == null || !wreck.loaded || parts == null || parts.Count == 0) return;
+            var ours = new HashSet<string>(ourNames ?? new List<string>());
+
             foreach (Part p in parts)
             {
-                if (p == null) continue;
-                try
+                if (p == null || p.protoModuleCrew == null) continue;
+                // Snapshot: the cycle mutates protoModuleCrew while we walk it.
+                foreach (var pcm in p.protoModuleCrew.ToList())
                 {
-                    p.UnregisterCrew();
-                    p.RegisterCrew();
-                }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[GeneKerman] RescueStasis: skill resync failed for " +
-                                     $"'{PartLabel(p)}': {ex.Message}");
+                    if (pcm == null || !ours.Contains(pcm.name)) continue;
+                    try
+                    {
+                        int seat = pcm.seatIdx;
+                        p.RemoveCrewmember(pcm);
+                        pcm.rosterStatus = ProtoCrewMember.RosterStatus.Assigned;
+                        ClearSeatRefs(pcm);
+                        if (!SeatAtOrAnywhere(p, pcm, seat))
+                        {
+                            Debug.LogWarning($"[GeneKerman] RescueStasis: reseat cycle could not " +
+                                             $"re-add {pcm.name} to '{PartLabel(p)}' — skipping the event.");
+                            continue;
+                        }
+                        // The cycle dropped the Kerbal avatar with the old seat refs;
+                        // respawn it or the portrait fix regresses on an active wreck.
+                        if (pcm.seat != null && pcm.KerbalRef == null)
+                        {
+                            try { pcm.seat.SpawnCrew(); }
+                            catch (System.Exception ex)
+                            {
+                                Debug.LogWarning($"[GeneKerman] RescueStasis: portrait respawn " +
+                                                 $"failed for {pcm.name}: {ex.Message}");
+                            }
+                        }
+
+                        // Same-part transfer: from == to is unusual but every listener
+                        // only refreshes its caches for the named part(s), which is
+                        // exactly the point.
+                        GameEvents.onCrewTransferred.Fire(
+                            new GameEvents.HostedFromToAction<ProtoCrewMember, Part>(pcm, p, p));
+                        Debug.Log($"[GeneKerman] RescueStasis: reseat cycle ran for {pcm.name} " +
+                                  $"in '{PartLabel(p)}' (seat {pcm.seatIdx}).");
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning($"[GeneKerman] RescueStasis: reseat cycle failed for " +
+                                         $"{pcm.name}: {ex.Message}");
+                    }
                 }
             }
         }

@@ -119,6 +119,13 @@ namespace GeneKerman.UI.Gui
             {
                 UIF.Label(card, craft.ActiveVessel + ", sent as a live vessel, crew included.",
                           Theme.FontXs).Body();
+                // A live vessel send is a hand-over, and the player must read that
+                // BEFORE pressing Send — the same reason the rescue form carries an
+                // explicit permanence line.
+                UIF.Muted(card, "This hands the vessel over: it and its crew leave your " +
+                                "save once sent (the ship you're flying goes when you " +
+                                "leave it). If your friend declines, it comes back.",
+                          Theme.FontXs);
             }
             else if (kind == "craft")
             {

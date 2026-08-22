@@ -815,15 +815,66 @@ namespace GeneKerman
 
         // ── Layer Isolation ─────────────────────────────────────────────────
 
-        /// <summary>How far a renderer's bounds may sit from the craft's own centroid,
-        /// and how big it may claim to be, before it is treated as a framing hazard
-        /// rather than craft geometry. One rogue renderer — an uninitialized prop, a
-        /// mod object parked at a world offset, a skinned mesh with garbage bounds —
-        /// poisons the AABB the camera is framed from: the camera parks kilometres
-        /// out, the craft goes sub-pixel, and every view reads back pure background.
-        /// The largest real crafts are tens of metres; these caps are 10× that.</summary>
+        /// <summary>Fallback caps: how far a renderer's bounds may sit from the craft's
+        /// own centroid, and how big it may claim to be, before it is treated as a
+        /// framing hazard rather than craft geometry. Only consulted when the craft
+        /// yields no usable collider reference (see CollectRenderers) — they catch
+        /// kilometre-scale garbage, not modest inflation. The largest real crafts are
+        /// tens of metres; these caps are 10× that.</summary>
         private const float MaxRendererOffset = 250f;
         private const float MaxRendererSize = 500f;
+
+        /// <summary>Slack a renderer's bounds may protrude beyond the collider
+        /// reference before it is excluded from framing. Big enough for the visual-only
+        /// geometry that legitimately overhangs the colliders — greebles, engine
+        /// skirts, skinned-mesh slop — which stays within a couple of metres of the
+        /// hull; far below the craft-scale protrusion of the invisible FX meshes this
+        /// exists to reject (Firefly's reentry envelopes doubled an 8 m craft's AABB
+        /// and centred it 6 m low). Known tradeoff: a deployed parachute canopy has
+        /// no collider, so a mid-descent capture frames the hull and lets the canopy
+        /// crop — it still renders, and a cropped chute beats every view half-empty.</summary>
+        private static float FramingMargin(Bounds reference) =>
+            Mathf.Max(2f, reference.size.magnitude * 0.1f);
+
+        /// <summary>Union of the parts' enabled, non-trigger collider bounds. Unlike
+        /// renderer bounds these cannot lie — physics itself would break — and the
+        /// rogue renderers the framing filter exists for (invisible FX envelopes,
+        /// plume meshes, uninitialized props) carry no collider, so they cannot vote
+        /// themselves into the reference.</summary>
+        private static bool ColliderReference(List<Part> parts, out Bounds reference)
+        {
+            bool have = false;
+            Bounds b = default(Bounds);
+            foreach (var p in parts)
+            {
+                if (p == null) continue;
+                foreach (var c in p.GetComponentsInChildren<Collider>(false))
+                {
+                    if (!c.enabled || c.isTrigger) continue;
+                    Bounds cb = c.bounds;
+                    if (!Finite(cb.center) || !Finite(cb.size)) continue;
+                    if (have) b.Encapsulate(cb);
+                    else { b = cb; have = true; }
+                }
+            }
+            reference = b;
+            return have;
+        }
+
+        private static bool IsRogue(Bounds rb, bool haveRef, Bounds reference,
+                                    float margin, Vector3 centroid)
+        {
+            if (!Finite(rb.center) || !Finite(rb.size)) return true;
+            if (haveRef)
+                return rb.min.x < reference.min.x - margin
+                    || rb.min.y < reference.min.y - margin
+                    || rb.min.z < reference.min.z - margin
+                    || rb.max.x > reference.max.x + margin
+                    || rb.max.y > reference.max.y + margin
+                    || rb.max.z > reference.max.z + margin;
+            return (rb.center - centroid).magnitude > MaxRendererOffset
+                || rb.size.magnitude > MaxRendererSize;
+        }
 
         private static Renderer[] CollectRenderers(List<Part> parts)
         {
@@ -833,22 +884,33 @@ namespace GeneKerman
                 if (p != null) { centroid += p.transform.position; n++; }
             if (n > 0) centroid /= n;
 
+            bool haveRef = ColliderReference(parts, out Bounds reference);
+            float margin = haveRef ? FramingMargin(reference) : 0f;
+
+            var candidates = new List<Renderer>();
+            foreach (var r in parts.SelectMany(p => p.GetComponentsInChildren<Renderer>(false)))
+                if (r.enabled && r.gameObject.activeInHierarchy
+                    && (r is MeshRenderer || r is SkinnedMeshRenderer)
+                    && r.bounds.size.sqrMagnitude > 0.0001f)
+                    candidates.Add(r);
+
             var kept = new List<Renderer>();
             var dropped = new List<Renderer>();
-            foreach (var r in parts.SelectMany(p => p.GetComponentsInChildren<Renderer>(false)))
-            {
-                if (!(r.enabled && r.gameObject.activeInHierarchy
-                      && (r is MeshRenderer || r is SkinnedMeshRenderer)
-                      && r.bounds.size.sqrMagnitude > 0.0001f))
-                    continue;
+            foreach (var r in candidates)
+                (IsRogue(r.bounds, haveRef, reference, margin, centroid) ? dropped : kept).Add(r);
 
-                Bounds rb = r.bounds;
-                if (!Finite(rb.center) || !Finite(rb.size)
-                    || (rb.center - centroid).magnitude > MaxRendererOffset
-                    || rb.size.magnitude > MaxRendererSize)
-                    dropped.Add(r);
-                else
-                    kept.Add(r);
+            // A reference that rejects every renderer is itself the broken input —
+            // colliders disabled mid-scene, or parked metres from the meshes. Framing
+            // from nothing degrades the capture to a plain screenshot, so re-run on
+            // the fixed caps rather than return an empty set.
+            if (haveRef && kept.Count == 0 && candidates.Count > 0)
+            {
+                Debug.LogWarning("[GeneKerman] Blueprint: collider reference rejected " +
+                                 "every renderer — falling back to fixed caps.");
+                haveRef = false;
+                dropped.Clear();
+                foreach (var r in candidates)
+                    (IsRogue(r.bounds, false, reference, 0f, centroid) ? dropped : kept).Add(r);
             }
 
             if (dropped.Count > 0)
@@ -859,8 +921,11 @@ namespace GeneKerman
                     var r = dropped[i];
                     names.Add($"'{r.gameObject.name}' (centre {r.bounds.center}, size {r.bounds.size})");
                 }
-                Debug.LogWarning($"[GeneKerman] Blueprint: dropped {dropped.Count} renderer(s) with " +
-                                 $"out-of-craft bounds — they would poison the camera framing: " +
+                string refDesc = haveRef
+                    ? $"collider reference centre {reference.center}, size {reference.size}, margin {margin:F1} m"
+                    : "no collider reference — fixed caps";
+                Debug.LogWarning($"[GeneKerman] Blueprint: dropped {dropped.Count} renderer(s) whose " +
+                                 $"bounds would poison the camera framing ({refDesc}): " +
                                  string.Join("; ", names.ToArray()) +
                                  (dropped.Count > 3 ? "; …" : "") + ".");
             }

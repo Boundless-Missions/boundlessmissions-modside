@@ -1842,10 +1842,21 @@ namespace GeneKerman
         ///
         /// Returns true once the vessel is either queued or already gone — i.e. the
         /// caller may forget about it. False means nothing was recorded and the caller
-        /// must keep whatever state would let it try again.</summary>
+        /// must keep whatever state would let it try again.
+        ///
+        /// <paramref name="returnToSpaceCenter"/>: when the removal has to defer
+        /// because the player is flying the very vessel they just gave away, leave
+        /// flight for the Space Center so it runs now instead of whenever they next
+        /// wander there — every minute the ship lingers is a window where a cancel or
+        /// decline can cross the un-run removal and duplicate it. Only the two
+        /// explicit send actions pass true (issuing a rescue, quicksending the active
+        /// vessel): the player just chose to part with the ship, so taking them home
+        /// is finishing what they asked. The backstop callers (approval
+        /// notifications, rollback re-queues) must never — yanking someone out of an
+        /// unrelated flight because a friend pressed Accept is hostile.</summary>
         public bool QueueRescueVesselRemoval(string pid, string vesselName = null,
             VesselTransfer.CrewFate crewFate = VesselTransfer.CrewFate.LeavesWithCraft,
-            IEnumerable<string> crewNames = null)
+            IEnumerable<string> crewNames = null, bool returnToSpaceCenter = false)
         {
             if (string.IsNullOrEmpty(pid)) return false;
             var pending = GKContractScenario.Instance?.PendingRescueRemovals;
@@ -1882,13 +1893,57 @@ namespace GeneKerman
 
             // Still queued → we couldn't delete it yet (it's the craft the player is
             // flying, or something aboard is still being untangled). Warn them so it
-            // doesn't silently vanish later.
+            // doesn't silently vanish later — unless we're about to take them to the
+            // Space Center, where "scheduled for later" would be false the moment
+            // they read it.
             if (pending.ContainsKey(pid))
-                RaiseLocalNotification("Craft scheduled for removal",
-                    $"\"{pending[pid].Name}\" will be deleted when you leave it — at the " +
-                    "latest, on your next visit to the Space Center.");
+            {
+                if (returnToSpaceCenter && CanAutoReturnToSpaceCenter(pid))
+                {
+                    RaiseLocalNotification("Craft handed over",
+                        $"\"{pending[pid].Name}\" now belongs to its recipient — returning " +
+                        "to the Space Center to complete the hand-over.");
+                    StartCoroutine(ReturnToSpaceCenterRoutine(pid));
+                }
+                else
+                    RaiseLocalNotification("Craft scheduled for removal",
+                        $"\"{pending[pid].Name}\" will be deleted when you leave it — at the " +
+                        "latest, on your next visit to the Space Center.");
+            }
 
             return true;
+        }
+
+        /// <summary>Whether leaving flight for the Space Center right now would be the
+        /// same exit the pause menu offers: we're in flight, the deferred vessel is the
+        /// one being flown (leaving flight for any *other* pending removal is
+        /// ProcessPendingRescueRemovals' job, not a scene change's), and KSP itself
+        /// says the state is serializable. Not clear-to-save (moving over terrain,
+        /// mid-atmosphere) falls back to the classic deferral — forcing a save stock
+        /// would refuse trades a lingering hull for a corrupted one.</summary>
+        private static bool CanAutoReturnToSpaceCenter(string pid)
+        {
+            if (!HighLogic.LoadedSceneIsFlight) return false;
+            var v = FlightGlobals.ActiveVessel;
+            if (v == null || v.id.ToString() != pid) return false;
+            try { return FlightGlobals.ClearToSave() == ClearToSaveStatus.CLEAR; }
+            catch (Exception) { return false; }
+        }
+
+        /// <summary>Save and leave for the Space Center, exactly as the pause menu's
+        /// "Space Center" button does — the arrival Update then runs the pending
+        /// removal in a scene where it's terminal. The pause lets the "handed over"
+        /// toast register before the scene goes; every condition is re-checked after
+        /// it because the player keeps control in the meantime (they may have left
+        /// flight themselves, or put the vessel somewhere no longer clear to save —
+        /// then the classic "next Space Center visit" promise still holds, so just
+        /// fall back to it).</summary>
+        private IEnumerator ReturnToSpaceCenterRoutine(string pid)
+        {
+            yield return new WaitForSeconds(1.5f);
+            if (!HasQueuedRemoval(pid) || !CanAutoReturnToSpaceCenter(pid)) yield break;
+            GamePersistence.SaveGame("persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE);
+            HighLogic.LoadScene(GameScenes.SPACECENTER);
         }
 
         /// <summary>Record the craft a rescuer submitted, so it can be removed once

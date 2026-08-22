@@ -29,12 +29,55 @@
 
   <!-- KSP Installation Path -->
   <PropertyGroup>
-    <!-- Reference instance: FK-KSP is the modded dev install, so ToolbarControl /
-         ClickThroughBlocker resolve from its GameData. Override on the command line
-         with -p:KSPPath="..." to compile against another install. -->
-    <KSPPath>/home/ayd/Documents/KSP DEV Instances/FK-KSP</KSPPath>
-    <ManagedPath>$(KSPPath)/KSP_Data/Managed</ManagedPath>
+    <!-- Where the dev instances live. Override with -p:KSPInstances="..." to build
+         against installs kept somewhere else. -->
+    <KSPInstances Condition="'$(KSPInstances)' == ''">/home/ayd/Documents/KSP DEV Instances</KSPInstances>
+
+    <!-- Reference instance: KR-KSP is the primary dev install and carries the
+         ToolbarControl / ClickThroughBlocker the optional references below resolve
+         from. Override on the command line with -p:KSPPath="..." to compile against
+         another install.
+
+         FK-KSP was the reference until it was deleted (2026-08-22). A HintPath that
+         misses fails silently, taking UnityEngine and every KSP type with it, so a
+         stale KSPPath surfaced as ~770 "type or namespace not found" errors across
+         every file and named the cause in none of them. Hence the probe, the
+         fallback and the explicit Error below. -->
+    <KSPPath Condition="'$(KSPPath)' == ''">$(KSPInstances)/KR-KSP</KSPPath>
   </PropertyGroup>
+
+  <!-- Managed assemblies. KSP ships them under KSP_x64_Data/Managed on some installs
+       (KR-KSP, KR2-KSP) and KSP_Data/Managed on others (RSS-RO), so probe rather than
+       assume: hardcoding either layout breaks the moment the reference instance moves. -->
+  <PropertyGroup>
+    <ManagedPath Condition="'$(ManagedPath)' == '' And Exists('$(KSPPath)/KSP_x64_Data/Managed/Assembly-CSharp.dll')">$(KSPPath)/KSP_x64_Data/Managed</ManagedPath>
+    <ManagedPath Condition="'$(ManagedPath)' == '' And Exists('$(KSPPath)/KSP_Data/Managed/Assembly-CSharp.dll')">$(KSPPath)/KSP_Data/Managed</ManagedPath>
+    <!-- The instance actually being compiled against. KSPPath cannot stand in for
+         this: passed as -p:KSPPath it is a global property, which a PropertyGroup is
+         not allowed to reassign, so after a fallback it still names the missing
+         install — and the optional GameData references below would resolve against
+         a path with no GameData in it. -->
+    <GKKSPRoot Condition="'$(ManagedPath)' != ''">$(KSPPath)</GKKSPRoot>
+  </PropertyGroup>
+
+  <!-- Chosen instance has no assemblies (deleted, moved, mid-reinstall): take the
+       first sibling that does, and warn. A build that quietly retargets is worse than
+       one that says so, so GKCheckKSPReference reports both this and the total miss. -->
+  <PropertyGroup Condition="'$(ManagedPath)' == ''">
+    <_GKFallback Condition="'$(_GKFallback)' == '' And Exists('$(KSPInstances)/KR-KSP/KSP_x64_Data/Managed/Assembly-CSharp.dll')">$(KSPInstances)/KR-KSP</_GKFallback>
+    <_GKFallback Condition="'$(_GKFallback)' == '' And Exists('$(KSPInstances)/KR2-KSP/KSP_x64_Data/Managed/Assembly-CSharp.dll')">$(KSPInstances)/KR2-KSP</_GKFallback>
+    <_GKFallback Condition="'$(_GKFallback)' == '' And Exists('$(KSPInstances)/RSS-RO/KSP_Data/Managed/Assembly-CSharp.dll')">$(KSPInstances)/RSS-RO</_GKFallback>
+    <GKKSPRoot Condition="'$(_GKFallback)' != ''">$(_GKFallback)</GKKSPRoot>
+    <ManagedPath Condition="'$(ManagedPath)' == '' And '$(_GKFallback)' != '' And Exists('$(_GKFallback)/KSP_x64_Data/Managed/Assembly-CSharp.dll')">$(_GKFallback)/KSP_x64_Data/Managed</ManagedPath>
+    <ManagedPath Condition="'$(ManagedPath)' == '' And '$(_GKFallback)' != '' And Exists('$(_GKFallback)/KSP_Data/Managed/Assembly-CSharp.dll')">$(_GKFallback)/KSP_Data/Managed</ManagedPath>
+  </PropertyGroup>
+
+  <Target Name="GKCheckKSPReference" BeforeTargets="BeforeBuild">
+    <Warning Condition="'$(_GKFallback)' != ''"
+             Text="KSP reference instance '$(KSPPath)' missing — compiling against $(GKKSPRoot) instead. Update KSPPath in GeneKerman.csproj." />
+    <Error Condition="'$(ManagedPath)' == ''"
+           Text="No KSP install with Managed assemblies found under '$(KSPInstances)'. Pass -p:KSPPath=/path/to/KSP (expects KSP_Data/Managed or KSP_x64_Data/Managed under it)." />
+  </Target>
 
   <!-- Source files -->
   <ItemGroup>
@@ -104,17 +147,17 @@
   </ItemGroup>
 
   <!-- ToolbarControl (optional, for mod toolbar integration) -->
-  <ItemGroup Condition="Exists('$(KSPPath)/GameData/001_ToolbarControl/Plugins/ToolbarControl.dll')">
+  <ItemGroup Condition="Exists('$(GKKSPRoot)/GameData/001_ToolbarControl/Plugins/ToolbarControl.dll')">
     <Reference Include="ToolbarControl">
-      <HintPath>$(KSPPath)/GameData/001_ToolbarControl/Plugins/ToolbarControl.dll</HintPath>
+      <HintPath>$(GKKSPRoot)/GameData/001_ToolbarControl/Plugins/ToolbarControl.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>
 
   <!-- ClickThroughBlocker (prevents UI clicks from passing through to game) -->
-  <ItemGroup Condition="Exists('$(KSPPath)/GameData/000_ClickThroughBlocker/Plugins/ClickThroughBlocker.dll')">
+  <ItemGroup Condition="Exists('$(GKKSPRoot)/GameData/000_ClickThroughBlocker/Plugins/ClickThroughBlocker.dll')">
     <Reference Include="ClickThroughBlocker">
-      <HintPath>$(KSPPath)/GameData/000_ClickThroughBlocker/Plugins/ClickThroughBlocker.dll</HintPath>
+      <HintPath>$(GKKSPRoot)/GameData/000_ClickThroughBlocker/Plugins/ClickThroughBlocker.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

@@ -73,7 +73,7 @@ namespace GeneKerman
             string.IsNullOrEmpty(modKey) ? null
             : All.FirstOrDefault(a => a.ModKey == modKey);
 
-        /// <summary>Log what was detected, once, at startup (mirrors KVVIntegration's style).</summary>
+        /// <summary>Log what was detected, once, at startup.</summary>
         public static void LogDetected()
         {
             EnsureScanned();

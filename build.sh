@@ -28,13 +28,17 @@ if [ "$RELEASE" = "1" ] && [ "$CHANNEL" != "production" ]; then
     echo "   would be bundled. Run without --release, or set CHANNEL=production."
     exit 1
 fi
-# Deploy to every KSP install here. FK-KSP is the heavily-modded dev instance (TweakScale /
-# mod-compatibility testing — its KSP.log is the "heavymod log"); KR-KSP carries its own
-# mod spread (SSPX, TAC-LS, Kerbalism, Deferred + TexturesUnlimited, …) and is the
-# rendering-stack compatibility testbed; RSS-RO runs the Realism Overhaul / Real Solar
-# System suite (RealFuels, FAR, Kopernicus+RSS…).
+# Deploy to every KSP install here. KR-KSP carries its own mod spread (SSPX, TAC-LS,
+# Kerbalism, Deferred + TexturesUnlimited, …), is the rendering-stack compatibility
+# testbed, and is what the csproj compiles against; KR2-KSP duplicates it so two games
+# can run side by side for multiplayer tests; RSS-RO runs the Realism Overhaul / Real
+# Solar System suite (RealFuels, FAR, Kopernicus+RSS…).
+#
+# FK-KSP — the heavily-modded "heavymod" instance (TweakScale / mod-compatibility
+# testing) — was deleted on 2026-08-22 and removed from this list. Note the deploy loop
+# below only tests `-d "$KSP_PATH"`, so a leftover empty directory would still be
+# deployed into rather than skipped.
 KSP_PATHS=(
-    "/home/ayd/Documents/KSP DEV Instances/FK-KSP"
     "/home/ayd/Documents/KSP DEV Instances/KR-KSP"
     "/home/ayd/Documents/KSP DEV Instances/KR2-KSP"
     "/home/ayd/Documents/KSP DEV Instances/RSS-RO"

@@ -234,7 +234,6 @@ relative weight, not as a contract.
 | `DecalCapture.cs` | 277 | **ConformalDecals.** Re-issues the decal draw on the isolation layer so decals appear in blueprints; renders never-drawn text decals |
 | `CinematicCapture.cs` | 283 | **Hero shots.** Sunlit camera pose computation, HUD toggle, ScaledSpace sync |
 | `CheckpointDetector.cs` | 347 | **Milestone detection.** Rendezvous, flyby, asteroid, EVA, staging, orbit, landing, splashdown |
-| `KVVIntegration.cs` | 61 | **KVV detection.** Informational only; the built-in renderer is always used |
 
 ### Life support, rescue & repair
 
@@ -1443,7 +1442,6 @@ requirement is ModuleManager, which applies the `GeneKermanScale` patch.
 | **Physics Range Extender** | Temporarily disabled during a submission, and restored only if *we* disabled it | `PhysicsRangeManager` |
 | **Click Through Blocker** | IMGUI windows drawn through CTB's `GUILayoutWindow` so clicks don't reach the game behind them | `ClickThroughHelper` |
 | **CKAN** | `registry.json` read (indexed by **install path**, not folder) to map parts → mod identifiers | `CkanGenerator` |
-| **Kronal Vessel Viewer** | Detected only; the built-in renderer is always used | `KVVIntegration` |
 | **Making History / Breaking Ground** | Treated as **dependencies, not stock** — keyed by two-segment path (`SquadExpansion/MakingHistory`), reported when missing but never written into a `.ckan` (CKAN can detect a DLC and never install one) | `CkanGenerator` |
 
 ### Physics Range Extender — `PhysicsRangeManager`
@@ -1710,7 +1708,6 @@ testing a different thing:
 
 | Instance | What it is for |
 |----------|----------------|
-| `FK-KSP` | Heavily modded ("heavymod") — TweakScale and general compatibility. Its `KSP.log` is the "heavymod log", and the csproj compiles against this install |
 | `KR-KSP` | The rendering-stack testbed — SSPX, TAC-LS, Kerbalism, kOS, TUFX, ReforgedRedux, KerbalEngineer, and **Deferred + TexturesUnlimited**. Deferred here is what `VesselRenderer`'s deferred path exists for |
 | `RSS-RO` | Realism Overhaul / Real Solar System — RealFuels, FAR, Kopernicus+RSS. Tests `RealFuelsTransfer` against RO's part and resource rewrites |
 
@@ -1729,7 +1726,7 @@ Release packaging (the CKAN-shaped zip in `dist/`) is covered in
 
 - **Target**: .NET Framework 4.7.2 (KSP's runtime)
 - **Output**: `bin/GeneKerman.dll` (class library, no entry point)
-- **Assembly paths**: `KSPPath` defaults to the `FK-KSP` dev instance;
+- **Assembly paths**: `KSPPath` defaults to the `KR-KSP` dev instance (`FK-KSP` was the reference until it was deleted on 2026-08-22). `ManagedPath` is probed, not assumed — `KSP_x64_Data/Managed` on KR-KSP/KR2-KSP, `KSP_Data/Managed` on RSS-RO — with a fallback to any sibling instance that has assemblies and one explicit error if none do;
   `ManagedPath` is `$(KSPPath)/KSP_Data/Managed` (**not** `KSP_x64_Data/Managed`
   on these installs). Override with `-p:KSPPath="..."` to compile against
   another install.
@@ -1763,7 +1760,7 @@ what each one actually does:
 Click Through Blocker · ToolbarControl · TweakScale (+ forks) · KSP-Recall ·
 Textures Unlimited · RealFuels / Realism Overhaul · ReStock / ReStock+ ·
 ConformalDecals · Deferred · USI-LS · TAC-LS · Snacks · Kerbalism · DeepFreeze ·
-Physics Range Extender · CKAN · Kronal Vessel Viewer
+Physics Range Extender · CKAN
 
 The stock expansions (Making History, Breaking Ground) are treated as
 dependencies rather than as stock — they are bought separately, and owning one

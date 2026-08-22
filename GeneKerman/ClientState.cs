@@ -931,25 +931,33 @@ namespace GeneKerman
                 }
 
                 // gift_vessel doubles as the decline-return of our own quicksend, and
-                // the pid we reported at send time decides what "delivering" means:
+                // rescue_delivery as the restore of a cancelled rescue's wreck — both
+                // are OUR vessel coming home, and the pid we reported at send time
+                // decides what "delivering" means:
                 //  • the original is still in this save (its removal is deferred while
-                //    we fly it, or a quickload rolled it back) → the return is a no-op.
-                //    Cancel the removal and keep the ship; spawning the snapshot next
-                //    to it would duplicate hull and crew.
+                //    we fly it, or a quickload rolled it back, or the scenario holding
+                //    the queue was lost) → the return is a no-op. Cancel the removal
+                //    and keep the ship; spawning the snapshot next to it would
+                //    duplicate hull and crew.
                 //  • the hull is gone but its removal entry is still settling crew (a
                 //    straggler on EVA) → defer to the next poll; spawning now would
                 //    re-create the very names the entry is hunting.
                 //  • fully gone → spawn from the snapshot like any other delivery.
                 // A friend's normal gift carries THEIR save's pid, which can't match
-                // anything here, so it falls through to the spawn as before.
+                // anything here, so it falls through to the spawn as before. An
+                // approved rescue's delivery (the rescuer's craft) and returns from
+                // an old server carry no pid at all and fall through the same way.
                 string returnPid = MiniJSON.GetString(entry, "vessel_pid", "");
-                if (source == "gift_vessel" && !string.IsNullOrEmpty(returnPid))
+                if ((source == "gift_vessel" || source == "rescue_delivery") &&
+                    !string.IsNullOrEmpty(returnPid))
                 {
                     if (VesselTransfer.VesselExists(returnPid))
                     {
                         GeneKermanMod.Instance.CancelQueuedRemoval(returnPid);
                         GeneKermanMod.Instance.ShowNotification("📪 Vessel Returned",
-                            $"{craftName} was declined and hadn't left yet — it stays right where it is.");
+                            source == "rescue_delivery"
+                                ? $"The rescue was cancelled and {craftName} hadn't left yet — it stays right where it is."
+                                : $"{craftName} was declined and hadn't left yet — it stays right where it is.");
                         yield return GeneKermanMod.Instance.Api.Post(
                             $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
                         processingImports.Remove(importId);

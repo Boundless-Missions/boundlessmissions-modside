@@ -80,8 +80,13 @@ ToolbarControl is used anywhere. Assembly references are resolved lazily by the 
 unused reference costs nothing at runtime — but listing it in the netkan would force every
 player to install a mod they do not need.
 
-**`KronalVesselViewer` — suggested.** `KVVIntegration.cs` uses it for nicer vessel
-thumbnails when present.
+**`KronalVesselViewer` — not listed at all.** It used to be a `suggests`, from back when
+the plan was to hand vessel renders off to it. `VesselRenderer` does that job now and does
+it unconditionally, so nothing the add-on does changes when KVV is installed and suggesting
+it only pointed players at a mod that would do nothing for them here. `KVVIntegration.cs`
+outlived that plan as a rename in front of `VesselRenderer` — its one live member forwarded
+to `VesselRenderer.CaptureVessel`, and the KVV detection itself had no callers — and has
+been deleted; `SubmissionSession` calls the renderer directly.
 
 ## Bundled assemblies
 

@@ -9,7 +9,7 @@
  * When CTB is installed we draw our windows through its GUILayoutWindow; when it
  * isn't, we fall back to the stock GUILayout.Window and behave exactly as before.
  * Everything is reached by reflection, so there is no compile-time or hard runtime
- * dependency — CTB stays a soft, optional dependency (same approach as KVV).
+ * dependency — CTB stays a soft, optional dependency.
  */
 
 using System;

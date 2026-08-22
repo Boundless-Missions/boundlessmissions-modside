@@ -34,6 +34,29 @@
  * outright skip of the on-rails element check when a mod that legitimately moves
  * on-rails orbits (Principia, PersistentThrust) is installed.
  *
+ * Grace is an amnesty for DERIVATIVES only, never for state. The stock Set
+ * Orbit / Set Position cheats teleport by way of the very events grace
+ * forgives — GoOnRails, write the new state, unpack — so a grace tick that
+ * re-baselines blindly adopts the cheated state and the watchdog never sees a
+ * delta (which is how the first version shipped, and why it caught nothing).
+ * State continuity is therefore judged on EVERY tick, grace or not.
+ *
+ * The continuity invariant is POSITION VIA THE ORBIT: propagate last tick's
+ * conic to now and compare where the vessel would be against where its orbit
+ * says it is. That one comparison was chosen over per-element checks after
+ * both of the latter's blind spots bit in testing: FlightGlobals.SetShipOrbit
+ * clears vessel.Landed before our next tick, so any branch selected by the
+ * landed flags is choosable by the cheat itself; and "Rendezvous Me" (or any
+ * same-orbit teleport) changes no element at all — only the phase. Position-
+ * at-now catches every flavour, works packed or unpacked (the orbit driver is
+ * fresh even when the physics representation is stale), and is immune to
+ * legitimate velocity discontinuities like touchdown, because both the old
+ * and new conic pass through the point where they exchanged. While landed the
+ * surface lat/lon stands in for it (a parked pseudo-conic does not rotate
+ * with the planet, so propagating it across a warp tick diverges for
+ * legitimate reasons), and thresholds stay loose enough that no single tick
+ * of legitimate physics can cross them.
+ *
  * A detection taints the VESSEL, keyed by persistentId (stable across save/load,
  * and what the docking GameEvents hand us), not the player or the session: the
  * position of that vessel is what the cheat corrupted, and reverting/quickloading
@@ -110,7 +133,7 @@ namespace GeneKerman
             if (!string.IsNullOrEmpty(name)) rec.Name = name;
             if (!rec.Keys.Add(key)) return;
             if (rec.Reasons.Count < MaxReasonsPerVessel) rec.Reasons.Add(reason);
-            Debug.Log($"[GeneKerman] Cheat detection: vessel '{rec.Name}' ({pid}) — {reason}");
+            Debug.Log($"[GeneKerman] Cheat detection: vessel '{rec.Name}' ({pid}): {reason}");
         }
 
         /// <summary>Taint spread: `to` inherits every reason of `from` (prefixed so the
@@ -174,6 +197,32 @@ namespace GeneKerman
             {
                 Debug.LogWarning($"[GeneKerman] CheatDetection.LoadFrom failed: {ex.Message}");
             }
+        }
+
+        // ── Orbit helpers (shared with DebugMenuCheatWarning) ───────────────
+
+        /// <summary>Copy a vessel's conic into a reusable Orbit instance. Returns
+        /// null when the source can't be snapshotted (no orbit / no body).</summary>
+        internal static Orbit SnapshotOrbit(Orbit src, Orbit reuse)
+        {
+            if (src == null || src.referenceBody == null) return null;
+            var o = reuse ?? new Orbit();
+            o.SetOrbit(src.inclination, src.eccentricity, src.semiMajorAxis, src.LAN,
+                       src.argumentOfPeriapsis, src.meanAnomalyAtEpoch, src.epoch, src.referenceBody);
+            return o;
+        }
+
+        /// <summary>Metres between where a snapshotted conic says the vessel would
+        /// be at `ut` and where the current conic says it is. Both orbits must be
+        /// around the same body (callers check). This is the teleport invariant:
+        /// any external write to the trajectory — elements OR phase — moves it,
+        /// while every legitimate hand-over (pack/unpack, touchdown, docking)
+        /// keeps the two conics passing through the same current point.</summary>
+        internal static double OrbitPositionDelta(Orbit snap, Orbit current, double ut)
+        {
+            Vector3d expected = snap.getRelativePositionAtUT(ut);
+            Vector3d actual   = current.getRelativePositionAtUT(ut);
+            return (expected - actual).magnitude;
         }
 
         // ── Installed-tool scan (context, never a verdict) ──────────────────
@@ -248,12 +297,18 @@ namespace GeneKerman
     public class CheatWatchdog : MonoBehaviour
     {
         // ── Tuning ──────────────────────────────────────────────────────────
-        const int    GraceTicks     = 15;     // physics ticks skipped after any legit perturbation
+        const int    GraceTicks     = 15;     // physics ticks of derivative amnesty after any legit perturbation
         const double JumpFloorM     = 2000.0; // m — never flag a jump smaller than this
         const double JumpSpeedMult  = 6.0;    // allowance = max(floor, mult · speed · dt)
         const double RailsSmaRel    = 0.005;  // on-rails element drift beyond these = Set Orbit
         const double RailsEccAbs    = 0.005;
         const double RailsIncDeg    = 0.05;
+
+        // Cross-tick state continuity, judged during grace and across pack/unpack:
+        // the JumpFloorM/JumpSpeedMult allowance applied to the orbit-propagation
+        // position delta. One tick of the hardest legitimate physics diverges by
+        // metres; a teleport by kilometres at minimum.
+        const double MixedMaxDt     = 1.0;    // s — a landed endpoint is only judged at physics rate
 
         // Baseline of the last accepted tick.
         private bool     hasBaseline;
@@ -263,6 +318,10 @@ namespace GeneKerman
         private Vector3d baseRelPos;
         private Vector3d baseObtVel;
         private double   baseSpeed, baseSma, baseEcc, baseInc, baseUt;
+        private bool     baseLanded;
+        private double   baseLat, baseLon, baseAlt;
+        private Orbit    baseOrbitSnap;   // reused clone of last tick's conic
+        private bool     baseOrbitValid;
 
         private int grace = GraceTicks;
 
@@ -374,6 +433,7 @@ namespace GeneKerman
 
             PollStockCheats(v);
             PollVesselMover(v);
+            PollSimulation(v);
 
             if (!hasBaseline || v.id != baseVesselId)
             {
@@ -381,12 +441,26 @@ namespace GeneKerman
                 grace = GraceTicks;
                 return;
             }
-            if (grace > 0) { grace--; Rebaseline(v); return; }
 
             double ut = Planetarium.GetUniversalTime();
             double dt = ut - baseUt;
             var body = v.mainBody;
             if (dt <= 0 || body == null) { Rebaseline(v); return; }
+
+            if (grace > 0)
+            {
+                // Grace pauses the derivative rules below, not the state rules:
+                // stock Set Orbit / Set Position pack the vessel first, so the
+                // pack event's grace used to launder the teleport — the blind
+                // re-baseline adopted the cheated state before judgement
+                // resumed. Continuity is judged per tick, so the drift a legit
+                // perturbation accumulates over the window never adds up into
+                // one comparison, while a teleport is a single-tick jump.
+                grace--;
+                CheckStateContinuity(v, body, dt);
+                Rebaseline(v);
+                return;
+            }
 
             if (body != baseBody)
             {
@@ -398,8 +472,10 @@ namespace GeneKerman
             bool onRails = v.packed;
             if (onRails != baseOnRails)
             {
-                // Pack/unpack converts between orbit and physics state — one tick
-                // of numerical slack, judged again next tick.
+                // Pack/unpack converts between orbit and physics state — a
+                // change of representation, not of conic, so it is judged by
+                // element continuity rather than waved through.
+                CheckStateContinuity(v, body, dt);
                 Rebaseline(v);
                 return;
             }
@@ -432,6 +508,82 @@ namespace GeneKerman
                 baseEcc = v.orbit.eccentricity;
                 baseInc = v.orbit.inclination;
             }
+            baseLanded = v.Landed || v.Splashed;
+            baseLat    = v.latitude;
+            baseLon    = v.longitude;
+            baseAlt    = v.altitude;
+            var snap = CheatDetection.SnapshotOrbit(v.orbit, baseOrbitSnap);
+            if (snap != null) baseOrbitSnap = snap;
+            baseOrbitValid = snap != null;
+        }
+
+        /// <summary>Judged on every tick the watchdog used to wave through — grace
+        /// ticks and pack/unpack transitions. A legitimate perturbation (docking,
+        /// staging, warp entry) changes the representation of the state or its
+        /// derivatives, never the state itself: the vessel stays on the same conic,
+        /// or at the same spot on the surface. Stock Set Orbit is precisely a
+        /// one-tick state jump hidden inside a pack/unpack pair, which is why grace
+        /// must pause the derivative rules and not this one.</summary>
+        private void CheckStateContinuity(Vessel v, CelestialBody body, double dt)
+        {
+            // A body change during grace is still a body change — judged by the
+            // same SOI-boundary rule (lenient about crossings near the edge).
+            if (body != baseBody) { CheckBodyJump(v, body, dt); return; }
+
+            bool landedNow = v.Landed || v.Splashed;
+            if (landedNow && baseLanded)
+            {
+                // Surface frame: a landed vessel keeps its lat/lon through any
+                // amount of warp; only driving moves it, at surface speed. This
+                // is what catches Set Position relocating a landed vessel.
+                double r     = Math.Max(1.0, body.Radius + Math.Max(0.0, (v.altitude + baseAlt) * 0.5));
+                double horiz = SurfaceDistance(baseLat, baseLon, v.latitude, v.longitude, r);
+                double vert  = Math.Abs(v.altitude - baseAlt);
+                double err   = Math.Sqrt(horiz * horiz + vert * vert);
+                double allow = Math.Max(JumpFloorM, JumpSpeedMult * Math.Max(v.srfSpeed, 1.0) * dt);
+                if (err > allow)
+                    CheatDetection.Taint(v, "teleport:surface",
+                        $"Moved ~{err / 1000.0:F0} km across {body.bodyName}'s surface in one physics tick (Set Position, HyperEdit or a vessel mover)");
+                return;
+            }
+
+            // A landed endpoint is only judged at physics rate: a parked
+            // pseudo-conic doesn't rotate with the planet, so propagating it
+            // across a long warp tick diverges for legitimate reasons.
+            if ((landedNow || baseLanded) && dt > MixedMaxDt) return;
+
+            // Under Principia/PersistentThrust a packed endpoint means the
+            // conic may legitimately have been rewritten; skip, matching the
+            // steady-state rails rule.
+            if (railsMotionModPresent && (v.packed || baseOnRails)) return;
+            if (!baseOrbitValid || v.orbit == null || v.orbit.referenceBody == null) return;
+
+            // Position via the orbit, never via the physics state: the orbit
+            // driver is fresh on the very tick a teleport lands (Set Orbit
+            // writes it directly), while CoM/transform reads can be stale for
+            // a freshly-packed vessel. Any trajectory write — elements or
+            // phase alone ("Rendezvous Me") — moves position-at-now; every
+            // legitimate hand-over (pack/unpack, touchdown, docking) keeps the
+            // old and new conic passing through the same current point.
+            double ut2   = Planetarium.GetUniversalTime();
+            double err2  = CheatDetection.OrbitPositionDelta(baseOrbitSnap, v.orbit, ut2);
+            double speed = Math.Max(v.obt_velocity.magnitude, baseSpeed);
+            double allow2 = Math.Max(JumpFloorM, JumpSpeedMult * speed * dt);
+            if (err2 > allow2)
+                CheatDetection.Taint(v, "teleport:orbit",
+                    $"Trajectory jumped ~{err2 / 1000.0:F0} km in one update (Set Orbit, Set Position, HyperEdit or similar)");
+        }
+
+        /// <summary>Great-circle distance (haversine) between two lat/lon pairs, in
+        /// metres at the given radius. Handles longitude wrap-around.</summary>
+        private static double SurfaceDistance(double lat1, double lon1, double lat2, double lon2, double radius)
+        {
+            const double D2R = Math.PI / 180.0;
+            double dLat = (lat2 - lat1) * D2R;
+            double dLon = (lon2 - lon1) * D2R;
+            double sLat = Math.Sin(dLat / 2.0), sLon = Math.Sin(dLon / 2.0);
+            double a = sLat * sLat + Math.Cos(lat1 * D2R) * Math.Cos(lat2 * D2R) * sLon * sLon;
+            return radius * 2.0 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(Math.Max(0.0, 1.0 - a)));
         }
 
         /// <summary>Off-rails: the position must extrapolate from last tick's position
@@ -512,6 +664,20 @@ namespace GeneKerman
                 CheatDetection.Taint(v, "cheat:joints", "F12 cheat 'Unbreakable Joints' enabled in flight");
             if (CheatOptions.NoCrashDamage)
                 CheatDetection.Taint(v, "cheat:crash", "F12 cheat 'No Crash Damage' enabled in flight");
+        }
+
+        // A simulated launch (RP-1/KCT's "Simulate", KRASH) is a flight that never
+        // happened — free, instant, and reverted when it ends — so any vessel flown
+        // during one is tainted. SubmissionSession refuses such a submit outright
+        // with a friendlier message before upload; this taint is the backstop that
+        // makes the server's gate refuse it too. The revert that ends every sim
+        // reloads the pre-sim save, which rolls the taint store back with it, so a
+        // sim leaves no mark on the real career.
+        private void PollSimulation(Vessel v)
+        {
+            if (SimulationDetection.SimulationActive(out string tool))
+                CheatDetection.Taint(v, "simulation",
+                    $"Flown in a {tool} simulation - a simulated launch is not a real flight");
         }
 
         // VesselMover glides a vessel around at a chosen speed — per-tick deltas that

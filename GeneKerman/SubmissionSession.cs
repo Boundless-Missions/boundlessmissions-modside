@@ -10,7 +10,7 @@
  * SubmissionPreview were pulled out for: state and rules here, pixels there.
  *
  * Mission types (AI-classified, cached on server):
- *   - "craft_build": Must submit from VAB/SPH. Sends: craft file + KVV/screenshot.
+ *   - "craft_build": Must submit from VAB/SPH. Sends: craft file + render/screenshot.
  *   - "active_vessel": Must submit from Flight. Sends: craft + loadmeta + telemetry
  *     + screenshot, and the vessel's situation and body must match.
  *   - "rescue": active_vessel, plus the stranded crew (and sometimes the wreck).
@@ -715,7 +715,7 @@ namespace GeneKerman
             screenshotPaths = new List<string>();
 
             Vessel active = HighLogic.LoadedSceneIsFlight ? FlightGlobals.ActiveVessel : null;
-            string activePath = KVVIntegration.CaptureWithFallback(active);
+            string activePath = VesselRenderer.CaptureVessel(active);
             if (!string.IsNullOrEmpty(activePath)) screenshotPaths.Add(activePath);
 
             if (!IsRescue && nearbyEntries != null)
@@ -723,7 +723,7 @@ namespace GeneKerman
                 foreach (var e in nearbyEntries)
                 {
                     if (!e.Selected || e.Vessel == null) continue;
-                    string ep = KVVIntegration.CaptureWithFallback(e.Vessel);
+                    string ep = VesselRenderer.CaptureVessel(e.Vessel);
                     if (!string.IsNullOrEmpty(ep)) screenshotPaths.Add(ep);
                 }
             }
@@ -900,6 +900,20 @@ namespace GeneKerman
 
         private IEnumerator SubmitCoroutine()
         {
+            // A simulated launch (RP-1/KCT's "Simulate", KRASH) is refused before
+            // anything is read or uploaded: the flight is free, instant and about to
+            // be reverted, so the claim "this craft flew here" is empty. Editor
+            // builds are exempt — a blueprint has no flight to have simulated. The
+            // watchdog taints sim-flown vessels too (the server-side backstop); this
+            // check is the one that gets to explain itself. Checked again at submit
+            // time rather than at panel-open, since a sim can't start mid-flight but
+            // an old cached answer helps nobody.
+            if (MissionType != "craft_build" && SimulationDetection.SimulationActive(out string simTool))
+            {
+                Fail($"This flight is a {simTool} simulation.\nSimulated launches can't be submitted — fly the mission for real.");
+                yield break;
+            }
+
             yield return new WaitForSeconds(1.5f);
 
             // Last word on render freshness, unthrottled: the throttled per-frame check

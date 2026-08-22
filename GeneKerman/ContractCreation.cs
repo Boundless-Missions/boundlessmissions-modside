@@ -626,9 +626,12 @@ namespace GeneKerman
             // promising a removal that is about to look like it didn't happen.
             // The stranded crew are the contract: they leave with the ship, and come back
             // as an import (tag stripped) if and when the rescue is delivered.
+            // returnToSpaceCenter: the player just gave this vessel away, so if it's
+            // the one they're flying, finish the hand-over now rather than leaving a
+            // window where a cancel can cross the un-run removal and duplicate it.
             if (ok && !mod.QueueRescueVesselRemoval(pid, vesselName,
                                                     VesselTransfer.CrewFate.LeavesWithCraft,
-                                                    ctx.Crew))
+                                                    ctx.Crew, returnToSpaceCenter: true))
                 message = $"Rescue sent to {who}. Your vessel will be removed the next " +
                           "time you visit the Space Center.";
 

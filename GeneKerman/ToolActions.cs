@@ -231,10 +231,13 @@ namespace GeneKerman
             // Only once the server holds the snapshot — losing the vessel on a failed
             // send would destroy the ship and deliver nothing. Same rule and same
             // machinery as issuing a rescue: the queue defers while the player is
-            // still flying it, and QueueRescueVesselRemoval says so out loud.
+            // still flying it, and returnToSpaceCenter closes that deferral by taking
+            // them home so the removal runs now, not at some later visit a decline
+            // could race.
             if (ok && kind == "vessel" && returnable && !string.IsNullOrEmpty(vesselPid))
                 mod.QueueRescueVesselRemoval(vesselPid, craftName,
-                    VesselTransfer.CrewFate.LeavesWithCraft, vesselCrew);
+                    VesselTransfer.CrewFate.LeavesWithCraft, vesselCrew,
+                    returnToSpaceCenter: true);
 
             onDone(ok, message ?? "Failed to send.");
         }

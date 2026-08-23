@@ -247,10 +247,11 @@ namespace GeneKerman
                     violations.Add($"Not enough delta-v: {deltaVVac:F0} m/s (min {MinDeltaV:F0}).");
             }
 
-            // Forbidden: anything present that shouldn't be.
+            // Forbidden: anything present that shouldn't be. Carried resources count
+            // here and not in the editor filter — see ViolatesForbid.
             foreach (var s in summaries)
             {
-                string v = ViolatesForbid(s);
+                string v = ViolatesForbid(s, includeCarried: true);
                 if (v != null) violations.Add(v);
             }
 
@@ -352,8 +353,20 @@ namespace GeneKerman
             return counts;
         }
 
-        /// <summary>First forbidden-rule violation for a single part, or null.</summary>
-        private string ViolatesForbid(PartSummary s)
+        /// <summary>
+        /// First forbidden-rule violation for a single part, or null.
+        ///
+        /// <paramref name="includeCarried"/> decides whether a forbidden propellant is
+        /// also broken by a part merely *carrying* it (a monopropellant tank burns
+        /// nothing, so it answers no propellant at all). Submit-time checking says yes:
+        /// "you are not allowed to contain any monopropellant" is about what is aboard,
+        /// and a tank of it is the whole of the violation. The editor filter says no,
+        /// because hiding is for parts that could never comply, and nearly every tank —
+        /// including the monoprop in a stock command pod — can be drained to zero right
+        /// there in the VAB. Hiding those would remove pods from the picker over fuel
+        /// the player was about to remove anyway.
+        /// </summary>
+        private string ViolatesForbid(PartSummary s, bool includeCarried = false)
         {
             // Resolved part names match the exact installed part by internal name.
             foreach (var bad in ForbiddenPartNames)
@@ -365,8 +378,12 @@ namespace GeneKerman
                     return $"Forbidden part: '{s.Title}' (matches '{bad}').";
 
             foreach (var bad in ForbiddenPropellants)
+            {
                 if (s.Propellants.Contains(bad))
                     return $"Forbidden: '{s.Title}' is an engine powered by {bad}.";
+                if (includeCarried && s.Resources.Contains(bad))
+                    return $"Forbidden: '{s.Title}' carries {bad} — drain it or remove the part.";
+            }
 
             foreach (var bad in ForbiddenEngineCategories)
                 if (s.EngineCategories.Contains(bad))

@@ -307,6 +307,65 @@ namespace GeneKerman
             return state;
         }
 
+        /// <summary>The .craft file to send for whatever is open in the editor: a snapshot
+        /// of the LIVE ship, written to our own PluginData.
+        ///
+        /// Not <see cref="CraftState.EditorPath"/>, which is only ever "a file of that name
+        /// exists in this save's Ships folder" — and a craft's name is not an identity.
+        /// KSP's default name is "Untitled Space Craft", so a player who has ever saved one
+        /// has a file that answers to every later one, and every editor path here would send
+        /// THAT: the blueprint and the stats are read from the live ship while the craft file,
+        /// its part list and its mod tags come off last week's design. It listed one ship and
+        /// delivered another, twice in a row, before the mismatch was noticed at all.
+        ///
+        /// Snapshotting rather than calling ShipConstruction.SaveShip (which is what the
+        /// submission path does) because saving is the player's decision: writing into their
+        /// Ships folder to satisfy an upload would silently overwrite the very file this bug
+        /// is about. The snapshot is ours, overwritten each time, and never cleaned up — it
+        /// is one small file and the alternative is deleting it out from under a coroutine
+        /// that has not read it yet.
+        ///
+        /// The self-check on the first line is not paranoia about the format: ConfigNode
+        /// writes a NAMED node wrapped in braces, which KSP's craft loader rejects (the same
+        /// trap TextureTransfer and FlagTransfer avoid by never reparsing a craft). A wrapped
+        /// or empty result therefore falls back to the file on disk rather than shipping a
+        /// craft nobody can open.</summary>
+        public static string EditorCraftSource(CraftState state)
+        {
+            try
+            {
+                var ship = EditorLogic.fetch != null ? EditorLogic.fetch.ship : null;
+                if (ship != null && ship.parts != null && ship.parts.Count > 0)
+                {
+                    ConfigNode node = ship.SaveShip();
+                    if (node != null)
+                    {
+                        string dir = Path.Combine(GeneKermanMod.PluginDataPath, "EditorSnapshot");
+                        Directory.CreateDirectory(dir);
+                        string name = SanitizeFileName(state.EditorCraft ?? "");
+                        if (name.Length == 0) name = "Untitled";
+                        string path = Path.Combine(dir, name + ".craft");
+                        node.Save(path);
+
+                        if (File.Exists(path))
+                        {
+                            string head = "";
+                            using (var sr = new StreamReader(path)) head = sr.ReadLine() ?? "";
+                            if (head.TrimStart().StartsWith("ship", StringComparison.OrdinalIgnoreCase))
+                                return path;
+                            Debug.LogWarning("[GeneKerman] EditorCraftSource: snapshot is not a craft file " +
+                                             $"(first line '{head}') — using the saved file instead.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] EditorCraftSource: snapshot failed: {ex.Message}");
+            }
+            return state.EditorPath;
+        }
+
         /// <summary>Mirrors the classic window's CaptureEditorCraft lookup: save folder first, then stock.</summary>
         public static string FindSavedCraftPath(string name, string type)
         {
@@ -337,7 +396,7 @@ namespace GeneKerman
                 message = "Open a craft in the VAB or SPH first.";
                 return false;
             }
-            return ExportFlagCraft(state.EditorPath, state.EditorCraft, out message);
+            return ExportFlagCraft(EditorCraftSource(state), state.EditorCraft, out message);
         }
 
         /// <summary>
@@ -357,7 +416,7 @@ namespace GeneKerman
                     onDone(false, "Open a craft in the VAB or SPH first.");
                     yield break;
                 }
-                path = state.EditorPath;
+                path = EditorCraftSource(state);
                 name = state.EditorCraft;
             }
 
@@ -555,7 +614,7 @@ namespace GeneKerman
             bool craftCustomTextures;
             try
             {
-                craftBytes = File.ReadAllBytes(state.EditorPath);
+                craftBytes = File.ReadAllBytes(EditorCraftSource(state));
                 // Bake the scale before anything reads these bytes — see
                 // ScaleBridge.BakeEditorCraft. A listing is bought by strangers on unknown
                 // installs, which is exactly the case an unbaked craft breaks on. Baking
@@ -571,11 +630,19 @@ namespace GeneKerman
                 var modFolders = CkanGenerator.ModFoldersForCraft(craftBytes);
                 foreach (var f in TextureTransfer.TexturePackFoldersForCraft(craftBytes))
                     if (!modFolders.Contains(f)) modFolders.Add(f);
+                // Reforged Materials Redux is the same blind spot again — a TU addon that
+                // adds no parts and stores its paint in its own module, so neither the part
+                // walk nor TU's texture-set scan sees it. Only a craft that was actually
+                // painted contributes, since its module rides on every part of every craft
+                // saved on a Reforged install.
+                foreach (var f in ReforgedTransfer.PaintFoldersForCraft(craftBytes))
+                    if (!modFolders.Contains(f)) modFolders.Add(f);
                 // And say so as a flag of its own, so the listing can be *tagged* as
                 // painted rather than leaving a buyer to spot a recolour pack among a long
                 // mod row. Not derived from the folders above: a set the sender can't
                 // resolve either resolves to nothing while the paint job is still there.
-                craftCustomTextures = TextureTransfer.CraftHasCustomTextures(craftBytes);
+                craftCustomTextures = TextureTransfer.CraftHasCustomTextures(craftBytes)
+                                      || ReforgedTransfer.CraftHasPaint(craftBytes);
                 // RealFuels/RO add no parts either: union the fuel-config folders in so
                 // an RO craft is tagged (and filterable) as one instead of as stock.
                 foreach (var f in RealFuelsTransfer.FuelConfigFoldersForCraft(craftBytes))

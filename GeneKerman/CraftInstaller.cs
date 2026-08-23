@@ -103,6 +103,14 @@ namespace GeneKerman
             // comes out in stock colours — nothing about it fails to load.
             rawData = TextureTransfer.ReconcileCraftBody(rawData, tuManifest, craftFileName);
 
+            // And the other recolour system: Reforged Materials Redux keeps its paint in
+            // its own ModuleReforged fields, which TU's scan can't see. Same placement and
+            // the same outcome — the paint arrives intact on an install that has Reforged,
+            // and on one that doesn't the modules come off so the craft loads in stock
+            // colours instead of carrying a module row nothing can consume. No manifest
+            // to pass: Reforged is one mod in one folder, so nothing had to be carried.
+            rawData = ReforgedTransfer.ReconcileCraftBody(rawData, craftFileName);
+
             // And the fuel/engine configuration: on a RealFuels install, check the
             // craft's tank types / engine configs / RO environment against what is
             // defined here; without RealFuels, drop the RF modules and any propellant

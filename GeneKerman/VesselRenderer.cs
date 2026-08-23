@@ -817,34 +817,57 @@ namespace GeneKerman
 
         /// <summary>Fallback caps: how far a renderer's bounds may sit from the craft's
         /// own centroid, and how big it may claim to be, before it is treated as a
-        /// framing hazard rather than craft geometry. Only consulted when the craft
-        /// yields no usable collider reference (see CollectRenderers) — they catch
-        /// kilometre-scale garbage, not modest inflation. The largest real crafts are
-        /// tens of metres; these caps are 10× that.</summary>
+        /// framing hazard rather than craft geometry. Only consulted for a renderer
+        /// whose part yields no usable collider reference (see CollectRenderers) —
+        /// they catch kilometre-scale garbage, not modest inflation. The largest real
+        /// crafts are tens of metres; these caps are 10× that.</summary>
         private const float MaxRendererOffset = 250f;
         private const float MaxRendererSize = 500f;
 
-        /// <summary>Slack a renderer's bounds may protrude beyond the collider
-        /// reference before it is excluded from framing. Big enough for the visual-only
+        /// <summary>Slack a renderer's bounds may protrude beyond its own part's
+        /// colliders before it is excluded from framing. Big enough for the visual-only
         /// geometry that legitimately overhangs the colliders — greebles, engine
         /// skirts, skinned-mesh slop — which stays within a couple of metres of the
         /// hull; far below the craft-scale protrusion of the invisible FX meshes this
         /// exists to reject (Firefly's reentry envelopes doubled an 8 m craft's AABB
         /// and centred it 6 m low). Known tradeoff: a deployed parachute canopy has
-        /// no collider, so a mid-descent capture frames the hull and lets the canopy
-        /// crop — it still renders, and a cropped chute beats every view half-empty.</summary>
-        private static float FramingMargin(Bounds reference) =>
-            Mathf.Max(2f, reference.size.magnitude * 0.1f);
+        /// no collider of its own, so a mid-descent capture frames the hull and lets
+        /// the canopy crop — it still renders, and a cropped chute beats every view
+        /// half-empty.
+        ///
+        /// Measured from the whole craft even though it is applied around one part's
+        /// box: what it has to be larger than is the overhang of real geometry, which
+        /// scales with the craft (a 50 m station's radiator arm reaches far past the
+        /// collider of whatever it is bolted to), while the box it is added to is only
+        /// there to say which part the geometry belongs to.</summary>
+        private static float FramingMargin(Bounds craftReference) =>
+            Mathf.Max(2f, craftReference.size.magnitude * 0.1f);
 
-        /// <summary>Union of the parts' enabled, non-trigger collider bounds. Unlike
-        /// renderer bounds these cannot lie — physics itself would break — and the
-        /// rogue renderers the framing filter exists for (invisible FX envelopes,
-        /// plume meshes, uninitialized props) carry no collider, so they cannot vote
-        /// themselves into the reference.</summary>
-        private static bool ColliderReference(List<Part> parts, out Bounds reference)
+        /// <summary>Each part's own enabled, non-trigger collider bounds, keyed by the
+        /// part the collider actually belongs to. Unlike renderer bounds these cannot
+        /// lie — physics itself would break — and the rogue renderers the framing
+        /// filter exists for (invisible FX envelopes, plume meshes, uninitialized
+        /// props) carry no collider, so they cannot vote themselves into the reference.
+        ///
+        /// Per part, not per craft: the VAB does its own attachment raycasting and
+        /// leaves most parts with no enabled collider at all, so a craft-wide union
+        /// collapses onto whichever one or two parts still have one and every other
+        /// part's geometry then reads as rogue. That is what cropped the nose cone off
+        /// the top of every view of a 5-part rocket framed on its 1.2 m drone core.
+        /// Judging a renderer against its *own* part keeps the invariant that matters —
+        /// an FX envelope protrudes metres beyond the hull it belongs to — and lets a
+        /// part with no collider fall back to the fixed caps on its own, instead of
+        /// being condemned by a neighbour's.
+        ///
+        /// Both the colliders and the renderers are attributed with
+        /// GetComponentInParent, since in the editor parts are parented to each other
+        /// and a GetComponentsInChildren walk from a part reaches its children's
+        /// geometry as readily as its own.</summary>
+        private static Dictionary<Part, Bounds> ColliderReferences(List<Part> parts, out Bounds union)
         {
-            bool have = false;
-            Bounds b = default(Bounds);
+            var refs = new Dictionary<Part, Bounds>();
+            bool haveUnion = false;
+            union = default(Bounds);
             foreach (var p in parts)
             {
                 if (p == null) continue;
@@ -853,25 +876,38 @@ namespace GeneKerman
                     if (!c.enabled || c.isTrigger) continue;
                     Bounds cb = c.bounds;
                     if (!Finite(cb.center) || !Finite(cb.size)) continue;
-                    if (have) b.Encapsulate(cb);
-                    else { b = cb; have = true; }
+                    // Not ??: a destroyed Part is only null through Unity's own
+                    // operator, which the null-coalescing operator does not use.
+                    Part owner = c.GetComponentInParent<Part>();
+                    if (owner == null) owner = p;
+                    Bounds have;
+                    if (refs.TryGetValue(owner, out have)) { have.Encapsulate(cb); refs[owner] = have; }
+                    else refs[owner] = cb;
+
+                    if (haveUnion) union.Encapsulate(cb);
+                    else { union = cb; haveUnion = true; }
                 }
             }
-            reference = b;
-            return have;
+            return refs;
         }
 
-        private static bool IsRogue(Bounds rb, bool haveRef, Bounds reference,
-                                    float margin, Vector3 centroid)
+        private static bool IsRogue(Renderer r, Dictionary<Part, Bounds> refs, float margin,
+                                    Vector3 centroid)
         {
+            Bounds rb = r.bounds;
             if (!Finite(rb.center) || !Finite(rb.size)) return true;
-            if (haveRef)
+
+            Bounds reference;
+            Part owner = refs.Count > 0 ? r.GetComponentInParent<Part>() : null;
+            if (owner != null && refs.TryGetValue(owner, out reference))
+            {
                 return rb.min.x < reference.min.x - margin
                     || rb.min.y < reference.min.y - margin
                     || rb.min.z < reference.min.z - margin
                     || rb.max.x > reference.max.x + margin
                     || rb.max.y > reference.max.y + margin
                     || rb.max.z > reference.max.z + margin;
+            }
             return (rb.center - centroid).magnitude > MaxRendererOffset
                 || rb.size.magnitude > MaxRendererSize;
         }
@@ -884,33 +920,55 @@ namespace GeneKerman
                 if (p != null) { centroid += p.transform.position; n++; }
             if (n > 0) centroid /= n;
 
-            bool haveRef = ColliderReference(parts, out Bounds reference);
-            float margin = haveRef ? FramingMargin(reference) : 0f;
+            Bounds craftReference;
+            var refs = ColliderReferences(parts, out craftReference);
+            float margin = refs.Count > 0 ? FramingMargin(craftReference) : 0f;
 
+            // De-duplicated: in the editor a part's walk reaches its children's
+            // renderers too, so the same object arrives once per ancestor.
             var candidates = new List<Renderer>();
+            var seen = new HashSet<Renderer>();
             foreach (var r in parts.SelectMany(p => p.GetComponentsInChildren<Renderer>(false)))
                 if (r.enabled && r.gameObject.activeInHierarchy
                     && (r is MeshRenderer || r is SkinnedMeshRenderer)
-                    && r.bounds.size.sqrMagnitude > 0.0001f)
+                    && r.bounds.size.sqrMagnitude > 0.0001f
+                    && seen.Add(r))
                     candidates.Add(r);
 
             var kept = new List<Renderer>();
             var dropped = new List<Renderer>();
             foreach (var r in candidates)
-                (IsRogue(r.bounds, haveRef, reference, margin, centroid) ? dropped : kept).Add(r);
+                (IsRogue(r, refs, margin, centroid) ? dropped : kept).Add(r);
 
-            // A reference that rejects every renderer is itself the broken input —
-            // colliders disabled mid-scene, or parked metres from the meshes. Framing
-            // from nothing degrades the capture to a plain screenshot, so re-run on
-            // the fixed caps rather than return an empty set.
-            if (haveRef && kept.Count == 0 && candidates.Count > 0)
+            // References that reject every renderer — or every renderer that MATTERS —
+            // are themselves the broken input: colliders disabled mid-scene, or parked
+            // metres from the meshes. Rejecting all of them is the obvious version and
+            // degrades the capture to a plain screenshot; the quiet version is worse,
+            // because it still produces a picture. A part whose only enabled collider is
+            // some detail cap — a hatch, a ladder rung — condemns its own hull, and the
+            // scrap that survives becomes the framing: an entire craft photographed from
+            // 20 cm away, half the views empty, which reads as a broken renderer rather
+            // than a broken reference. (Seen for real: a one-part cockpit whose 3.2×3.8×4.5 m
+            // hull was dropped against its own collider, leaving a 0.2×0.2×0.4 m fragment.)
+            //
+            // So the test is relative and scale-free: if what survives is a small fraction
+            // of what was offered, the references cannot be describing this craft. It is
+            // deliberately far below the inflation the filter exists to reject — Firefly's
+            // reentry envelopes roughly double a craft's AABB, leaving the hull at ~50% of
+            // the candidate union, nowhere near this floor — so a real rogue renderer is
+            // still dropped at every scale, and only a collapse is undone.
+            bool usedRefs = refs.Count > 0;
+            if (usedRefs && candidates.Count > 0 && IsFramingCollapse(kept, candidates))
             {
-                Debug.LogWarning("[GeneKerman] Blueprint: collider reference rejected " +
-                                 "every renderer — falling back to fixed caps.");
-                haveRef = false;
+                Debug.LogWarning($"[GeneKerman] Blueprint: collider references rejected " +
+                                 $"{(kept.Count == 0 ? "every renderer" : "all but a fragment of the craft")} " +
+                                 "— falling back to fixed caps.");
+                usedRefs = false;
+                refs = new Dictionary<Part, Bounds>();
+                kept.Clear();
                 dropped.Clear();
                 foreach (var r in candidates)
-                    (IsRogue(r.bounds, false, reference, 0f, centroid) ? dropped : kept).Add(r);
+                    (IsRogue(r, refs, 0f, centroid) ? dropped : kept).Add(r);
             }
 
             if (dropped.Count > 0)
@@ -921,8 +979,8 @@ namespace GeneKerman
                     var r = dropped[i];
                     names.Add($"'{r.gameObject.name}' (centre {r.bounds.center}, size {r.bounds.size})");
                 }
-                string refDesc = haveRef
-                    ? $"collider reference centre {reference.center}, size {reference.size}, margin {margin:F1} m"
+                string refDesc = usedRefs
+                    ? $"{refs.Count} of {parts.Count} part(s) gave a collider reference, margin {margin:F1} m"
                     : "no collider reference — fixed caps";
                 Debug.LogWarning($"[GeneKerman] Blueprint: dropped {dropped.Count} renderer(s) whose " +
                                  $"bounds would poison the camera framing ({refDesc}): " +
@@ -930,6 +988,42 @@ namespace GeneKerman
                                  (dropped.Count > 3 ? "; …" : "") + ".");
             }
             return kept.ToArray();
+        }
+
+        /// <summary>Largest share of the craft the collider references may reject before
+        /// the answer stops being "these renderers are rogue" and becomes "these
+        /// references are wrong". Compared on the bounds DIAGONAL rather than volume, so
+        /// one thin panel dropped from a wide craft doesn't read as a collapse.</summary>
+        private const float MinKeptExtentFraction = 0.25f;
+
+        /// <summary>Whether the per-part collider references have thrown away the craft
+        /// instead of the litter around it: nothing left, or a survivor so much smaller
+        /// than what was offered that it cannot be the thing being photographed.</summary>
+        private static bool IsFramingCollapse(List<Renderer> kept, List<Renderer> candidates)
+        {
+            if (kept.Count == 0) return true;
+            float keptExtent = ExtentOf(kept);
+            float allExtent = ExtentOf(candidates);
+            if (allExtent <= 0f) return false;
+            return keptExtent < allExtent * MinKeptExtentFraction;
+        }
+
+        /// <summary>Diagonal of the union of a set of renderers' bounds, 0 for an empty
+        /// set. Non-finite bounds are skipped — IsRogue rejects them anyway, and letting
+        /// one in here would make the union infinite and every comparison meaningless.</summary>
+        private static float ExtentOf(List<Renderer> renderers)
+        {
+            bool have = false;
+            Bounds union = default(Bounds);
+            foreach (var r in renderers)
+            {
+                if (r == null) continue;
+                Bounds b = r.bounds;
+                if (!Finite(b.center) || !Finite(b.size)) continue;
+                if (have) union.Encapsulate(b);
+                else { union = b; have = true; }
+            }
+            return have ? union.size.magnitude : 0f;
         }
 
         private static bool Finite(Vector3 v) =>

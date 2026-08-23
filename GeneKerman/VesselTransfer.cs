@@ -653,6 +653,12 @@ namespace GeneKerman
             // instead of dragging orphan modules into a live ProtoVessel.
             TextureTransfer.ExtractCheckAndStripFromNode(innerNode, innerNode.GetValue("name"));
 
+            // Same again for Reforged Materials Redux, the other recolour mod: drop the
+            // ModuleReforged nodes this install's prefabs can't accept before the
+            // ProtoVessel is built. Nothing to strip first — Reforged rides entirely in
+            // the part modules and has no side-channel block.
+            ReforgedTransfer.ReconcileNode(innerNode, innerNode.GetValue("name"));
+
             // Likewise the fuel/engine configuration: read + strip the GKRF node, check
             // tank types / engine configs / the RO environment against this install, and
             // for a recipient without RealFuels drop the RF modules and any propellant

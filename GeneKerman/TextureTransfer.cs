@@ -139,8 +139,12 @@ namespace GeneKerman
 
         /// <summary>GameData folder TU's plugin lives in ("TexturesUnlimited" normally),
         /// or null when it isn't installed. Carried so a recipient without TU gets the
-        /// framework in their modpack, not just the recolour pack that depends on it.</summary>
-        private static string CoreFolder()
+        /// framework in their modpack, not just the recolour pack that depends on it.
+        ///
+        /// Public because ReforgedTransfer needs the same answer: Reforged Redux is a TU
+        /// addon and names TU in its own modpack, and the folder is not a constant here
+        /// (it ships as both "TexturesUnlimited" and "000_TexturesUnlimited").</summary>
+        public static string CoreFolder()
         {
             var la = FindCore();
             if (la == null) return null;

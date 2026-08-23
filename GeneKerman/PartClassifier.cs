@@ -24,6 +24,14 @@ namespace GeneKerman
         public string Title = "";
         public string Name = "";
         public HashSet<string> Propellants = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        /// <summary>Resources the part is actually carrying (amount &gt; 0), which is a
+        /// different question from what its engines burn: a monopropellant tank has no
+        /// engine and no RCS module, so it answers nothing at all under
+        /// <see cref="Propellants"/> — and "you are not allowed to contain any
+        /// monopropellant" is about exactly that part. Capacity alone doesn't count:
+        /// nearly every tank is drainable in the editor, so a tank emptied to zero
+        /// carries nothing and a rule about what is aboard should say so.</summary>
+        public HashSet<string> Resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> EngineCategories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         public HashSet<string> PartCategories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -35,6 +43,7 @@ namespace GeneKerman
                 { "name", Name },
                 { "title", Title },
                 { "propellants", Propellants.Cast<object>().ToList() },
+                { "resources", Resources.Cast<object>().ToList() },
                 { "engine_categories", EngineCategories.Cast<object>().ToList() },
                 { "part_categories", PartCategories.Cast<object>().ToList() },
             };
@@ -67,6 +76,8 @@ namespace GeneKerman
             // KSP part category (e.g. "Engine", "Thermal", "Pods").
             if (category != PartCategories.none)
                 s.PartCategories.Add(category.ToString().ToLowerInvariant());
+
+            AddCarriedResources(s.Resources, prefab);
 
             bool hasEngine = false;
             bool anyThrottleLocked = false;
@@ -170,6 +181,17 @@ namespace GeneKerman
             bool ntrSignature = hasEngine && hasLF && !hasOx && !hasIntake && !hasEC;
             if (nuclearName || exoticFuel || ntrSignature)
                 s.EngineCategories.Add("nuclear");
+        }
+
+        /// <summary>What this part is carrying right now. Read off the live part, so a
+        /// tank switched to another fuel (B9PartSwitch) or drained in the editor reports
+        /// what it actually holds rather than what its config declares.</summary>
+        private static void AddCarriedResources(HashSet<string> set, Part prefab)
+        {
+            if (prefab == null || prefab.Resources == null) return;
+            foreach (var res in prefab.Resources)
+                if (res != null && !string.IsNullOrEmpty(res.resourceName) && res.amount > 0d)
+                    set.Add(res.resourceName);
         }
 
         private static void AddPropellants(HashSet<string> set, List<Propellant> propellants)

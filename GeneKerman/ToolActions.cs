@@ -220,7 +220,7 @@ namespace GeneKerman
                         returnable = MiniJSON.GetBool(d, "vessel_returnable", false);
                         message = ok
                             ? (kind == "vessel" && returnable
-                                ? $"Sent to {recipientName} — {craftName} and its crew leave " +
+                                ? $"Sent to {recipientName}. {craftName} and its crew leave " +
                                   "your save. It comes back if they decline."
                                 : $"Sent to {recipientName}. They'll be asked in-game to accept it.")
                             : MiniJSON.GetString(d, "message", "Failed to send.");
@@ -354,7 +354,7 @@ namespace GeneKerman
                             if (head.TrimStart().StartsWith("ship", StringComparison.OrdinalIgnoreCase))
                                 return path;
                             Debug.LogWarning("[GeneKerman] EditorCraftSource: snapshot is not a craft file " +
-                                             $"(first line '{head}') — using the saved file instead.");
+                                             $"(first line '{head}'), using the saved file instead.");
                         }
                     }
                 }
@@ -460,7 +460,7 @@ namespace GeneKerman
             // player can actually fix.
             if (mod.Api.TransmissionBlocked)
             {
-                onDone(false, "The mod isn't allowed to send anything — check the data-sharing " +
+                onDone(false, "The mod isn't allowed to send anything; check the data-sharing " +
                               "switch in Settings.");
                 yield break;
             }
@@ -473,13 +473,13 @@ namespace GeneKerman
             // characters short of being one.
             if (summary.Length < MinBugSummary)
             {
-                onDone(false, "Summarise the bug in one line first — at least " +
+                onDone(false, "Summarise the bug in one line first, at least " +
                               MinBugSummary + " characters.");
                 yield break;
             }
             if (details.Length < MinBugDetails)
             {
-                onDone(false, "Add a few words on what you did and what happened — at least " +
+                onDone(false, "Add a few words on what you did and what happened, at least " +
                               MinBugDetails + " characters.");
                 yield break;
             }
@@ -501,7 +501,7 @@ namespace GeneKerman
                 {
                     // The one failure the player can act on, so it is named rather
                     // than folded into "could not send".
-                    message = "You've filed several reports already — try again later.";
+                    message = "You've filed several reports already; try again later.";
                 }
                 else message = BugFailureMessage(status, resp);
             });
@@ -522,7 +522,7 @@ namespace GeneKerman
         private static string BugFailureMessage(long status, string body)
         {
             if (status == 0)
-                return "Couldn't reach the server — check the address in Settings and " +
+                return "Couldn't reach the server; check the address in Settings and " +
                        "that you're online.";
 
             // FastAPI puts the reason in `detail`, but only as a string when it was
@@ -538,7 +538,7 @@ namespace GeneKerman
                     detail = MiniJSON.GetString(d, "message", null);
             }
             return "The server refused the report (HTTP " + status + ")" +
-                   (string.IsNullOrEmpty(detail) ? "." : " — " + detail);
+                   (string.IsNullOrEmpty(detail) ? "." : ": " + detail);
         }
 
         // ── Marketplace ─────────────────────────────────────────────────────

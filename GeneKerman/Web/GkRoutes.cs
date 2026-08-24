@@ -262,6 +262,15 @@ namespace GeneKerman.Web
                 if (body.ContainsKey("checkpointPhotos"))
                     api.SetCheckpointPhotosEnabled(MiniJSON.GetBool(body, "checkpointPhotos", true));
 
+                if (body.ContainsKey("hidePlayerDetails"))
+                    api.SetHidePlayerDetails(MiniJSON.GetBool(body, "hidePlayerDetails", false));
+
+                // Accepted from the page in both directions, unlike data sharing: this
+                // one only decides whether the mod reads its own machine's process
+                // list, and the page is served to the same person from 127.0.0.1.
+                if (body.ContainsKey("streamerMode"))
+                    api.SetStreamerModeEnabled(MiniJSON.GetBool(body, "streamerMode", false));
+
                 // Accepted as an opt-*out* only. Turning data sharing back on is a consent
                 // action (KSP add-on rule 8.2) and belongs in the game, beside the panel
                 // that says what is shared — not in a request a page can make on its own.
@@ -296,6 +305,14 @@ namespace GeneKerman.Web
               // keeping its own copy of the answer.
               .Append(",\"checkpointPhotosAvailable\":").Append(Json(ApiClient.CheckpointPhotosAvailable))
               .Append(",\"dataGathering\":").Append(Json(api.DataGatheringEnabled))
+              .Append(",\"hidePlayerDetails\":").Append(Json(api.HidePlayerDetails))
+              .Append(",\"streamerMode\":").Append(Json(api.StreamerModeEnabled))
+              // The two the page cannot work out for itself: what the scan currently
+              // sees, and the folded answer the player picker actually draws from —
+              // sent so the browser UI never has to re-derive "hidden OR detected"
+              // and get it subtly different from the in-game one.
+              .Append(",\"broadcastApp\":").Append(JobResult.Quote(StreamerMode.DetectedApp ?? ""))
+              .Append(",\"playerDetailsHidden\":").Append(Json(StreamerMode.HideDetails))
               .Append(",\"updateRequired\":").Append(Json(mod?.UpdateRequired == true))
               .Append(",\"modVersion\":").Append(JobResult.Quote(ModVersion.Current))
               .Append(",\"serverChanged\":").Append(Json(serverChanged))
@@ -615,6 +632,11 @@ namespace GeneKerman.Web
                 req.Lat = MiniJSON.GetDouble(rescue, "lat", 0);
                 req.Lon = MiniJSON.GetDouble(rescue, "lon", 0);
                 req.MarginPosDeg = MiniJSON.GetDouble(rescue, "margin_pos_deg", ContractCreation.MinMarginSurfaceDeg);
+                // Whether those numbers are a requirement at all. Default true, so a page
+                // that predates the switches means what it has always meant: the Ap/Pe or
+                // the lat/lon it sent is the target.
+                req.RequireAlt = MiniJSON.GetBool(rescue, "require_alt", true);
+                req.RequirePos = MiniJSON.GetBool(rescue, "require_pos", true);
                 // Orbital plane / regime. Absent == any orbit with the right Ap/Pe, which
                 // is what a page that predates these fields means by leaving them out.
                 req.RequireIncl = MiniJSON.GetBool(rescue, "require_incl", false);

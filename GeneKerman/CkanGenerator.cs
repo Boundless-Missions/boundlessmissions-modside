@@ -591,7 +591,7 @@ namespace GeneKerman
                 string dlcOnly = string.Join(" and ", missingDlc.Select(m => m.name).ToArray());
                 Post($"'{context}' needs the {dlcOnly} expansion",
                      $"This craft uses parts from {dlcOnly}, which you don't have. "
-                     + "It is a paid expansion, so CKAN can't install it — the craft will not "
+                     + "It is a paid expansion, so CKAN can't install it; the craft will not "
                      + "load without it.");
                 return;
             }
@@ -1019,7 +1019,7 @@ namespace GeneKerman
         /// ScreenMessage only when the mod instance isn't available (e.g. headless).</summary>
         private static void Post(string title, string body)
         {
-            Debug.LogWarning($"[GeneKerman] {title} — {body}");
+            Debug.LogWarning($"[GeneKerman] {title}: {body}");
 
             var mod = GeneKermanMod.Instance;
             if (mod != null)

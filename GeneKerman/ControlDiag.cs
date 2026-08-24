@@ -134,7 +134,7 @@ namespace GeneKerman
             {
                 if (!v.loaded || v.parts == null)
                 {
-                    sb.Append("  parts: vessel unloaded — no live modules to inspect\n");
+                    sb.Append("  parts: vessel unloaded, no live modules to inspect\n");
                     return;
                 }
                 foreach (var p in v.parts)

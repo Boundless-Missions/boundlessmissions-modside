@@ -83,6 +83,18 @@ namespace GeneKerman
         // that would otherwise arrive broken or misleading. Off leaves the nodes exactly
         // as the sender wrote them; warnings still post.
         private bool fuelConfigTransferEnabled = true;
+        // Draw player lists as display names alone — no Discord avatar, no corp name
+        // underneath. Off by default, because the pictures are how you tell two
+        // similarly-named players apart and most people are not on camera. On, the
+        // avatars are not merely hidden but never fetched (see PlayerPicker), so the
+        // setting also stops this PC asking Discord's CDN for other people's faces.
+        private bool hidePlayerDetails;
+        // Turn the switch above on by itself while broadcasting software is running.
+        // Off by default and, unlike every other default here, that is a decision
+        // about what the mod may *look at*: while it is off no process list is read
+        // at all (see StreamerMode). A mod update must never start inspecting what
+        // programs somebody runs because a new feature shipped switched on.
+        private bool streamerModeEnabled;
         private string sessionToken;
         private readonly string tokenPath;
 
@@ -152,6 +164,15 @@ namespace GeneKerman
         /// <summary>Whether a craft's RealFuels/RO fuel-and-engine configuration is carried
         /// (and reconciled away for a recipient without RealFuels).</summary>
         public bool FuelConfigTransferEnabled => fuelConfigTransferEnabled;
+        /// <summary>The player's own "hide avatars and corp names" preference. This is
+        /// the stored switch, for the settings screens to draw and write. Anything
+        /// *drawing* a player list must read <see cref="StreamerMode.HideDetails"/>
+        /// instead, which is this OR a live streamer-mode detection.</summary>
+        public bool HidePlayerDetails => hidePlayerDetails;
+        /// <summary>Whether the mod watches for broadcasting software and hides player
+        /// details by itself while it finds any. The gate on all of StreamerMode's
+        /// scanning, not just on its effect.</summary>
+        public bool StreamerModeEnabled => streamerModeEnabled;
 
         /// <summary>True when no request may leave this PC — either because the user
         /// has not yet given first-run consent (rule 8.1) or has opted out of data
@@ -164,12 +185,12 @@ namespace GeneKerman
                 // the privacy policy, terms, and data-collection consent.
                 if (!Consent.Accepted)
                 {
-                    Debug.Log("[GeneKerman] Outbound request suppressed — privacy consent not given.");
+                    Debug.Log("[GeneKerman] Outbound request suppressed, privacy consent not given.");
                     return true;
                 }
                 if (!dataGatheringEnabled)
                 {
-                    Debug.Log("[GeneKerman] Outbound request suppressed — data sharing is off.");
+                    Debug.Log("[GeneKerman] Outbound request suppressed, data sharing is off.");
                     return true;
                 }
                 return false;
@@ -271,6 +292,11 @@ namespace GeneKerman
                         bool.TryParse(gk.GetValue("enablePartSubstitution") ?? "true", out partSubstitutionEnabled);
                         bool.TryParse(gk.GetValue("enableTextureTransfer") ?? "true", out textureTransferEnabled);
                         bool.TryParse(gk.GetValue("enableFuelConfigTransfer") ?? "true", out fuelConfigTransferEnabled);
+                        // Both default to *off* when absent: an install that never
+                        // asked for either must not be moved to hidden avatars, nor
+                        // to reading its process list, by installing an update.
+                        bool.TryParse(gk.GetValue("hidePlayerDetails") ?? "false", out hidePlayerDetails);
+                        bool.TryParse(gk.GetValue("enableStreamerMode") ?? "false", out streamerModeEnabled);
 
                         // Store host and port separately because ConfigNode
                         // treats // as a comment delimiter, mangling URLs.
@@ -285,7 +311,7 @@ namespace GeneKerman
                         // When the official server is selected, ignore the stored custom
                         // host/port (kept so toggling back to custom restores it).
                         serverUrl = useOfficialServer ? OfficialServerUrl : customServerUrl;
-                        Debug.Log($"[GeneKerman] Settings loaded — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
+                        Debug.Log($"[GeneKerman] Settings loaded, server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
                         return;
                     }
                 }
@@ -297,7 +323,7 @@ namespace GeneKerman
             notificationsEnabled = true;
             serverUrl = OfficialServerUrl;
             SaveSettings();
-            Debug.Log($"[GeneKerman] First setup — defaulting to official server: {serverUrl}");
+            Debug.Log($"[GeneKerman] First setup, defaulting to official server: {serverUrl}");
         }
 
         // ── Marketplace URL ─────────────────────────────────────────────────
@@ -345,7 +371,7 @@ namespace GeneKerman
             if (TryNormalizeMarketplaceUrl(legacy.Trim(), out migrated)) return migrated;
 
             Debug.LogWarning("[GeneKerman] settings.cfg has a truncated marketplaceUrl (\"" + legacy.Trim() +
-                             "\") — ConfigNode reads // as a comment. Using the default; " +
+                             "\"). ConfigNode reads // as a comment. Using the default; " +
                              "set marketplaceProtocol/marketplaceAddress to override.");
             return DefaultMarketplaceUrl;
         }
@@ -512,6 +538,26 @@ namespace GeneKerman
             SaveSettings();
         }
 
+        /// <summary>Hide (or show) other players' avatars and corp names in the player
+        /// lists, and persist the choice.</summary>
+        public void SetHidePlayerDetails(bool hidden)
+        {
+            hidePlayerDetails = hidden;
+            SaveSettings();
+        }
+
+        /// <summary>Turn streamer-mode auto-detection on or off and persist it.
+        /// Forgetting the last detection is part of the flip in both directions: off,
+        /// a stale "OBS is running" would go on hiding after the thing that decided it
+        /// has been switched off; on, it lets the first scan happen this frame rather
+        /// than up to a scan interval later.</summary>
+        public void SetStreamerModeEnabled(bool enabled)
+        {
+            streamerModeEnabled = enabled;
+            StreamerMode.Forget();
+            SaveSettings();
+        }
+
         /// <summary>Switch between the browser UI and the classic in-game windows, and persist it.</summary>
         public void SetWebUiEnabled(bool enabled)
         {
@@ -552,6 +598,8 @@ namespace GeneKerman
             gk.AddValue("enablePartSubstitution", partSubstitutionEnabled);
             gk.AddValue("enableTextureTransfer", textureTransferEnabled);
             gk.AddValue("enableFuelConfigTransfer", fuelConfigTransferEnabled);
+            gk.AddValue("hidePlayerDetails", hidePlayerDetails);
+            gk.AddValue("enableStreamerMode", streamerModeEnabled);
             gk.AddValue("serverProtocol", protocol);
             gk.AddValue("serverHost", host);
             gk.AddValue("serverPort", port);
@@ -573,7 +621,7 @@ namespace GeneKerman
             gk.AddValue("marketplaceProtocol", mktProtocol);
             gk.AddValue("marketplaceAddress", mktAddress);
             node.Save(settingsPath);
-            Debug.Log($"[GeneKerman] Settings saved — server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
+            Debug.Log($"[GeneKerman] Settings saved, server: {serverUrl} (official={useOfficialServer}, notifications={notificationsEnabled})");
         }
 
         // ── Token Management ────────────────────────────────────────────────
@@ -754,7 +802,7 @@ namespace GeneKerman
             // together, and IsLinked goes false on the first one, so this is what
             // keeps the unlink (and its popup) to one.
             if (!IsLinked) return true;
-            Debug.LogWarning("[GeneKerman] Session rejected by the server (401) — unlinking this PC.");
+            Debug.LogWarning("[GeneKerman] Session rejected by the server (401), unlinking this PC.");
             if (GeneKermanMod.Instance != null)
                 GeneKermanMod.Instance.OnSessionRevoked();
             else
@@ -1206,18 +1254,37 @@ namespace GeneKerman
             }
         }
 
-        /// Upload this device's diagnostics (MAC + KSP.log) for a moderation report
-        /// the user opened. Best-effort; failure just means the ticket stays partial.
+        /// Upload this device's diagnostics (KSP.log) for a moderation report the
+        /// account owner opened. Best-effort; failure just means the ticket stays
+        /// partial.
+        ///
+        /// No hardware identifier is collected: this used to send the MAC address
+        /// too, which was never stored or compared server-side (it only rendered
+        /// into the ticket embed) and was self-reported by the very client under
+        /// suspicion. The IP the server sees at the socket and the bound device id
+        /// are the forensics that survive a tampered client, and both are already
+        /// on the ticket before this upload happens.
+        ///
+        /// The note is always sent and is never the empty string, for a reason that
+        /// bit the old code: Unity's MultipartFormDataSection throws outright on a
+        /// zero-length value, so the previous `("mac", GetMacAddress() ?? "")` threw
+        /// on any machine with no readable NIC and lost the whole upload — log and
+        /// all. One always-populated field also guarantees the body is non-empty
+        /// when KSP.log can't be read, which UploadHandlerRaw likewise rejects.
         public IEnumerator UploadDeviceReport(string reportId, ApiCallback callback)
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/device/report/" + reportId;
+            byte[] logBytes = DeviceId.GetKspLog();
+            bool haveLog = logBytes != null && logBytes.Length > 0;
+            string note = haveLog
+                ? "KSP.log attached."
+                : "KSP.log could not be read on this device.";
             var form = new List<IMultipartFormSection>
             {
-                new MultipartFormDataSection("mac", DeviceId.GetMacAddress() ?? ""),
+                new MultipartFormDataSection("note", note),
             };
-            byte[] logBytes = DeviceId.GetKspLog();
-            if (logBytes != null && logBytes.Length > 0)
+            if (haveLog)
                 form.Add(new MultipartFormFileSection("ksp_log", logBytes, "KSP.log", "text/plain"));
 
             using (var req = UnityWebRequest.Post(url, form))
@@ -1571,7 +1638,10 @@ namespace GeneKerman
         public IEnumerator CreateRescueContract(
             string contractorId, string mission, int payment, int fine, string dueDate,
             string modlist, string body, string mode,
-            double ap, double pe, double lat, double lon,
+            // Nullable because absent is an answer: no Ap/Pe means any orbit of the body,
+            // no lat/lon means anywhere on it. A sentinel can't say that for lat/lon —
+            // every value in range is a real latitude, negatives included.
+            double? ap, double? pe, double? lat, double? lon,
             double marginAlt, double marginPos, bool isModded,
             string rescuePid, string kerbalsJson, string vesselNodeData,
             string lifeSupport, double lsEnduranceDays, int lsCrewCapacity,
@@ -1595,12 +1665,6 @@ namespace GeneKerman
                 new MultipartFormDataSection("due_date", dueDate ?? ""),
                 new MultipartFormDataSection("body", body ?? ""),
                 new MultipartFormDataSection("mode", mode ?? "orbit"),
-                new MultipartFormDataSection("ap", ap.ToString("G17", inv)),
-                new MultipartFormDataSection("pe", pe.ToString("G17", inv)),
-                new MultipartFormDataSection("lat", lat.ToString("G17", inv)),
-                new MultipartFormDataSection("lon", lon.ToString("G17", inv)),
-                new MultipartFormDataSection("margin_alt", marginAlt.ToString("G17", inv)),
-                new MultipartFormDataSection("margin_pos", marginPos.ToString("G17", inv)),
                 new MultipartFormDataSection("is_modded", isModded ? "true" : "false"),
                 new MultipartFormDataSection("kerbals", string.IsNullOrEmpty(kerbalsJson) ? "[]" : kerbalsJson),
                 // What has to come back: the crew alone, or the wreck with them. The
@@ -1609,6 +1673,21 @@ namespace GeneKerman
                 new MultipartFormDataSection("recovery", string.IsNullOrEmpty(recovery) ? "crew" : recovery),
                 new MultipartFormDataSection("min_dv", minDv.ToString("G17", inv)),
             };
+            // Left off entirely rather than sent as 0, so the server stores its own
+            // "no requirement" instead of a target the issuer never asked for. The
+            // margin goes with the pair it belongs to.
+            if (ap.HasValue && pe.HasValue)
+            {
+                form.Add(new MultipartFormDataSection("ap", ap.Value.ToString("G17", inv)));
+                form.Add(new MultipartFormDataSection("pe", pe.Value.ToString("G17", inv)));
+                form.Add(new MultipartFormDataSection("margin_alt", marginAlt.ToString("G17", inv)));
+            }
+            if (lat.HasValue && lon.HasValue)
+            {
+                form.Add(new MultipartFormDataSection("lat", lat.Value.ToString("G17", inv)));
+                form.Add(new MultipartFormDataSection("lon", lon.Value.ToString("G17", inv)));
+                form.Add(new MultipartFormDataSection("margin_pos", marginPos.ToString("G17", inv)));
+            }
             if (incl >= 0)
             {
                 form.Add(new MultipartFormDataSection("inc", incl.ToString("G17", inv)));
@@ -1827,7 +1906,7 @@ namespace GeneKerman
                 callback(ok, ok ? req.downloadHandler.data : null);
 
                 if (!ok)
-                    Debug.LogWarning($"[GeneKerman] Download failed ({req.responseCode}): {req.error} — url: {url}");
+                    Debug.LogWarning($"[GeneKerman] Download failed ({req.responseCode}): {req.error}, url: {url}");
             }
         }
 

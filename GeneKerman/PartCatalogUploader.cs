@@ -43,7 +43,7 @@ namespace GeneKerman
             // Skip the network round-trip if we already uploaded this exact catalog.
             if (ReadHash() == hash)
             {
-                Debug.Log("[GeneKerman] Part catalog unchanged (" + parts.Count + " parts) — upload skipped.");
+                Debug.Log("[GeneKerman] Part catalog unchanged (" + parts.Count + " parts), upload skipped.");
                 return;
             }
 

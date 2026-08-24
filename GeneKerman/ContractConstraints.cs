@@ -311,9 +311,9 @@ namespace GeneKerman
                     {
                         string mod = TraitMod(trait);
                         violations.Add(mod == null
-                            ? $"No mod installed here defines the '{trait}' profession — " +
+                            ? $"No mod installed here defines the '{trait}' profession; " +
                               "this contract was written on an install that has it."
-                            : $"No mod installed here defines the '{trait}' profession — it comes " +
+                            : $"No mod installed here defines the '{trait}' profession; it comes " +
                               $"from {mod}, which the contract's author has installed.");
                     }
                 }
@@ -382,7 +382,7 @@ namespace GeneKerman
                 if (s.Propellants.Contains(bad))
                     return $"Forbidden: '{s.Title}' is an engine powered by {bad}.";
                 if (includeCarried && s.Resources.Contains(bad))
-                    return $"Forbidden: '{s.Title}' carries {bad} — drain it or remove the part.";
+                    return $"Forbidden: '{s.Title}' carries {bad}; drain it or remove the part.";
             }
 
             foreach (var bad in ForbiddenEngineCategories)

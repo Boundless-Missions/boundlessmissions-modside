@@ -111,8 +111,9 @@ namespace GeneKerman
             }
         }
 
-        /// <summary>Record that the user agreed to the Privacy Policy + Terms and
-        /// expressly consented to data transmission. Persisted to consent.cfg.</summary>
+        /// <summary>Record that the user agreed to the Privacy Policy + Terms, expressly
+        /// consented to data transmission, and granted the promotional licence over the
+        /// crafts they share (Terms section 7). Persisted to consent.cfg.</summary>
         public static void Accept()
         {
             accepted = true;
@@ -127,6 +128,7 @@ namespace GeneKerman
                 gk.AddValue("privacyPolicy", true);
                 gk.AddValue("termsOfService", true);
                 gk.AddValue("dataTransmission", true);
+                gk.AddValue("promotionalUse", true);
                 gk.AddValue("version", requiredVersion);
                 gk.AddValue("acceptedUtc", DateTime.UtcNow.ToString("o"));
                 node.Save(ConsentPath);

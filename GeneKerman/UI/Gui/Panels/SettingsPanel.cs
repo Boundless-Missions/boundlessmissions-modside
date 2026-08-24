@@ -51,6 +51,9 @@ namespace GeneKerman.UI.Gui
         private bool lastNotifications;
         private bool lastPhotos;
         private bool lastWebUi;
+        private bool lastHideDetails;
+        private bool lastStreamerMode;
+        private string lastDetectedApp = "";
         private string lastServer = "";
 
         protected override void Rebuild()
@@ -77,6 +80,7 @@ namespace GeneKerman.UI.Gui
 
             BuildServerCard(body, mod, api);
             BuildInterfaceCard(body, mod, api);
+            BuildPrivacyCard(body, api);
             BuildBehaviourCard(body, mod, api);
             BuildAboutCard(body);
         }
@@ -190,6 +194,53 @@ namespace GeneKerman.UI.Gui
 
         }
 
+        // ── Privacy ─────────────────────────────────────────────────────────
+        //
+        // Its own card rather than a row in "In-game behaviour": these two are about
+        // what other people can see over your shoulder or on a stream, which is a
+        // different question from how the mod behaves in the game.
+
+        private void BuildPrivacyCard(El parent, ApiClient api)
+        {
+            var card = UIF.Card(parent, "Privacy").Column(Theme.Space1).Pad(Theme.Space3);
+            UIF.Label(card, "Privacy", Theme.FontSm).Bold();
+
+            UIF.Switch(card, "Hide profile pictures and corp names",
+                       "Player lists show display names only. Pictures are not just hidden but " +
+                       "never downloaded, so nothing on this PC asks Discord for them.",
+                       api.HidePlayerDetails,
+                       v => { api.SetHidePlayerDetails(v); MarkDirty(); });
+
+            UIF.Switch(card, "Streamer mode",
+                       "Turns the switch above on by itself while OBS, Streamlabs, XSplit or " +
+                       "similar is running. Checks the names of programs running on this PC " +
+                       "every few seconds and nothing else: no window titles, nothing sent " +
+                       "anywhere. While this is off, nothing is checked at all.",
+                       api.StreamerModeEnabled,
+                       v => { api.SetStreamerModeEnabled(v); MarkDirty(); });
+
+            if (!api.StreamerModeEnabled) return;
+
+            // What it currently sees. Without this the switch is a promise with no
+            // evidence — and "running" is genuinely all it knows: no OS says whether
+            // a window is being captured, so an open OBS you are not streaming with
+            // counts, and a capture card on another PC does not.
+            string app = StreamerMode.DetectedApp;
+            var strip = UIF.Box(card, "Detected").Column(1).Pad(Theme.Space2)
+                           .Bg(Theme.Alpha(Theme.Muted, 0.5f), Theme.RadiusSm, Theme.Border);
+            if (app != null)
+            {
+                UIF.Label(strip, app + " is running", Theme.FontXs, Theme.AccentForeground).Body();
+                UIF.Muted(strip, api.HidePlayerDetails
+                          ? "Details are hidden by the switch above anyway."
+                          : "Profile pictures and corp names are hidden while it is.").Body();
+            }
+            else
+            {
+                UIF.Muted(strip, "No broadcasting software running.", Theme.FontXs).Body();
+            }
+        }
+
         // ── In-game behaviour ───────────────────────────────────────────────
 
         private void BuildBehaviourCard(El parent, GeneKermanMod mod, ApiClient api)
@@ -241,7 +292,7 @@ namespace GeneKerman.UI.Gui
             UIF.Muted(block,
                 "The mod goes inert and this sidebar closes with it. Turning it back on is a " +
                 "consent decision, so it lives in the paused notice KSP shows in place of " +
-                "everything else — which also says what gets sent.").Body();
+                "everything else, which also says what gets sent.").Body();
 
             var confirm = UIF.Box(block, "ConfirmRow").Row(Theme.Space2).H(28);
             UIF.Button(confirm, "Turn off", () =>
@@ -289,6 +340,9 @@ namespace GeneKerman.UI.Gui
             lastNotifications = api.NotificationsEnabled;
             lastPhotos = api.CheckpointPhotosEnabled;
             lastWebUi = api.WebUiEnabled;
+            lastHideDetails = api.HidePlayerDetails;
+            lastStreamerMode = api.StreamerModeEnabled;
+            lastDetectedApp = StreamerMode.DetectedApp ?? "";
             lastServer = api.ServerUrl ?? "";
         }
 
@@ -305,6 +359,12 @@ namespace GeneKerman.UI.Gui
                 api.NotificationsEnabled != lastNotifications ||
                 api.CheckpointPhotosEnabled != lastPhotos ||
                 api.WebUiEnabled != lastWebUi ||
+                api.HidePlayerDetails != lastHideDetails ||
+                api.StreamerModeEnabled != lastStreamerMode ||
+                // Not a setting and not something the player did: OBS starting is a
+                // change this panel has to notice from the outside, same as a link
+                // completing.
+                (StreamerMode.DetectedApp ?? "") != lastDetectedApp ||
                 (api.ServerUrl ?? "") != lastServer)
             {
                 MarkDirty();

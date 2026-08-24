@@ -240,7 +240,7 @@ namespace GeneKerman
                 var editorList = KSP.UI.Screens.EditorPartList.Instance;
                 if (editorList == null || editorList.ExcludeFilters == null)
                 {
-                    Debug.LogWarning("[GeneKerman] EditorPartList not available — open the VAB/SPH to read the JC mod filter.");
+                    Debug.LogWarning("[GeneKerman] EditorPartList not available, open the VAB/SPH to read the JC mod filter.");
                     return null;
                 }
 
@@ -372,6 +372,16 @@ namespace GeneKerman
             public double ApKm = 100, PeKm = 100, MarginAltKm = MinMarginOrbitKm;
             public double Lat, Lon, MarginPosDeg = MinMarginSurfaceDeg;
 
+            // Whether that target is a requirement at all. Both default true, which is
+            // what every rescue issued before these existed asked for and what a caller
+            // that doesn't know about them still means. Off sends no Ap/Pe (or no
+            // lat/lon) at all, and the body plus the situation become the whole
+            // requirement: orbiting Kerbin anywhere, or landed on it anywhere. That is
+            // the "just bring them home" rescue, which previously had to be faked with
+            // a made-up target orbit and a huge margin.
+            public bool RequireAlt = true;
+            public bool RequirePos = true;
+
             // Orbit mode only. RequireIncl off (the default) means any plane, which is
             // what every rescue asked for before the field existed; OrbitTypes empty
             // means any regime. Both are dropped for a surface target.
@@ -407,7 +417,7 @@ namespace GeneKerman
             if (r.Kind == "auction" && r.Payment < MinAuctionStartValue)
             {
                 error = "An auction has to start at " + MinAuctionStartValue +
-                        " KCoins or more — nobody can undercut a lower opening price.";
+                        " KCoins or more; nobody can undercut a lower opening price.";
                 return false;
             }
             if (r.Fine < 0) r.Fine = 0;
@@ -436,8 +446,9 @@ namespace GeneKerman
 
                 if (r.RescueMode == "orbit")
                 {
-                    if (!Finite(r.ApKm) || !Finite(r.PeKm) || !Finite(r.MarginAltKm) ||
-                        r.ApKm < 0 || r.PeKm < 0)
+                    if (r.RequireAlt &&
+                        (!Finite(r.ApKm) || !Finite(r.PeKm) || !Finite(r.MarginAltKm) ||
+                         r.ApKm < 0 || r.PeKm < 0))
                     { error = "Enter a valid apoapsis and periapsis in km."; return false; }
 
                     if (r.RequireIncl)
@@ -462,12 +473,13 @@ namespace GeneKerman
                             if (types.IndexOf(other) > i)
                             {
                                 error = OrbitTypeLabel(types[i]) + " and " + OrbitTypeLabel(other) +
-                                        " contradict each other — no orbit can be both.";
+                                        " contradict each other; no orbit can be both.";
                                 return false;
                             }
                 }
-                else if (!Finite(r.Lat) || !Finite(r.Lon) || !Finite(r.MarginPosDeg) ||
-                         r.Lat < -90 || r.Lat > 90)
+                else if (r.RequirePos &&
+                         (!Finite(r.Lat) || !Finite(r.Lon) || !Finite(r.MarginPosDeg) ||
+                          r.Lat < -90 || r.Lat > 90))
                 {
                     error = "Latitude must be between -90 and 90.";
                     return false;
@@ -549,19 +561,28 @@ namespace GeneKerman
                 if (b.Name == r.RescueBody) { bodyExists = true; isModded = b.Modded; break; }
             if (!bodyExists) { onDone(false, "That body does not exist in this save."); yield break; }
 
-            double ap = 0, pe = 0, lat = 0, lon = 0, marginAlt = 0, marginPos = 0;
+            // Nullable, because absent is a meaning here and not a missing value: no
+            // Ap/Pe is "any orbit of the body", which a 0 could never say. The pair that
+            // belongs to the other mode is left off for the same reason — a surface
+            // target has no apoapsis, and storing 0 for one only invites something
+            // downstream to read it as a number the issuer chose.
+            double? ap = null, pe = null, lat = null, lon = null;
+            double marginAlt = 0, marginPos = 0;
             // A plane/regime requirement belongs to an orbit; a surface target has none,
             // so they are dropped here rather than sent for the server to ignore.
             double incl = -1, marginIncl = 0;
             string orbitTypes = "";
             if (r.RescueMode == "orbit")
             {
-                // The margin is a floor, not a validation error: too tight a tolerance
-                // makes the contract impossible rather than wrong.
-                double mk = r.MarginAltKm < MinMarginOrbitKm ? MinMarginOrbitKm : r.MarginAltKm;
-                ap = r.ApKm * 1000.0;
-                pe = r.PeKm * 1000.0;
-                marginAlt = mk * 1000.0;
+                if (r.RequireAlt)
+                {
+                    // The margin is a floor, not a validation error: too tight a tolerance
+                    // makes the contract impossible rather than wrong.
+                    double mk = r.MarginAltKm < MinMarginOrbitKm ? MinMarginOrbitKm : r.MarginAltKm;
+                    ap = r.ApKm * 1000.0;
+                    pe = r.PeKm * 1000.0;
+                    marginAlt = mk * 1000.0;
+                }
 
                 if (r.RequireIncl)
                 {
@@ -572,7 +593,7 @@ namespace GeneKerman
                 if (r.OrbitTypes != null && r.OrbitTypes.Count > 0)
                     orbitTypes = string.Join(",", r.OrbitTypes.ToArray());
             }
-            else
+            else if (r.RequirePos)
             {
                 lat = r.Lat;
                 lon = r.Lon;

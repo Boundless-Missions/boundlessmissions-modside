@@ -260,12 +260,12 @@ namespace GeneKerman
                     _fTargetMesh == null || _fTarget == null || _fDecalMpb == null)
                 {
                     Debug.LogWarning("[GeneKerman] ConformalDecals is installed but its internals "
-                        + "don't match what DecalCapture expects — blueprint decals disabled.");
+                        + "don't match what DecalCapture expects; blueprint decals disabled.");
                     _moduleType = null;
                     return;
                 }
 
-                Debug.Log("[GeneKerman] ConformalDecals detected — decals will be redrawn onto the capture layer.");
+                Debug.Log("[GeneKerman] ConformalDecals detected, decals will be redrawn onto the capture layer.");
             }
             catch (Exception ex)
             {

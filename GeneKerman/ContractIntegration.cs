@@ -126,14 +126,14 @@ namespace GeneKerman
                 if (psm == null)
                 {
                     Debug.LogWarning("[GeneKerman] GKContractScenario is missing from this save " +
-                                     "(KSPScenario injection didn't run) — installing it now.");
+                                     "(KSPScenario injection didn't run), installing it now.");
                     psm = game.AddProtoScenarioModule(typeof(GKContractScenario),
                         GameScenes.SPACECENTER, GameScenes.FLIGHT, GameScenes.TRACKSTATION);
                 }
                 if (psm != null && psm.moduleRef == null)
                 {
                     Debug.LogWarning("[GeneKerman] GKContractScenario not instantiated in this " +
-                                     "scene — loading it now.");
+                                     "scene, loading it now.");
                     psm.Load(ScenarioRunner.Instance);
                 }
             }

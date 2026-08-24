@@ -97,6 +97,16 @@ namespace GeneKerman.UI.Gui
         private string inclText = "0";
         private string marginInclText = Round(ContractCreation.DefaultMarginInclDeg);
         private readonly List<string> orbitTypes = new List<string>();
+        // Is there a target at all, or only a body to reach? On by default, so an issuer
+        // who never touches these switches sends exactly the contract this form sent
+        // before they existed. Off drops the numbers from the contract entirely — any
+        // orbit of the body, or anywhere on its surface — which is the "just bring them
+        // home" rescue that used to need an invented target orbit to express.
+        private bool requireAlt = true;
+        private bool requirePos = true;
+        // The regime selector, hidden until asked for. Unlike the two above, this one
+        // changes nothing when off: no regime picked has always meant any regime.
+        private bool requireOrbitType;
 
         private Action markDirty;
         private Func<Action<bool, string>> begin;
@@ -141,6 +151,9 @@ namespace GeneKerman.UI.Gui
             inclText = "0";
             marginInclText = Round(ContractCreation.DefaultMarginInclDeg);
             orbitTypes.Clear();
+            requireAlt = true;
+            requirePos = true;
+            requireOrbitType = false;
 
             picker.Reset();
             bodyPicker.Reset();
@@ -388,32 +401,55 @@ namespace GeneKerman.UI.Gui
             if (bodyPicker.SelectedIsModded)
                 UIF.Muted(parent, "Modded body: the rescuer is warned they need its planet pack.").Body();
 
+            string where = string.IsNullOrEmpty(bodyPicker.Selected) ? "the body" : bodyPicker.Selected;
+
             if (rescueMode == "orbit")
             {
-                Caption(parent, "APOAPSIS (KM)");
-                UIF.TextField(parent, apText, "100").OnChanged(s => apText = s);
-                Caption(parent, "PERIAPSIS (KM)");
-                UIF.TextField(parent, peText, "100").OnChanged(s => peText = s);
-                Caption(parent, "MARGIN (KM, MIN " + ContractCreation.MinMarginOrbitKm + ")");
-                UIF.TextField(parent, marginAltText, "10").OnChanged(s => marginAltText = s);
-                UIF.Muted(parent, "How far off each of Ap and Pe may be (±km) and still "
-                                  + "count as delivered. Bigger is easier for the rescuer.").Body();
+                // The switch is the requirement; the numbers under it are only how it is
+                // described. Off, they aren't sent at all, so there is nothing to read
+                // and nothing to show the rescuer — which is why they are hidden rather
+                // than greyed out.
+                UIF.Switch(parent, "Require a specific orbit",
+                           "Off, any orbit of " + where + " counts; the rescuer still has "
+                           + "to be in orbit there, just not at a particular altitude.",
+                           requireAlt, v => { requireAlt = v; markDirty?.Invoke(); });
+
+                if (requireAlt)
+                {
+                    Caption(parent, "APOAPSIS (KM)");
+                    UIF.TextField(parent, apText, "100").OnChanged(s => apText = s);
+                    Caption(parent, "PERIAPSIS (KM)");
+                    UIF.TextField(parent, peText, "100").OnChanged(s => peText = s);
+                    Caption(parent, "MARGIN (KM, MIN " + ContractCreation.MinMarginOrbitKm + ")");
+                    UIF.TextField(parent, marginAltText, "10").OnChanged(s => marginAltText = s);
+                    UIF.Muted(parent, "How far off each of Ap and Pe may be (±km) and still "
+                                      + "count as delivered. Bigger is easier for the rescuer.").Body();
+                }
+
                 BuildOrbitShape(parent);
             }
             else
             {
-                Caption(parent, "LATITUDE (°)");
-                UIF.TextField(parent, latText, "0").OnChanged(s => latText = s);
-                UIF.Muted(parent, "North–south position: 0° is the equator, +90° the "
-                                  + "north pole, −90° the south pole.").Body();
-                Caption(parent, "LONGITUDE (°)");
-                UIF.TextField(parent, lonText, "0").OnChanged(s => lonText = s);
-                UIF.Muted(parent, "East–west position, −180° to 180° around the body's "
-                                  + "prime meridian; east is positive.").Body();
-                Caption(parent, "MARGIN (°, MIN " + ContractCreation.MinMarginSurfaceDeg + ")");
-                UIF.TextField(parent, marginPosText, "1").OnChanged(s => marginPosText = s);
-                UIF.Muted(parent, "Radius around that spot that still counts, in degrees "
-                                  + "— 1° is about 10.5 km on Kerbin's surface.").Body();
+                UIF.Switch(parent, "Require a specific landing site",
+                           "Off, anywhere on " + where + " counts; the rescuer still has "
+                           + "to land or splash down there, just not on a particular spot.",
+                           requirePos, v => { requirePos = v; markDirty?.Invoke(); });
+
+                if (requirePos)
+                {
+                    Caption(parent, "LATITUDE (°)");
+                    UIF.TextField(parent, latText, "0").OnChanged(s => latText = s);
+                    UIF.Muted(parent, "North–south position: 0° is the equator, +90° the "
+                                      + "north pole, −90° the south pole.").Body();
+                    Caption(parent, "LONGITUDE (°)");
+                    UIF.TextField(parent, lonText, "0").OnChanged(s => lonText = s);
+                    UIF.Muted(parent, "East–west position, −180° to 180° around the body's "
+                                      + "prime meridian; east is positive.").Body();
+                    Caption(parent, "MARGIN (°, MIN " + ContractCreation.MinMarginSurfaceDeg + ")");
+                    UIF.TextField(parent, marginPosText, "1").OnChanged(s => marginPosText = s);
+                    UIF.Muted(parent, "Radius around that spot that still counts, in degrees; "
+                                      + "1° is about 10.5 km on Kerbin's surface.").Body();
+                }
             }
 
             Caption(parent, "Δv THEY MUST HAVE LEFT (M/S, 0 = ANY)");
@@ -441,12 +477,19 @@ namespace GeneKerman.UI.Gui
         /// has ever asked for, and a plane match switched on by default would silently
         /// turn every rescue issued here into a much more expensive job — matching a
         /// plane is the half of a rendezvous that costs delta-v.
+        ///
+        /// Either can be asked for on its own, including with the Ap/Pe requirement
+        /// switched off: "be in this plane, at any altitude" is a real rescue, and the
+        /// submission check reads the three independently.
         /// </summary>
         private void BuildOrbitShape(El parent)
         {
             UIF.Switch(parent, "Require an orbital plane",
-                       "Ap and Pe don't say which orbit this is. A plane match is what makes "
-                       + "this a real intercept rather than a matching altitude.",
+                       requireAlt
+                       ? "Ap and Pe don't say which orbit this is. A plane match is what makes "
+                         + "this a real intercept rather than a matching altitude."
+                       : "Which plane the rescuer has to be in, whatever altitude they pick. "
+                         + "Matching a plane is the half of a rendezvous that costs Δv.",
                        requireIncl, v => { requireIncl = v; markDirty?.Invoke(); });
 
             if (requireIncl)
@@ -462,7 +505,17 @@ namespace GeneKerman.UI.Gui
                     UIF.Muted(parent, $"You are in a {rescue.InclDeg:F1}° orbit right now.").Body();
             }
 
-            Caption(parent, "ORBIT TYPE (OPTIONAL)");
+            UIF.Switch(parent, "Require an orbit type",
+                       "Polar, equatorial, stationary… Named regimes the delivery orbit has "
+                       + "to be, checked against the rescuer's own orbit when they submit.",
+                       requireOrbitType, v => { requireOrbitType = v; markDirty?.Invoke(); });
+
+            // The picked regimes survive the switch being turned off — they are simply
+            // not sent (see BuildRequest), so toggling it twice doesn't throw the
+            // selection away.
+            if (!requireOrbitType) return;
+
+            Caption(parent, "ORBIT TYPE");
             var tokens = ContractCreation.OrbitTypeTokens;
             const int perRow = 3;
             for (int i = 0; i < tokens.Length; i += perRow)
@@ -492,9 +545,8 @@ namespace GeneKerman.UI.Gui
                     b.E.PrefW(0).Flex(1f);
                 }
             }
-            UIF.Muted(parent, "Checked against the rescuer's own orbit when they submit. "
-                              + "None selected = any orbit that meets the numbers above. "
-                              + "Picking one deselects anything it contradicts — no orbit "
+            UIF.Muted(parent, "None selected = any orbit that meets the requirements above. "
+                              + "Picking one deselects anything it contradicts; no orbit "
                               + "can be both polar and equatorial.").Body();
         }
 
@@ -594,10 +646,15 @@ namespace GeneKerman.UI.Gui
             req.Lat = ParseDouble(latText, 0);
             req.Lon = ParseDouble(lonText, 0);
             req.MarginPosDeg = ParseDouble(marginPosText, 0);
+            req.RequireAlt = requireAlt;
+            req.RequirePos = requirePos;
             req.RequireIncl = requireIncl;
             req.InclDeg = ParseDouble(inclText, 0);
             req.MarginInclDeg = ParseDouble(marginInclText, ContractCreation.DefaultMarginInclDeg);
-            req.OrbitTypes = new List<string>(orbitTypes);
+            // Gated rather than cleared, so the switch is a question about this contract
+            // and not a destructive edit of what the issuer already picked.
+            req.OrbitTypes = requireOrbitType
+                             ? new List<string>(orbitTypes) : new List<string>();
             return req;
         }
 

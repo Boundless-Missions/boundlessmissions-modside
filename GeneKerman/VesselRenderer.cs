@@ -68,7 +68,7 @@ namespace GeneKerman
                     }
                     catch { _deferredPresent = false; }
                     if (_deferredPresent == true)
-                        Debug.Log("[GeneKerman] Deferred detected — capture cameras will use the deferred rendering path.");
+                        Debug.Log("[GeneKerman] Deferred detected, capture cameras will use the deferred rendering path.");
                 }
                 return _deferredPresent.Value;
             }
@@ -456,13 +456,13 @@ namespace GeneKerman
                                               vesselName, partCount, mass, cost, isolationParts);
             if (path == null && DeferredPresent)
             {
-                Debug.LogWarning("[GeneKerman] Deferred-path capture drew nothing — retrying once on the forward path.");
+                Debug.LogWarning("[GeneKerman] Deferred-path capture drew nothing, retrying once on the forward path.");
                 path = RenderBlueprintPass(false, renderers, bounds, vesselRotation,
                                            vesselName, partCount, mass, cost, isolationParts);
             }
             if (path != null) return path;
 
-            Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels — falling back to a plain screenshot."
+            Debug.LogWarning("[GeneKerman] Blueprint capture produced no vessel pixels, falling back to a plain screenshot."
                 + (DeferredPresent ? " Deferred is installed and both rendering paths drew nothing." : ""));
             return VesselDataCollector.CaptureScreenshot();
         }
@@ -961,8 +961,8 @@ namespace GeneKerman
             if (usedRefs && candidates.Count > 0 && IsFramingCollapse(kept, candidates))
             {
                 Debug.LogWarning($"[GeneKerman] Blueprint: collider references rejected " +
-                                 $"{(kept.Count == 0 ? "every renderer" : "all but a fragment of the craft")} " +
-                                 "— falling back to fixed caps.");
+                                 $"{(kept.Count == 0 ? "every renderer" : "all but a fragment of the craft")}, " +
+                                 "falling back to fixed caps.");
                 usedRefs = false;
                 refs = new Dictionary<Part, Bounds>();
                 kept.Clear();
@@ -981,7 +981,7 @@ namespace GeneKerman
                 }
                 string refDesc = usedRefs
                     ? $"{refs.Count} of {parts.Count} part(s) gave a collider reference, margin {margin:F1} m"
-                    : "no collider reference — fixed caps";
+                    : "no collider reference, fixed caps";
                 Debug.LogWarning($"[GeneKerman] Blueprint: dropped {dropped.Count} renderer(s) whose " +
                                  $"bounds would poison the camera framing ({refDesc}): " +
                                  string.Join("; ", names.ToArray()) +

@@ -158,8 +158,8 @@ namespace GeneKerman
             {
                 mod.State?.PollCraftImports();
                 onDone(true, source == "gift_vessel"
-                    ? "Accepted — spawning it into your save."
-                    : "Accepted — installing to your Ships folder.");
+                    ? "Accepted. Spawning it into your save."
+                    : "Accepted. Installing to your Ships folder.");
             }
             else
             {
@@ -192,8 +192,8 @@ namespace GeneKerman
 
             if (ok) RemoveLocal(id);
             else Refresh();
-            onDone(ok, ok ? (vessel ? "Declined — it's on its way back to the sender."
-                                    : "Declined — the sender has been told.")
+            onDone(ok, ok ? (vessel ? "Declined. It's on its way back to the sender."
+                                    : "Declined. The sender has been told.")
                           : (msg ?? "Could not decline the offer."));
         }
 

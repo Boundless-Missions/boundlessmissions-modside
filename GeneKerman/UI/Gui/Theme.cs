@@ -182,7 +182,7 @@ namespace GeneKerman.UI.Gui
             }
             catch (System.Exception e)
             {
-                Debug.LogWarning("[GeneKerman] Sidebar: TMP font lookup failed — " + e.Message);
+                Debug.LogWarning("[GeneKerman] Sidebar: TMP font lookup failed, " + e.Message);
                 return null;
             }
 

@@ -400,7 +400,7 @@ namespace GeneKerman
                     if (RemoveModuleNode(partNode, TWEAKSCALE_MODULE)) stripped++;
                 }
                 if (stripped > 0)
-                    Debug.Log($"[GeneKerman] ScaleBridge: neutralized TweakScale on {stripped} rescaled part(s) — GeneKermanScale is authoritative.");
+                    Debug.Log($"[GeneKerman] ScaleBridge: neutralized TweakScale on {stripped} rescaled part(s), GeneKermanScale is authoritative.");
             }
             catch (Exception ex)
             {

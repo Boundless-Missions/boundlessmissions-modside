@@ -159,7 +159,7 @@ namespace GeneKerman.UI
             GUILayout.Space(10);
             GUILayout.Label(
                 "Missions, contracts, the marketplace and the website are unavailable until " +
-                "it ends. Nothing has been deleted — your balance, XP, contracts and listings " +
+                "it ends. Nothing has been deleted; your balance, XP, contracts and listings " +
                 "are waiting. Your Discord membership is unaffected.",
                 noteStyle);
 

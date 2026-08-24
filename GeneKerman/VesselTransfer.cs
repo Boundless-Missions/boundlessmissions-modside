@@ -114,6 +114,13 @@ namespace GeneKerman
                 // their TweakScale version. Reads the live parts here while they exist.
                 ScaleBridge.SnapshotIntoVesselNode(vessel, vesselNode);
 
+                // And where the ground was under it, if it is sitting on any. A landed
+                // craft's `alt` is an altitude above SEA level, so it only means anything
+                // against the terrain that produced it; the recipient's install cannot
+                // re-derive the sender's ground level, so it is carried. See
+                // SurfacePlacement.
+                SurfacePlacement.EmbedInNode(vesselNode, vessel);
+
                 Debug.Log($"[GeneKerman] Exported vessel '{vessel.vesselName}': " +
                           $"{vessel.parts.Count} parts, {crew.Count} crew" +
                           (crew.Count > 0 ? $" ({string.Join(", ", crew.ConvertAll(p => p.name).ToArray())})" : ""));
@@ -123,7 +130,7 @@ namespace GeneKerman
                 // send someone hunting through the transfer path for a lost kerbal.
                 if (vessel.loaded && vessel.GetCrewCount() != crew.Count)
                     Debug.LogWarning($"[GeneKerman] '{vessel.vesselName}': KSP's cached crew list says " +
-                                     $"{vessel.GetCrewCount()}, the parts say {crew.Count} — exporting the parts.");
+                                     $"{vessel.GetCrewCount()}, the parts say {crew.Count}; exporting the parts.");
                 return vesselNode;
             }
             catch (Exception ex)
@@ -197,7 +204,7 @@ namespace GeneKerman
                     // blueprint here — has none to carry. Say so: the recipient gets the
                     // vessel but nothing in their VAB/SPH, which otherwise looks like a bug.
                     Debug.Log($"[GeneKerman] EmbedCraftBlueprint: no .craft named '{v.vesselName}' "
-                              + "on this install — sending the vessel without a blueprint.");
+                              + "on this install; sending the vessel without a blueprint.");
                     return;
                 }
 
@@ -670,6 +677,14 @@ namespace GeneKerman
             // module so the receiver's TweakScale (if any) stays at 1× and our applicator
             // is the sole authority — making the scaled craft deterministic across versions.
             ScaleBridge.NeutralizeTweakScaleForImport(innerNode);
+
+            // Last, because it is about where the finished craft goes rather than what it
+            // is made of: read + strip the GKLAND block, point the vessel at the body its
+            // name says (an index into FlightGlobals.Bodies means a different world once a
+            // planet pack is installed), re-derive a landed altitude against THIS install's
+            // terrain, and arm KSP's own ground seating so the craft is put on the surface
+            // it finds rather than the one it left.
+            SurfacePlacement.ExtractAndReseat(innerNode, innerNode.GetValue("name"));
         }
 
         /// <summary>Register an inner VESSEL node into the running universe (after
@@ -729,7 +744,7 @@ namespace GeneKerman
                     "buildVesselsList", BindingFlags.Instance | BindingFlags.NonPublic);
                 if (build == null)
                 {
-                    Debug.LogWarning("[GeneKerman] Tracking Station refresh: buildVesselsList not found — KSP API may have changed.");
+                    Debug.LogWarning("[GeneKerman] Tracking Station refresh: buildVesselsList not found, KSP API may have changed.");
                     return;
                 }
 
@@ -743,6 +758,14 @@ namespace GeneKerman
         }
 
         // ── Rescue placement ─────────────────────────────────────────────────
+
+        /// <summary>Metres above the sampled ground a surface-target wreck is written in
+        /// at. Deliberately a clearance and not a landing: the sample is the PQS
+        /// heightmap, the craft comes to rest on a collider, and the two differ wherever
+        /// terrain is tessellated — so the number only has to be small enough not to be a
+        /// fall and large enough for KSP's ground seating to raycast down onto the real
+        /// surface.</summary>
+        private const double SPAWN_CLEARANCE = 5.0;
 
         /// <summary>
         /// Rewrite a vessel node's ORBIT + situation so the wreck spawns at the
@@ -759,7 +782,7 @@ namespace GeneKerman
             }
             if (body == null)
             {
-                Debug.LogWarning($"[GeneKerman] PlaceAtTarget: body '{target.body}' not found — leaving original orbit.");
+                Debug.LogWarning($"[GeneKerman] PlaceAtTarget: body '{target.body}' not found, leaving original orbit.");
                 return;
             }
 
@@ -775,8 +798,11 @@ namespace GeneKerman
                 double lat = target.lat;
                 double lon = target.lon;
                 double terrain = 0.0;
-                try { terrain = body.TerrainAltitude(lat, lon); } catch { }
-                double alt = Math.Max(terrain, 0.0) + 2.0; // small offset above ground
+                // allowNegative: the ground really is below sea level in places (a basin
+                // floor on Duna, any dry sea bed), and the clamped overload reports those
+                // as 0 — which would drop the wreck in from however far up that is.
+                try { terrain = body.TerrainAltitude(lat, lon, true); } catch { }
+                double alt = terrain + SPAWN_CLEARANCE;
 
                 innerNode.SetValue("sit", "LANDED", true);
                 innerNode.SetValue("landed", "True", true);
@@ -785,7 +811,13 @@ namespace GeneKerman
                 innerNode.SetValue("lat", lat.ToString("G17"), true);
                 innerNode.SetValue("lon", lon.ToString("G17"), true);
                 innerNode.SetValue("alt", alt.ToString("G17"), true);
-                innerNode.SetValue("hgt", "1.0", true);
+                innerNode.SetValue("hgt", SPAWN_CLEARANCE.ToString("G9"), true);
+
+                // The clearance above only has to be enough for KSP's own seating to find
+                // the ground and drop the wreck onto it — the terrain sample is the PQS
+                // heightmap, and the collider a craft actually rests on can be metres off
+                // it wherever a terrain mod tessellates or scatters. See SurfacePlacement.
+                SurfacePlacement.ForceGroundReseat(innerNode);
 
                 // A landed vessel still needs a valid (surface-synchronous) orbit so
                 // the body reference resolves without NaNs.
@@ -808,6 +840,9 @@ namespace GeneKerman
                 innerNode.SetValue("landed", "False", true);
                 innerNode.SetValue("splashed", "False", true);
                 innerNode.SetValue("landedAt", "", true);
+                // The snapshot may have arrived landed (and so armed for ground seating by
+                // SurfacePlacement); it is going into orbit instead.
+                SurfacePlacement.ClearGroundReseat(innerNode);
 
                 WriteOrbit(orbit, refIdx, sma, ecc, 0.0, 0.0, 0.0, 0.0, now);
                 Debug.Log($"[GeneKerman] PlaceAtTarget: orbit {body.bodyName} ap={ap:F0} pe={pe:F0} sma={sma:F0} ecc={ecc:F4}");
@@ -963,13 +998,13 @@ namespace GeneKerman
                 // Not in this save — either already removed or it belongs to a different
                 // save. Either way there's nothing to remove, so this is terminal: the
                 // caller must stop retrying (otherwise it spins once per frame forever).
-                Debug.Log($"[GeneKerman] RemoveVessel: no vessel with pid {pid} in this save — already gone.");
+                Debug.Log($"[GeneKerman] RemoveVessel: no vessel with pid {pid} in this save, already gone.");
                 return RemovalResult.NotFound;
             }
 
             if (HighLogic.LoadedSceneIsFlight && FlightGlobals.ActiveVessel == target)
             {
-                Debug.LogWarning("[GeneKerman] RemoveVessel: target is the active vessel — defer to a non-flight scene.");
+                Debug.LogWarning("[GeneKerman] RemoveVessel: target is the active vessel, defer to a non-flight scene.");
                 return RemovalResult.Deferred;
             }
 
@@ -1029,7 +1064,7 @@ namespace GeneKerman
                     }
                 }
                 if (kept.Count > 0 || dropped.Count > 0)
-                    Debug.Log($"[GeneKerman] RemoveVessel: crew fate {crewFate} — " +
+                    Debug.Log($"[GeneKerman] RemoveVessel: crew fate {crewFate}, " +
                               $"kept [{string.Join(", ", kept.ToArray())}], " +
                               $"dropped [{string.Join(", ", dropped.ToArray())}].");
 
@@ -1100,7 +1135,7 @@ namespace GeneKerman
                             // player; wait for a pass where they're aboard something or
                             // out of range.
                             Debug.LogWarning($"[GeneKerman] RemoveContractCrew: {name} is on EVA " +
-                                             "nearby — deferring until they board or leave range.");
+                                             "nearby, deferring until they board or leave range.");
                             allSettled = false;
                             continue;
                         }
@@ -1492,7 +1527,7 @@ namespace GeneKerman
             {
                 // Leave whatever GetNewKerbal generated — a real local profession.
                 Debug.LogWarning($"[GeneKerman] Crew import: '{trait}' is not a profession this " +
-                                 $"install defines — {pcm.name} keeps {pcm.trait} instead. " +
+                                 $"install defines; {pcm.name} keeps {pcm.trait} instead. " +
                                  "(Install the mod that adds it to get the original back.)");
                 if (traitDowngrades != null)
                     traitDowngrades.Add(new TraitRepair.Downgrade
@@ -1544,7 +1579,7 @@ namespace GeneKerman
 
             string title = "Crew arrived without their profession";
             string body = sb.ToString();
-            Debug.LogWarning($"[GeneKerman] {title} — {body}");
+            Debug.LogWarning($"[GeneKerman] {title}: {body}");
 
             var gk = GeneKermanMod.Instance;
             if (gk != null)
@@ -1645,6 +1680,15 @@ namespace GeneKerman
         public double marginAlt;
         public double marginPos;
 
+        // Whether there is a target at all, or only a body to be at. Absent Ap/Pe means
+        // any orbit of the body; absent lat/lon means anywhere on its surface. Both
+        // default true: every rescue issued before the issuer could switch them off
+        // carried a real target, and a spec built in code rather than parsed means the
+        // same. The situation is required either way — an "any orbit" rescue still has
+        // to be delivered in orbit.
+        public bool hasAlt = true;
+        public bool hasPos = true;
+
         public string recovery = "crew";    // "crew" | "vessel"
         public double minDv;                // m/s, 0 = no requirement
 
@@ -1693,6 +1737,11 @@ namespace GeneKerman
                 pe = MiniJSON.GetDouble(d, "pe", 0),
                 lat = MiniJSON.GetDouble(d, "lat", 0),
                 lon = MiniJSON.GetDouble(d, "lon", 0),
+                // Presence, not value: a null Ap is "any orbit", which an Ap of 0 is
+                // not. Both halves of a pair have to be there — half a coordinate is
+                // not a place — and an old contract always carries both.
+                hasAlt = MiniJSON.Has(d, "ap") && MiniJSON.Has(d, "pe"),
+                hasPos = MiniJSON.Has(d, "lat") && MiniJSON.Has(d, "lon"),
                 marginAlt = MiniJSON.GetDouble(d, "margin_alt", 0),
                 marginPos = MiniJSON.GetDouble(d, "margin_pos", 0),
                 // Absent on every rescue issued before the two modes existed, which were

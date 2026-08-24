@@ -200,7 +200,7 @@ echo "  → Stamped GeneKerman.version ($MOD_VERSION)"
 # Skipped (not fatal) when node_modules is absent, so the C# build still works on a
 # machine without Node — but then WebUI/ is whatever was last built, and a stale
 # bundle is exactly what the manifest check exists to catch.
-WEBUI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/WebUI"
+WEBUI_DIR="$SCRIPT_DIR/WebUI"
 echo ""
 if [ -d "$WEBUI_DIR/node_modules" ]; then
     echo "▶ Building browser UI..."

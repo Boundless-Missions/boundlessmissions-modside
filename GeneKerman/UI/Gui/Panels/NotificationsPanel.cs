@@ -194,17 +194,17 @@ namespace GeneKerman.UI.Gui
             UIF.Label(titleRow, name, Theme.FontSm).Bold();
 
             UIF.Label(card, from + " sent you " + (vessel
-                          ? "a live vessel — it left their save to come here. Accepting " +
+                          ? "a live vessel; it left their save to come here. Accepting " +
                             "spawns it into yours; declining sends it back to them."
                           : "a craft blueprint. Accepting saves it to your Ships folder."),
                       Theme.FontSm, Theme.MutedForeground).Body();
 
             if (vessel && HighLogic.LoadedScene == GameScenes.EDITOR)
-                UIF.Muted(card, "A live vessel can't spawn in the editor — accepting here " +
-                                "delivers it on your next Space Center visit.", Theme.FontXs);
+                UIF.Muted(card, "A live vessel can't spawn in the editor; accepting here " +
+                                "delivers it on your next Space Center visit.", Theme.FontXs).Body();
 
             if (string.IsNullOrEmpty(bpUrl))
-                UIF.Muted(card, "No blueprint preview came with this one.", Theme.FontXs);
+                UIF.Muted(card, "No blueprint preview came with this one.", Theme.FontXs).Body();
 
             var row = UIF.Box(card, "Actions").Row(Theme.Space2).H(24);
 

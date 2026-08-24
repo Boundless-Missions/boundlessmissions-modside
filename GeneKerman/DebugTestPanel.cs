@@ -48,7 +48,7 @@ namespace GeneKerman
         private class Row
         {
             public readonly string Name;
-            public string Status = "—";
+            public string Status = "-";
             public string Detail = "";
             public Row(string name) { Name = name; }
         }
@@ -79,7 +79,7 @@ namespace GeneKerman
         {
             if (!_open) return;
             _win = GUILayout.Window(GetInstanceID(), _win, DrawWindow,
-                "GeneKerman — Security Self-Test  [DEBUG BUILD]");
+                "GeneKerman - Security Self-Test  [DEBUG BUILD]");
         }
 
         // ── UI ────────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ namespace GeneKerman
             var sb = new StringBuilder();
             sb.AppendLine("GeneKerman security self-test");
             foreach (var r in _rows)
-                sb.AppendLine($"[{r.Status,-4}] {r.Name}  —  {r.Detail}");
+                sb.AppendLine($"[{r.Status,-4}] {r.Name}  -  {r.Detail}");
             return sb.ToString();
         }
 

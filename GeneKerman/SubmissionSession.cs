@@ -374,7 +374,7 @@ namespace GeneKerman
                     VesselValid = false;
                     issues.Add($"Must be landed at {rescueTarget.body} (currently {ActiveVessel.situation}).");
                 }
-                else
+                else if (rescueTarget.hasPos)
                 {
                     double dLat = Math.Abs(ActiveVessel.latitude - rescueTarget.lat);
                     double dLon = Math.Abs(ActiveVessel.longitude - rescueTarget.lon);
@@ -397,15 +397,22 @@ namespace GeneKerman
                 }
                 else
                 {
-                    double margin = Math.Max(rescueTarget.marginAlt, 1.0); // metres
-                    double dAp = Math.Abs(ActiveVessel.apoapsis - rescueTarget.ap);
-                    double dPe = Math.Abs(ActiveVessel.periapsis - rescueTarget.pe);
-                    if (dAp > margin || dPe > margin)
+                    // Only when the issuer asked for a particular orbit. Without one the
+                    // requirement is the body and the situation above — any orbit of it
+                    // counts — while the plane and regime below are still checked, since
+                    // those can be asked for on their own.
+                    if (rescueTarget.hasAlt)
                     {
-                        VesselValid = false;
-                        issues.Add($"Orbit off target: Ap {ActiveVessel.apoapsis / 1000:F0}km / " +
-                                   $"Pe {ActiveVessel.periapsis / 1000:F0}km, need " +
-                                   $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
+                        double margin = Math.Max(rescueTarget.marginAlt, 1.0); // metres
+                        double dAp = Math.Abs(ActiveVessel.apoapsis - rescueTarget.ap);
+                        double dPe = Math.Abs(ActiveVessel.periapsis - rescueTarget.pe);
+                        if (dAp > margin || dPe > margin)
+                        {
+                            VesselValid = false;
+                            issues.Add($"Orbit off target: Ap {ActiveVessel.apoapsis / 1000:F0}km / " +
+                                       $"Pe {ActiveVessel.periapsis / 1000:F0}km, need " +
+                                       $"Ap {rescueTarget.ap / 1000:F0}km / Pe {rescueTarget.pe / 1000:F0}km (±{margin / 1000:F0}km).");
+                        }
                     }
 
                     // Plane and regime, when the issuer asked for them. Ap/Pe are the
@@ -910,7 +917,7 @@ namespace GeneKerman
             // an old cached answer helps nobody.
             if (MissionType != "craft_build" && SimulationDetection.SimulationActive(out string simTool))
             {
-                Fail($"This flight is a {simTool} simulation.\nSimulated launches can't be submitted — fly the mission for real.");
+                Fail($"This flight is a {simTool} simulation.\nSimulated launches can't be submitted; fly the mission for real.");
                 yield break;
             }
 

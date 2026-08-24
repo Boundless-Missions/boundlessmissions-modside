@@ -97,7 +97,7 @@ namespace GeneKerman
                 if (needs.Count > 0)
                 {
                     _needs = needs;
-                    Debug.Log($"[GeneKerman] Kerbalism: profile needs/kerbal/day — " +
+                    Debug.Log($"[GeneKerman] Kerbalism: profile needs/kerbal/day, " +
                               $"{string.Join(", ", needs.Select(kvp => $"{kvp.Key} {kvp.Value:F3}"))}.");
                     return _needs;
                 }

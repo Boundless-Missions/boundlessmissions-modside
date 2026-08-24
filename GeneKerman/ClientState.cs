@@ -190,6 +190,11 @@ namespace GeneKerman
         internal void RequestDisputeResponse(string contractId, string kind, bool approve, Action<bool, string> onDone)
             => GeneKermanMod.Instance.RunCoroutine(DoDisputeResponse(contractId, kind, approve, onDone));
 
+        /// <summary>Report the counterparty of a contract. Not a state transition — the
+        /// contract is untouched and only a moderation ticket is opened.</summary>
+        internal void RequestReportContract(string contractId, string reason, Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoReportContract(contractId, reason, onDone));
+
         internal void RequestDownloadCraft(string contractId, string ownerName, Action<bool, string> onDone)
             => GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(contractId, ownerName, onDone));
 
@@ -645,7 +650,7 @@ namespace GeneKerman
             if (GKContractScenario.Instance == null)
             {
                 SetStatus("(No) This save's contract records aren't available.");
-                onDone?.Invoke(false, "Couldn't prepare this save's contract records — " +
+                onDone?.Invoke(false, "Couldn't prepare this save's contract records; " +
                                       "visit the Space Center once and try again.");
                 yield break;
             }
@@ -834,6 +839,70 @@ namespace GeneKerman
             });
         }
 
+        /// <summary>
+        /// Report the other party of a contract to the moderators — the marketplace's
+        /// report system pointed at a person rather than a craft.
+        ///
+        /// Deliberately does not refresh the list: a report changes nothing about the
+        /// contract, and re-reading it afterwards would make the row flicker for no
+        /// visible reason. It is also the one contract call whose refusals arrive as
+        /// HTTP failures rather than as 200 + success:false — "you have already
+        /// reported this", "that contract was issued by the bot" — so the server's own
+        /// sentence is dug out of `detail` and shown, since a bare "failed" would send
+        /// the player back to press the same button again.
+        /// </summary>
+        private System.Collections.IEnumerator DoReportContract(string contractId, string reason,
+                                                                Action<bool, string> onDone = null)
+        {
+            var body = new Dictionary<string, object> { { "reason", reason ?? "" } };
+            yield return GeneKermanMod.Instance.Api.Post(
+                $"/api/v1/contracts/{contractId}/report", MiniJSON.Serialize(body),
+                (ok, resp, status) =>
+                {
+                    var d = MiniJSON.DeserializeDict(resp);
+                    bool success = ok && d != null && MiniJSON.GetBool(d, "success", false);
+                    if (success)
+                    {
+                        string msg = MiniJSON.GetString(d, "message", "");
+                        if (string.IsNullOrEmpty(msg))
+                            msg = "Reported. A moderator will pick it up in Discord.";
+                        SetStatus("🚩 " + msg);
+                        onDone?.Invoke(true, msg);
+                    }
+                    else
+                    {
+                        string err = ReportRefusal(status, d);
+                        SetStatus("(No) " + err);
+                        onDone?.Invoke(false, err);
+                    }
+                });
+        }
+
+        /// <summary>
+        /// Why a report did not land, in words the player can act on.
+        ///
+        /// FastAPI puts a deliberate refusal in `detail` as a string; a validation
+        /// failure puts a list of objects there instead, which would ToString() as a
+        /// type name — so anything that is not a string is dropped and the status
+        /// carries the number a maintainer needs instead.
+        /// </summary>
+        private static string ReportRefusal(long status, Dictionary<string, object> body)
+        {
+            if (status == 0)
+                return "Couldn't reach the server; check you're online and try again.";
+
+            string detail = null;
+            object v;
+            if (body != null && body.TryGetValue("detail", out v) && v is string)
+                detail = (string)v;
+            if (string.IsNullOrEmpty(detail) && body != null)
+                detail = MiniJSON.GetString(body, "message", null);
+
+            return string.IsNullOrEmpty(detail)
+                ? "The server refused the report (HTTP " + status + ")."
+                : detail;
+        }
+
         private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "", Action<bool, string> onDone = null)
         {
             SetStatus("[+] Fetching craft info...");
@@ -956,8 +1025,8 @@ namespace GeneKerman
                         GeneKermanMod.Instance.CancelQueuedRemoval(returnPid);
                         GeneKermanMod.Instance.ShowNotification("📪 Vessel Returned",
                             source == "rescue_delivery"
-                                ? $"The rescue was cancelled and {craftName} hadn't left yet — it stays right where it is."
-                                : $"{craftName} was declined and hadn't left yet — it stays right where it is.");
+                                ? $"The rescue was cancelled and {craftName} hadn't left yet; it stays right where it is."
+                                : $"{craftName} was declined and hadn't left yet; it stays right where it is.");
                         yield return GeneKermanMod.Instance.Api.Post(
                             $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
                         processingImports.Remove(importId);

@@ -2,21 +2,20 @@
  * DeviceId.cs – Per-install device identity + report diagnostics.
  *
  * The device id is a random GUID written ONCE to PluginData/device.id and never
- * refreshed, so it's stable for the lifetime of the install (immune to MAC
- * rotation) and carries no personal data. It's sent on every request as the
+ * refreshed, so it's stable for the lifetime of the install (it survives a NIC
+ * swap or a re-imaged network stack) and carries no personal data. It's sent on every request as the
  * X-Device-Id header; the server binds it to the account at link time and blocks
  * any other id until the user approves it from Discord.
  *
- * The real MAC address is read only when the user files a moderation report
- * (GetMacAddress), never for the binding itself. KSP.log is read for that same
- * report (GetKspLog) and for a bug report the player writes themselves
- * (GetKspLogCapped) — both user-initiated, neither collected in the background.
+ * No hardware property is read here at all — not the MAC address, not a serial.
+ * The only other thing this file touches is KSP.log, and only for a report the
+ * player or the account owner files: a device report (GetKspLog) or a bug report
+ * the player writes themselves (GetKspLogCapped). Neither is collected in the
+ * background, and nothing here runs without a user action behind it.
  */
 
 using System;
 using System.IO;
-using System.Linq;
-using System.Net.NetworkInformation;
 using System.Text;
 using UnityEngine;
 
@@ -56,29 +55,6 @@ namespace GeneKerman
                     _current = _current ?? Guid.NewGuid().ToString("N");
                 }
                 return _current;
-            }
-        }
-
-        /// <summary>Best-effort physical MAC of the primary active interface, for a
-        /// moderation report only. Returns "" if none can be determined.</summary>
-        public static string GetMacAddress()
-        {
-            try
-            {
-                var nic = NetworkInterface.GetAllNetworkInterfaces()
-                    .Where(n => n.OperationalStatus == OperationalStatus.Up
-                                && n.NetworkInterfaceType != NetworkInterfaceType.Loopback
-                                && n.NetworkInterfaceType != NetworkInterfaceType.Tunnel)
-                    .OrderBy(n => n.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 ? 1 : 0)
-                    .FirstOrDefault();
-                if (nic == null) return "";
-                byte[] mac = nic.GetPhysicalAddress().GetAddressBytes();
-                return mac.Length == 0 ? "" : string.Join(":", mac.Select(b => b.ToString("X2")).ToArray());
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning("[GeneKerman] Could not read MAC: " + e.Message);
-                return "";
             }
         }
 

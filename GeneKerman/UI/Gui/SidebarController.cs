@@ -234,7 +234,7 @@ namespace GeneKerman.UI.Gui
         {
             if (EventSystem.current != null) return;
 
-            Debug.LogWarning("[GeneKerman] No EventSystem found — creating one for the sidebar.");
+            Debug.LogWarning("[GeneKerman] No EventSystem found, creating one for the sidebar.");
             var go = new GameObject("GK_EventSystem");
             Object.DontDestroyOnLoad(go);
             go.AddComponent<EventSystem>();

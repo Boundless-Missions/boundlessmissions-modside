@@ -313,7 +313,7 @@ namespace GeneKerman
                 }
                 sb.Append("}\n");
 
-                Debug.Log($"[GeneKerman] TextureTransfer: embedded paint job — " +
+                Debug.Log($"[GeneKerman] TextureTransfer: embedded paint job, " +
                           $"{refs.Count} module(s), {manifest.Sets.Count} texture set(s).");
                 return Encoding.UTF8.GetBytes(sb.ToString());
             }
@@ -353,7 +353,7 @@ namespace GeneKerman
                     sn.AddValue("name", kv.Key);
                     sn.AddValue("folder", kv.Value ?? "");
                 }
-                Debug.Log($"[GeneKerman] TextureTransfer: embedded paint job into vessel node — " +
+                Debug.Log($"[GeneKerman] TextureTransfer: embedded paint job into vessel node, " +
                           $"{refs.Count} module(s), {manifest.Sets.Count} texture set(s).");
             }
             catch (Exception ex)
@@ -829,7 +829,7 @@ namespace GeneKerman
                 {
                     title = $"'{context}' loads in stock colours";
                     body = "It was painted with Textures Unlimited, which you don't have. "
-                         + "The craft itself is fine — every part is there and it will fly "
+                         + "The craft itself is fine; every part is there and it will fly "
                          + "exactly as built; only the custom paint is gone." + packs;
                 }
                 else
@@ -841,7 +841,7 @@ namespace GeneKerman
                 }
 
                 GeneKermanMod mod = GeneKermanMod.Instance;
-                Debug.LogWarning($"[GeneKerman] {title} — {body}");
+                Debug.LogWarning($"[GeneKerman] {title}: {body}");
                 if (mod != null)
                 {
                     try { mod.ShowNotification(title, body); }

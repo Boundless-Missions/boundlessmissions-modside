@@ -125,7 +125,7 @@ namespace GeneKerman.UI.Gui
                 UIF.Muted(card, "This hands the vessel over: it and its crew leave your " +
                                 "save once sent (the ship you're flying goes when you " +
                                 "leave it). If your friend declines, it comes back.",
-                          Theme.FontXs);
+                          Theme.FontXs).Body();
             }
             else if (kind == "craft")
             {
@@ -182,7 +182,7 @@ namespace GeneKerman.UI.Gui
                 "A mod that added their profession is no longer installed. KSP throws while " +
                 "drawing any crew list they appear in, so the Astronaut Complex and crew " +
                 "assignment stay broken until this is dealt with. Fixing gives them a local " +
-                "profession and remembers the original — reinstall the mod and they get it back.")
+                "profession and remembers the original; reinstall the mod and they get it back.")
                .Body();
 
             UIF.Button(card, "Fix professions", () =>

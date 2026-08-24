@@ -157,6 +157,12 @@ KSP Mod Side/
 │   ├── bin/                          # Build output (GeneKerman.dll)
 │   └── obj/                          # Intermediate build files
 │
+├── WebUI/                            # Browser-UI source (React + Vite)
+│   ├── vite.config.ts                # Builds into GameData/…/WebUI/; stamps the
+│   │                                 #   manifest and THIRD-PARTY-NOTICES.txt
+│   ├── src/                          # Screens and components (the .tsx sources)
+│   └── package.json                  # Runtime deps: React, lucide, clsx, cva, …
+│
 └── GameData/BoundlessMissions/       # Deployable mod folder (copied into KSP)
     ├── GeneKerman.version            # AVC version file (KSP 1.12.x)
     ├── Patches/
@@ -165,6 +171,7 @@ KSP Mod Side/
     ├── PluginData/                   # Runtime data (see Configuration)
     ├── Textures/                     # Toolbar icons, UI icons
     └── WebUI/                        # Built browser-UI bundle served by Web/
+                                      #   (+ THIRD-PARTY-NOTICES.txt, generated)
 ```
 
 A second GameData folder, `GameData/GeneKerman/Flags/`, is created at runtime by
@@ -254,7 +261,7 @@ relative weight, not as a contract.
 
 | File | Lines | Role |
 |------|------:|------|
-| `DeviceId.cs` | 196 | Stable per-install GUID, MAC address for reports, capped `KSP.log` reader for bug reports |
+| `DeviceId.cs` | 172 | Stable per-install GUID (no hardware data read), capped `KSP.log` reader for reports |
 | `ModVersion.cs` | 93 | DLL SHA-256 hash, challenge-response attestation |
 | `PartCatalogUploader.cs` | 92 | Uploads the installed part list, FNV-1a hash gate |
 | `PhysicsRangeManager.cs` | 216 | Temporarily disables Physics Range Extender during submissions |
@@ -1369,12 +1376,12 @@ A random GUID generated once and persisted to `PluginData/device.id`. It is:
 
 - Sent on every API request as `X-Device-Id`
 - Bound to the account at link time by the server
-- Immune to MAC rotation (not derived from hardware)
+- Not derived from hardware, so a NIC swap or re-image does not change it
 - Not personal data (random, per-install)
 
 The server blocks unrecognized device IDs until the user approves them from
-Discord. `GetMacAddress()` and `GetKspLog()` are only used when the player
-files a moderation report.
+Discord. `GetKspLog()` is only used when the player files a moderation report;
+no hardware identifier is read at any point.
 
 ### Version Integrity — `ModVersion`
 

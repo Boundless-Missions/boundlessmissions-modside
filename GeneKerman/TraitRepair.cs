@@ -146,7 +146,7 @@ namespace GeneKerman
         {
             var broken = BrokenCrew();
             if (broken.Count == 0)
-                return "Nothing to repair — every kerbal's profession resolves on this install.";
+                return "Nothing to repair; every kerbal's profession resolves on this install.";
 
             var records = Load();
             var done = new List<string>();
@@ -189,7 +189,7 @@ namespace GeneKerman
                 sb.Append($"Repaired {done.Count} kerbal(s): ")
                   .Append(string.Join("; ", done.ToArray()))
                   .Append(". Crew screens work again. Their original professions are ")
-                  .Append("remembered — install the mod that defines them and they are ")
+                  .Append("remembered; install the mod that defines them and they are ")
                   .Append("restored automatically.");
             }
             if (failed.Count > 0)
@@ -197,7 +197,7 @@ namespace GeneKerman
                 if (sb.Length > 0) sb.Append(" ");
                 sb.Append($"Could not repair {failed.Count}: ")
                   .Append(string.Join(", ", failed.ToArray()))
-                  .Append(" — this install defines no profession to put them in.");
+                  .Append("; this install defines no profession to put them in.");
             }
             string msg = sb.ToString();
             Debug.Log($"[GeneKerman] TraitRepair: {msg}");
@@ -346,7 +346,7 @@ namespace GeneKerman
         {
             if (HighLogic.LoadedSceneIsFlight)
             {
-                Debug.Log("[GeneKerman] TraitRepair: in flight — leaving the roster change " +
+                Debug.Log("[GeneKerman] TraitRepair: in flight, leaving the roster change " +
                           "for KSP's next save.");
                 return;
             }

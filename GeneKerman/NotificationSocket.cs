@@ -412,7 +412,7 @@ namespace GeneKerman
             if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
                 return true;
             Debug.LogWarning("[GeneKerman] Notification socket: refusing server " +
-                "certificate (" + sslPolicyErrors + ") — falling back to HTTP polling. " +
+                "certificate (" + sslPolicyErrors + "), falling back to HTTP polling. " +
                 "This is expected on a MITM'd or misconfigured connection.");
             return false;
         }

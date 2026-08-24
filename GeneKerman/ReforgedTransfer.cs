@@ -509,7 +509,7 @@ namespace GeneKerman
                         Debug.Log($"[GeneKerman] ReforgedTransfer: '{context}' paint job applied " +
                                   $"in full ({keptPainted} part(s)).");
                     else if (droppedClean > 0)
-                        Debug.Log($"[GeneKerman] ReforgedTransfer: '{context}' — dropped " +
+                        Debug.Log($"[GeneKerman] ReforgedTransfer: '{context}', dropped " +
                                   $"{droppedClean} unpainted Reforged module(s).");
                     return;
                 }
@@ -524,7 +524,7 @@ namespace GeneKerman
                 {
                     title = $"'{context}' loads in stock colours";
                     body = "It was painted with Reforged Materials Redux, which you don't have. "
-                         + "The craft itself is fine — every part is there and it will fly exactly "
+                         + "The craft itself is fine; every part is there and it will fly exactly "
                          + "as built; only the custom paint is gone." + packs;
                 }
                 else
@@ -535,7 +535,7 @@ namespace GeneKerman
                          + "otherwise unaffected." + packs;
                 }
 
-                Debug.LogWarning($"[GeneKerman] {title} — {body}");
+                Debug.LogWarning($"[GeneKerman] {title}: {body}");
                 GeneKermanMod mod = GeneKermanMod.Instance;
                 if (mod != null)
                 {

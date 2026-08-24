@@ -127,6 +127,13 @@ namespace GeneKerman.UI.Gui
 
         private readonly DatePicker moreTimePicker = new DatePicker();
 
+        /// <summary>Contract whose report box is open, and what has been typed into it.
+        /// Held here rather than in the row, because the box is rebuilt on every data
+        /// change and a reason living in the widget would be lost to a poll landing
+        /// mid-sentence.</summary>
+        private string reportOpenId;
+        private string reportReason = "";
+
         // Submission images for the open contract. Keyed by id and fetched at most
         // once per contract, because Rebuild runs on every data change and a fetch
         // per rebuild would download the blueprints over and over. The preview owns
@@ -883,6 +890,8 @@ namespace GeneKerman.UI.Gui
             moreTimeOpenId = null;
             moreTimeDate = DateTime.Now.Date.AddDays(7);
             moreTimePicker.Close();
+            reportOpenId = null;
+            reportReason = "";
             MarkDirty();
         }
 
@@ -984,16 +993,24 @@ namespace GeneKerman.UI.Gui
                     // which orbit that is. Ap/Pe say how high, never which plane, and a
                     // plane requirement changes what the job costs.
                     string rBody = MiniJSON.GetString(rtSpec, "body", "?");
+                    var spec = RescueTargetSpec.FromDict(rtSpec);
                     if (MiniJSON.GetString(rtSpec, "mode", "orbit") == "surface")
+                        // No lat/lon on the contract is not a target of 0°,0° — it is a
+                        // rescue with no landing site, and printing the zeros would send
+                        // the rescuer to a spot nobody asked for.
                         Section(card, "Deliver to",
-                                $"{rBody} surface at {MiniJSON.GetDouble(rtSpec, "lat"):F1}°, " +
-                                $"{MiniJSON.GetDouble(rtSpec, "lon"):F1}°");
+                                spec.hasPos
+                                ? $"{rBody} surface at {MiniJSON.GetDouble(rtSpec, "lat"):F1}°, " +
+                                  $"{MiniJSON.GetDouble(rtSpec, "lon"):F1}°"
+                                : $"{rBody} surface, anywhere");
                     else
                     {
                         Section(card, "Deliver to",
-                                $"{rBody} orbit, Ap {MiniJSON.GetDouble(rtSpec, "ap") / 1000:F0} km / " +
-                                $"Pe {MiniJSON.GetDouble(rtSpec, "pe") / 1000:F0} km");
-                        string orbitReq = RescueTargetSpec.FromDict(rtSpec).DescribeOrbitRequirement();
+                                spec.hasAlt
+                                ? $"{rBody} orbit, Ap {MiniJSON.GetDouble(rtSpec, "ap") / 1000:F0} km / " +
+                                  $"Pe {MiniJSON.GetDouble(rtSpec, "pe") / 1000:F0} km"
+                                : $"{rBody} orbit, any altitude");
+                        string orbitReq = spec.DescribeOrbitRequirement();
                         if (!string.IsNullOrEmpty(orbitReq))
                             Section(card, "Required orbit", orbitReq);
                     }
@@ -1361,6 +1378,73 @@ namespace GeneKerman.UI.Gui
                     BuildCompletedActions(bar, main, c, cid, isOutgoing, mType);
                     break;
             }
+
+            BuildReport(bar, main, c, cid, isOutgoing);
+        }
+
+        /// <summary>
+        /// Report the other party of this contract to the moderators.
+        ///
+        /// Outside the status switch on purpose, and after it: a report is not a move
+        /// in the contract, so it is offered in every state — an abusive mission text
+        /// is still abusive once the contract is finished, and the case a moderator
+        /// most often has to read is exactly the one that has already ended badly.
+        ///
+        /// Not offered for a bot-issued contract. There is no human on the other side
+        /// of a weekly mission, so a ticket about one would name nobody a moderator
+        /// could talk to; if the mission itself is broken, that is a bug report, and
+        /// the Tools panel files those. The server refuses it too — this only avoids
+        /// drawing a button whose whole outcome is a refusal.
+        /// </summary>
+        private void BuildReport(El bar, ClientState main, Dictionary<string, object> c,
+                                 string cid, bool isOutgoing)
+        {
+            if (MiniJSON.GetBool(c, "is_bot_issued")) return;
+
+            string other = MiniJSON.GetString(c, isOutgoing ? "contractor_name" : "issuer_name", "");
+            if (string.IsNullOrEmpty(other)) other = isOutgoing ? "the contractor" : "the issuer";
+
+            if (reportOpenId != cid)
+            {
+                UIF.Button(bar, "Report " + other, () =>
+                {
+                    reportOpenId = cid;
+                    reportReason = "";
+                    MarkDirty();
+                }, BtnStyle.Ghost, 28).Interactable(!Busy);
+                return;
+            }
+
+            var box = UIF.Box(bar, "Report").Column(Theme.Space2);
+            UIF.Label(box, "WHAT WENT WRONG?", Theme.FontXs, Theme.MutedForeground);
+            UIF.TextField(box, reportReason,
+                          "Abusive text, a deal they refuse to honour, a contract written to collect the fine…",
+                          66, true)
+               .OnChanged(v => reportReason = v);   // no MarkDirty: a rebuild per keystroke would
+                                                    // destroy the box being typed into
+            UIF.Muted(box, "This opens a private ticket in Discord with a moderator pinged. " +
+                           "A late delivery or a disagreement about the work is not a report — " +
+                           "the dispute buttons are for those.").Body();
+
+            var row = UIF.Box(box, "ReportRow").Row(Theme.Space2).H(28);
+            UIF.Button(row, "Send report", () =>
+            {
+                string reason = (reportReason ?? "").Trim();
+                if (reason.Length == 0) return;   // the server refuses an empty one anyway
+                reportOpenId = null;
+                reportReason = "";
+                // BeginAction, not Done(): a report leaves the contract exactly as it
+                // was, so closing the detail view under the player would be a lie
+                // about what just happened.
+                var done = BeginAction();
+                main.RequestReportContract(cid, reason, done);
+            }, BtnStyle.Destructive, 28).Interactable(!Busy).E.Flex(1f);
+            UIF.Button(row, "Never mind", () =>
+            {
+                reportOpenId = null;
+                reportReason = "";
+                MarkDirty();
+            }, BtnStyle.Ghost, 28).E.Flex(1f);
         }
 
         private void BuildDisputeActions(El bar, ClientState main, Dictionary<string, object> c,
@@ -1452,7 +1536,7 @@ namespace GeneKerman.UI.Gui
                                              MarkDirty();  // the send button carries the date
                                          },
                                          null, "New date");
-                    UIF.Muted(bar, "One ask per dispute — the issuer approves or refuses it.").Body();
+                    UIF.Muted(bar, "One ask per dispute; the issuer approves or refuses it.").Body();
                     UIF.Button(bar, "Request until " + DatePicker.Print(moreTimeDate), () =>
                     {
                         moreTimeOpenId = null;
@@ -1511,14 +1595,14 @@ namespace GeneKerman.UI.Gui
                 if (pcm != null && pcm.rosterStatus == ProtoCrewMember.RosterStatus.Assigned)
                 {
                     UIF.Notice(bar, "The craft you submitted is no longer in this save.",
-                               name + " is assigned to another vessel — free them up first, " +
+                               name + " is assigned to another vessel; free them up first, " +
                                "then the craft can be restored.");
                     return;
                 }
             }
 
             UIF.Notice(bar, "The craft you submitted is no longer in this save.",
-                       "Recovered or lost — the server still holds your submission, and can " +
+                       "Recovered or lost; the server still holds your submission, and can " +
                        "put it back where it was for another delivery attempt.");
             UIF.Button(bar, "Restore submitted craft", () =>
             {

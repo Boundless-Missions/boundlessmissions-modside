@@ -39,6 +39,14 @@ namespace GeneKerman
         }
 
         // Helper accessors
+        /// <summary>Present *and* non-null. The distinction is load-bearing wherever a
+        /// field's absence is itself the answer — a rescue target with no Ap/Pe means
+        /// "any orbit", which is not the same as an Ap of 0 — and both spellings occur:
+        /// FastAPI emits an unset Optional as an explicit null, an older server leaves
+        /// the key out entirely.</summary>
+        public static bool Has(Dictionary<string, object> dict, string key)
+            => dict != null && dict.TryGetValue(key, out var v) && v != null;
+
         public static string GetString(Dictionary<string, object> dict, string key, string def = "")
         {
             if (dict != null && dict.TryGetValue(key, out var v) && v != null)

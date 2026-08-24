@@ -138,7 +138,7 @@ namespace GeneKerman
             Vessel wreck = FindVesselByPid(vesselPid);
             if (wreck == null)
             {
-                Debug.LogWarning($"[GeneKerman] RescueFreeze: wreck {vesselPid} not found — cannot freeze crew.");
+                Debug.LogWarning($"[GeneKerman] RescueFreeze: wreck {vesselPid} not found, cannot freeze crew.");
                 return;
             }
 
@@ -148,7 +148,7 @@ namespace GeneKerman
 
             if (!FreezeEnabled)
             {
-                Debug.Log("[GeneKerman] RescueFreeze: disabled in settings — crew left aboard the wreck.");
+                Debug.Log("[GeneKerman] RescueFreeze: disabled in settings, crew left aboard the wreck.");
                 if (rations != null) PersistIfPossible(wreck);
                 return;
             }
@@ -158,7 +158,7 @@ namespace GeneKerman
             {
                 if (LifeSupportRegistry.IsFrozen(name))
                 {
-                    Debug.Log($"[GeneKerman] RescueFreeze: {name} is cryo-frozen — left as-is.");
+                    Debug.Log($"[GeneKerman] RescueFreeze: {name} is cryo-frozen, left as-is.");
                     continue;
                 }
                 uint partId;
@@ -445,7 +445,7 @@ namespace GeneKerman
                         pps.protoCrewNames.Add(pcm.name);
                     try { wreck.protoVessel.AddCrew(pcm); } catch { /* best-effort */ }
                     Debug.Log($"[GeneKerman] RescueFreeze: {c.Name} queued back into " +
-                              $"'{SnapshotLabel(pps)}' (seat {pcm.seatIdx}) — the wreck is " +
+                              $"'{SnapshotLabel(pps)}' (seat {pcm.seatIdx}), the wreck is " +
                               "unloaded, KSP seats them on load.");
                     return true;
                 }
@@ -515,7 +515,7 @@ namespace GeneKerman
                         ?? free.FirstOrDefault();
             Debug.LogWarning($"[GeneKerman] RescueFreeze: {c.Name}'s part (flightID {c.PartFlightId}) is " +
                              (recorded == null ? "not on the wreck" : "full") +
-                             $" — seating them in '{(pick == null ? "nothing (no free seat)" : PartLabel(pick))}' instead.");
+                             $", seating them in '{(pick == null ? "nothing (no free seat)" : PartLabel(pick))}' instead.");
             return pick;
         }
 
@@ -532,7 +532,7 @@ namespace GeneKerman
                                      ?? free.FirstOrDefault();
             Debug.LogWarning($"[GeneKerman] RescueFreeze: {c.Name}'s part (flightID {c.PartFlightId}) is " +
                              (recorded == null ? "not on the wreck" : "full") +
-                             $" — seating them in '{(pick == null ? "nothing (no free seat)" : SnapshotLabel(pick))}' instead.");
+                             $", seating them in '{(pick == null ? "nothing (no free seat)" : SnapshotLabel(pick))}' instead.");
             return pick;
         }
 
@@ -577,7 +577,7 @@ namespace GeneKerman
                     {
                         roster.Remove(pcm);
                         Debug.Log($"[GeneKerman] RescueFreeze: {name} was borrowed and their craft " +
-                                  "is gone — dropped from the roster.");
+                                  "is gone, dropped from the roster.");
                     }
                     else
                     {
@@ -636,7 +636,7 @@ namespace GeneKerman
                         if (!SeatAtOrAnywhere(p, pcm, seat))
                         {
                             Debug.LogWarning($"[GeneKerman] RescueStasis: reseat cycle could not " +
-                                             $"re-add {pcm.name} to '{PartLabel(p)}' — skipping the event.");
+                                             $"re-add {pcm.name} to '{PartLabel(p)}', skipping the event.");
                             continue;
                         }
                         // The cycle dropped the Kerbal avatar with the old seat refs;

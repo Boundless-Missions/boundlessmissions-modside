@@ -142,7 +142,7 @@ namespace GeneKerman
             // .ShouldRender) and narrows itself to the panels that work without a
             // server — which is the whole point of "continue anyway".
             sidebar?.SetOpen(true);
-            Debug.Log("[GeneKerman] Update gate acknowledged — limited (offline) features enabled.");
+            Debug.Log("[GeneKerman] Update gate acknowledged, limited (offline) features enabled.");
         }
 
         // Milestone hero-shot capture (rendezvous / flyby / asteroid)
@@ -363,6 +363,13 @@ namespace GeneKerman
             // scene and for unlinked clients too — its own gate cascade decides
             // whether it draws, and its slide/pulse must keep running either way.
             sidebar?.Tick();
+
+            // Above every gate below, and deliberately: this decides what the UI
+            // *hides*, while the gates decide what the mod *sends*. Nothing here
+            // leaves the PC — it reads the local process list, and only while the
+            // player has switched streamer mode on. A frame costs one null check
+            // and a clock comparison; the scan itself is scheduled off-thread.
+            StreamerMode.Tick();
 
             // Hoisted for the same reason as RescueImmunityGuardian below, and it used
             // to sit under all three gates: draining this queue is local bookkeeping
@@ -848,7 +855,7 @@ namespace GeneKerman
                 // Bridge could not start (missing or mismatched WebUI bundle, port
                 // trouble). Fall through to the sidebar rather than strand the player on
                 // a button that does nothing.
-                Debug.LogWarning("[GeneKerman] Web UI unavailable — falling back to the sidebar.");
+                Debug.LogWarning("[GeneKerman] Web UI unavailable, falling back to the sidebar.");
                 ScreenMessages.PostScreenMessage("Boundless Missions: web UI unavailable, using the in-game panel.",
                     5f, ScreenMessageStyle.UPPER_CENTER);
             }
@@ -1333,7 +1340,28 @@ namespace GeneKerman
         public void OnConsentGranted()
         {
             ShowConsentWindow = false;
-            ShowLinkWindow = true;   // proceed to the link menu
+
+            // Hand the player the surface the gate was standing in front of. Accepting
+            // is the one moment we know for certain they want in, so the next screen
+            // has to open by itself: the gate is modal and closing it leaves an empty
+            // screen, which reads as "nothing happened" and costs a second trip to the
+            // toolbar to find the menu that should already have been there.
+            //
+            // Which surface depends on where the accept came from. A fresh install has
+            // no account, so it is the link menu. A re-consent (policy bump, or an
+            // edited consent.cfg) is an already-linked client whose interface was taken
+            // away by OnConsentLapsed, so it is the sidebar — except in browser mode,
+            // where the page is the interface and resumes on its own; opening a browser
+            // tab is a click on the toolbar, not something accepting should do behind
+            // their back (same rule as OnAccountLinked).
+            if (!Api.IsLinked)
+            {
+                ShowLinkWindow = true;
+            }
+            else if (!WebUiMode)
+            {
+                sidebar?.SetOpen(true);
+            }
 
             // The startup version check was suppressed pre-consent; engage it now.
             RecheckVersion();
@@ -1359,7 +1387,7 @@ namespace GeneKerman
             // rendering the moment consent lapses (SidebarController.ShouldRender).
             ShowLinkWindow = false;
             ShowConsentWindow = true;   // surface the re-accept gate immediately
-            Debug.Log("[GeneKerman] Consent lapsed — re-accept required before any data is sent.");
+            Debug.Log("[GeneKerman] Consent lapsed, re-accept required before any data is sent.");
         }
 
         /// <summary>Flip the master data-sharing opt-out (rule 8.2) and bring the mod's
@@ -1376,12 +1404,12 @@ namespace GeneKerman
                 notifSocket.Disconnect();
                 ShowLinkWindow = false;
                 ShowConsentWindow = false;
-                Debug.Log("[GeneKerman] Data sharing disabled — mod is now inert.");
+                Debug.Log("[GeneKerman] Data sharing disabled, mod is now inert.");
             }
             else
             {
                 ShowDataPausedWindow = false;
-                Debug.Log("[GeneKerman] Data sharing enabled — resuming.");
+                Debug.Log("[GeneKerman] Data sharing enabled, resuming.");
                 if (Api.IsLinked)
                 {
                     StartCoroutine(InitialFetch());
@@ -1540,7 +1568,7 @@ namespace GeneKerman
             SuspensionReason = "";
             SuspendedUntil = 0;
             suspendedWindow.Hide();
-            Debug.Log("[GeneKerman] Suspension cleared — resuming.");
+            Debug.Log("[GeneKerman] Suspension cleared, resuming.");
 
             if (Api.IsLinked && Api.DataGatheringEnabled && Consent.Accepted)
             {
@@ -1573,7 +1601,7 @@ namespace GeneKerman
             {
                 if (!ok || data == null)
                 {
-                    if (onDone != null) onDone("Couldn't reach the server — try again in a moment.");
+                    if (onDone != null) onDone("Couldn't reach the server. Try again in a moment.");
                     return;
                 }
                 if (!MiniJSON.GetBool(data, "suspended", false))
@@ -1590,7 +1618,7 @@ namespace GeneKerman
                 if (onDone != null)
                     onDone(string.IsNullOrEmpty(left)
                         ? "Still suspended."
-                        : "Still suspended — " + left + " to go.");
+                        : "Still suspended, " + left + " to go.");
             });
         }
 
@@ -1609,7 +1637,7 @@ namespace GeneKerman
             // unlink, persisting it would resurface it after the user re-links.
             Toast("Session expired",
                 "This PC was unlinked. Run /b linkcode in Discord to link again.");
-            Debug.Log("[GeneKerman] Session revoked — returned to the link screen.");
+            Debug.Log("[GeneKerman] Session revoked, returned to the link screen.");
         }
 
         /// Called by ApiClient when the server blocks this device (device binding).
@@ -1684,7 +1712,7 @@ namespace GeneKerman
                 // token), then unlink so this device stops trying.
                 if (!string.IsNullOrEmpty(reportId))
                 {
-                    Debug.Log("[GeneKerman] Device reported — uploading diagnostics…");
+                    Debug.Log("[GeneKerman] Device reported, uploading diagnostics…");
                     yield return Api.UploadDeviceReport(reportId, (ok, r, s) =>
                         Debug.Log($"[GeneKerman] Device report upload: ok={ok} ({s})"));
                 }
@@ -1803,7 +1831,7 @@ namespace GeneKerman
             if (!VesselTransfer.VesselExists(pid)) return;      // already gone: the normal case
 
             Debug.Log($"[GeneKerman] Accepted quicksend {pid} is still in this save " +
-                      "(rolled-back removal?) — re-queueing.");
+                      "(rolled-back removal?), re-queueing.");
             QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.LeavesWithCraft);
         }
 
@@ -1901,13 +1929,13 @@ namespace GeneKerman
                 if (returnToSpaceCenter && CanAutoReturnToSpaceCenter(pid))
                 {
                     RaiseLocalNotification("Craft handed over",
-                        $"\"{pending[pid].Name}\" now belongs to its recipient — returning " +
+                        $"\"{pending[pid].Name}\" now belongs to its recipient, returning " +
                         "to the Space Center to complete the hand-over.");
                     StartCoroutine(ReturnToSpaceCenterRoutine(pid));
                 }
                 else
                     RaiseLocalNotification("Craft scheduled for removal",
-                        $"\"{pending[pid].Name}\" will be deleted when you leave it — at the " +
+                        $"\"{pending[pid].Name}\" will be deleted when you leave it: at the " +
                         "latest, on your next visit to the Space Center.");
             }
 
@@ -2044,7 +2072,7 @@ namespace GeneKerman
                 if (!VesselTransfer.VesselExists(issuedPid)) continue;
 
                 Debug.Log($"[GeneKerman] Reconcile: rescue {cid} is live but its craft " +
-                          $"(pid {issuedPid}) is still in this save — queueing removal.");
+                          $"(pid {issuedPid}) is still in this save, queueing removal.");
                 // Issuer side: the stranded crew are what was issued, so they go too —
                 // by name as well as by hull, or one who EVA'd off beforehand stays
                 // behind while their copy rides the contract. The contract carries them
@@ -2074,7 +2102,7 @@ namespace GeneKerman
                 string pid;
                 if (!scenario.PeekRescueSubmission(cid, out pid)) continue;
 
-                Debug.Log($"[GeneKerman] Reconcile: rescue {cid} was approved — queueing " +
+                Debug.Log($"[GeneKerman] Reconcile: rescue {cid} was approved, queueing " +
                           $"removal of the craft we submitted (pid {pid}).");
                 // Rescuer side: the ship and the kerbals we picked up are the hand-over.
                 // The pilots who flew it there are not, and stay in our roster. The
@@ -2130,7 +2158,7 @@ namespace GeneKerman
             Debug.LogWarning($"[GeneKerman] {broken.Count} kerbal(s) have a profession no installed " +
                              $"mod defines: {string.Join(", ", broken.ToArray())}. KSP throws while " +
                              "drawing any crew list containing them (Astronaut Complex, crew " +
-                             "assignment) — reinstall the mod that adds the profession, or press " +
+                             "assignment); reinstall the mod that adds the profession, or press " +
                              "Fix professions on the notification.");
 
             // Name them in the message rather than sending the player to KSP.log: the
@@ -2140,7 +2168,7 @@ namespace GeneKerman
                 $"{broken.Count} kerbal(s) in this save have a profession no installed mod " +
                 $"defines: {NameList(broken, 6)}. The Astronaut Complex will fail to draw while " +
                 "they are in the roster. Reinstall the mod that adds their profession, or press " +
-                "Fix professions to give them a local one (reversible — the original comes back " +
+                "Fix professions to give them a local one (reversible; the original comes back " +
                 "if the mod does).",
                 null, LocalNotifActions.RepairTraits);
         }
@@ -2234,7 +2262,7 @@ namespace GeneKerman
                     // Hull handled; somebody walked off and can't be settled yet. The
                     // entry stays queued — the next pass finds the hull NotFound and
                     // retries only the crew, until the list comes back clean.
-                    Debug.Log($"[GeneKerman] Rescue removal {pid}: hull done, crew pending — kept queued.");
+                    Debug.Log($"[GeneKerman] Rescue removal {pid}: hull done, crew pending, kept queued.");
                     continue;
                 }
 

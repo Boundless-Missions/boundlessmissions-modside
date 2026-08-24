@@ -55,9 +55,9 @@ namespace GeneKerman
                 png = ReadLocalThumbnail(craftPath);
                 if (png != null)
                     Debug.Log($"[GeneKerman] CraftThumb: nothing to render for '{vessel?.vesselName}' "
-                              + "(unloaded?) — carrying KSP's own thumbnail instead.");
+                              + "(unloaded?), carrying KSP's own thumbnail instead.");
                 else
-                    Debug.LogWarning($"[GeneKerman] CraftThumb: no thumbnail for '{vessel?.vesselName}' — "
+                    Debug.LogWarning($"[GeneKerman] CraftThumb: no thumbnail for '{vessel?.vesselName}', "
                                      + "nothing rendered and none on disk; the recipient will see KSP's placeholder.");
             }
             return EmbedThumbInCraft(craftBytes, png);

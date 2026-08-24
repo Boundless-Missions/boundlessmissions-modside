@@ -96,8 +96,14 @@ mod ever *provides* it at a shared path, this becomes a `conflicts`/`provides` q
 
 ## What the browser UI adds to a release
 
-`WebUI/` is a static Vite bundle (~4 files) plus `manifest.json`, stamped with
-`ModVersion.Current` at build time. The mod refuses to start the loopback bridge when that
+`WebUI/` is a static Vite bundle (~4 files) plus `manifest.json` and
+`THIRD-PARTY-NOTICES.txt`, both stamped by `WebUI/vite.config.ts` at build time —
+the manifest with `ModVersion.Current`, the notices with the licence text of every
+package compiled into the bundle. Both must be in the zip: the notices file is how
+the MIT/ISC/Apache-2.0 attribution requirements are met for a minified bundle that
+only preserves React's and lucide's own banners, and the `filter` in
+`BoundlessMissions.netkan` (`settings.cfg` alone) is deliberately narrow so neither
+is dropped on a CKAN install. The mod refuses to start the loopback bridge when that
 manifest does not match the running DLL, which is what catches a half-applied manual
 install — a real scenario, since CKAN and manual installs coexist.
 

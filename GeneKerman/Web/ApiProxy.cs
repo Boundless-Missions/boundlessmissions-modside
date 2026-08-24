@@ -78,6 +78,13 @@ namespace GeneKerman.Web
             Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/settle_response$", "POST"),
             Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/more_time_response$", "POST"),
 
+            // ── Reporting the other party ───────────────────────────────────
+            // Not a contract transition: it changes nothing about the deal and only
+            // opens a moderation ticket in Discord. Listed here rather than routed
+            // through /gk/actions/* because nothing in the running game is involved —
+            // unlike a bug report, which exists to attach KSP.log.
+            Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/report$", "POST"),
+
             // Contract creation is NOT here: it goes through /gk/actions/create-contract,
             // because the mod has to derive the mod list and read the rescue vessel from
             // the running game. Craft download stays out too — the browser

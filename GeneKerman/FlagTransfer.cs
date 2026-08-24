@@ -223,7 +223,7 @@ namespace GeneKerman
                 int idx = FindFlagSectionStart(text);
                 if (idx < 0)
                 {
-                    Debug.Log("[GeneKerman] FlagTransfer: downloaded craft carries no GKFLAG block (sender embedded none) — nothing to install.");
+                    Debug.Log("[GeneKerman] FlagTransfer: downloaded craft carries no GKFLAG block (sender embedded none), nothing to install.");
                 }
                 else
                 {
@@ -291,7 +291,7 @@ namespace GeneKerman
                 {
                     if (FlagResolves(url)) continue;
                     Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' isn't installed here and "
-                        + $"didn't arrive with the craft — resetting that reference to {STOCK_FLAG}.");
+                        + $"didn't arrive with the craft, resetting that reference to {STOCK_FLAG}.");
                     text = RewriteFlagUrlInText(text, url, STOCK_FLAG);
                 }
                 return text;
@@ -314,7 +314,7 @@ namespace GeneKerman
                 {
                     if (FlagResolves(url)) continue;
                     Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' isn't installed here and "
-                        + $"didn't arrive with the vessel — resetting that reference to {STOCK_FLAG}.");
+                        + $"didn't arrive with the vessel, resetting that reference to {STOCK_FLAG}.");
                     remap[url] = STOCK_FLAG;
                 }
                 if (remap.Count > 0) RewriteFlagValuesInNode(node, remap);
@@ -493,7 +493,7 @@ namespace GeneKerman
                 byte[] data = ReadFlagFile(url, out ext);
                 if (data == null)
                 {
-                    Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' referenced but no image file found on disk — not embedding.");
+                    Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' referenced but no image file found on disk, not embedding.");
                     continue;
                 }
                 string newUrl = ComputeContentUrl(data);
@@ -597,7 +597,7 @@ namespace GeneKerman
             // Already known to KSP? Don't touch the recipient's existing flag.
             if (GameDatabase.Instance != null && GameDatabase.Instance.GetTexture(url, false) != null)
             {
-                Debug.Log($"[GeneKerman] FlagTransfer: flag '{url}' already present on this install — transfer OK, nothing to install.");
+                Debug.Log($"[GeneKerman] FlagTransfer: flag '{url}' already present on this install, transfer OK, nothing to install.");
                 return false;
             }
 
@@ -640,7 +640,7 @@ namespace GeneKerman
             string e = (ext ?? "").ToLowerInvariant();
             if (e != "png" && e != "jpg" && e != "jpeg")
             {
-                Debug.Log($"[GeneKerman] FlagTransfer: '{url}' is .{ext} — will appear after next KSP launch.");
+                Debug.Log($"[GeneKerman] FlagTransfer: '{url}' is .{ext}, will appear after next KSP launch.");
                 return;
             }
             try

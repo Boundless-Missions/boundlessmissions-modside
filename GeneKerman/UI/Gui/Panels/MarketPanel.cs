@@ -92,7 +92,10 @@ namespace GeneKerman.UI.Gui
             UIF.Badge(facts, craft.EditorType, Theme.MutedForeground, Theme.Secondary);
             UIF.Badge(facts, craft.EditorParts + " parts", Theme.MutedForeground, Theme.Secondary);
             UIF.Badge(facts, mass.ToString("F1") + " t", Theme.MutedForeground, Theme.Secondary);
-            UIF.Badge(facts, "√" + cost.ToString("N0"), Theme.MutedForeground, Theme.Secondary);
+            // "funds", not KSP's √: the sidebar borrows KSP's TMP font, which has no
+            // glyph for it, so the symbol drew as a tofu box in front of the number.
+            // Same wording as SubmitPanel's craft line, which never used it.
+            UIF.Badge(facts, cost.ToString("N0") + " funds", Theme.MutedForeground, Theme.Secondary);
             UIF.Grow(facts);
 
             // What the listing will advertise about life support. Buyers filter on it,

@@ -48,7 +48,7 @@ namespace GeneKerman
                 MemberWrapper toggle = ResolveEnableMember();
                 if (toggle == null)
                 {
-                    Debug.Log("[GeneKerman] PhysicsRangeManager: PRE not detected — nothing to disable.");
+                    Debug.Log("[GeneKerman] PhysicsRangeManager: PRE not detected, nothing to disable.");
                     return false;
                 }
 

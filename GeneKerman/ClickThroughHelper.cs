@@ -49,7 +49,7 @@ namespace GeneKerman
                     .FirstOrDefault(a => a.GetName().Name == "ClickThroughBlocker");
                 if (asm == null)
                 {
-                    Debug.Log("[GeneKerman] Click Through Blocker not found — using stock windows.");
+                    Debug.Log("[GeneKerman] Click Through Blocker not found, using stock windows.");
                     return;
                 }
 
@@ -58,7 +58,7 @@ namespace GeneKerman
                 var type = asm.GetType("ClickThroughFix.ClickThruBlocker");
                 if (type == null)
                 {
-                    Debug.LogWarning("[GeneKerman] CTB assembly found but ClickThruBlocker type missing — using stock windows.");
+                    Debug.LogWarning("[GeneKerman] CTB assembly found but ClickThruBlocker type missing, using stock windows.");
                     return;
                 }
 
@@ -72,7 +72,7 @@ namespace GeneKerman
                     null);
                 if (method == null)
                 {
-                    Debug.LogWarning("[GeneKerman] CTB found but GUILayoutWindow signature not matched — using stock windows.");
+                    Debug.LogWarning("[GeneKerman] CTB found but GUILayoutWindow signature not matched, using stock windows.");
                     return;
                 }
 
@@ -81,7 +81,7 @@ namespace GeneKerman
             }
             catch (Exception ex)
             {
-                Debug.LogWarning($"[GeneKerman] CTB integration failed ({ex.Message}) — using stock windows.");
+                Debug.LogWarning($"[GeneKerman] CTB integration failed ({ex.Message}), using stock windows.");
                 _ctbWindow = null;
             }
         }

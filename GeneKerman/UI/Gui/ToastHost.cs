@@ -96,7 +96,7 @@ namespace GeneKerman.UI.Gui
         public void Show(string title, string message, string contractId = null,
                          string localAction = null)
         {
-            Debug.Log("[GeneKerman] Notification: " + title + " — " + message);
+            Debug.Log("[GeneKerman] Notification: " + title + ": " + message);
 
             if (host == null) return;     // canvas never built; the feed still records it
 

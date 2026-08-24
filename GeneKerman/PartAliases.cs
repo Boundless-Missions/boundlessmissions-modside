@@ -389,7 +389,7 @@ namespace GeneKerman
                         : $"{what} needs {swaps.Count} part(s) you have under another name";
                 string body = sb.ToString().TrimEnd();
 
-                Debug.Log($"[GeneKerman] PartAliases: {title} — {body}");
+                Debug.Log($"[GeneKerman] PartAliases: {title}: {body}");
 
                 var mod = GeneKermanMod.Instance;
                 if (mod != null)

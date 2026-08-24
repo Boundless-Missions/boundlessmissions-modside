@@ -608,7 +608,7 @@ namespace GeneKerman
                 if (!text.EndsWith("\n")) sb.Append("\n");
                 AppendManifestText(sb, manifest);
 
-                Debug.Log($"[GeneKerman] RealFuelsTransfer: embedded fuel config — " +
+                Debug.Log($"[GeneKerman] RealFuelsTransfer: embedded fuel config, " +
                           $"{scan.Refs.Count} module(s), {manifest.TankTypes.Count} tank type(s), " +
                           $"{manifest.EngineConfigs.Count} engine config(s).");
                 return Encoding.UTF8.GetBytes(sb.ToString());
@@ -671,7 +671,7 @@ namespace GeneKerman
                 foreach (var c in manifest.EngineConfigs)
                     rn.AddValue("config", c);
 
-                Debug.Log($"[GeneKerman] RealFuelsTransfer: embedded fuel config into vessel node — " +
+                Debug.Log($"[GeneKerman] RealFuelsTransfer: embedded fuel config into vessel node, " +
                           $"{scan.Refs.Count} module(s).");
             }
             catch (Exception ex)
@@ -1041,7 +1041,7 @@ namespace GeneKerman
                     // RF absent — the craft was rebuilt in local fuels.
                     string env = !string.IsNullOrEmpty(manifest.Env)
                         ? " It was built for Realism Overhaul, so it was balanced for "
-                          + "real-scale physics — expect very different performance here."
+                          + "real-scale physics; expect very different performance here."
                         : "";
                     string res = droppedResources.Count > 0
                         ? $" {droppedResources.Count} propellant type(s) this install doesn't define "
@@ -1077,13 +1077,13 @@ namespace GeneKerman
                 {
                     title = $"'{context}' was built for stock fuels";
                     body = "This install runs Realism Overhaul, which will reconfigure its tanks "
-                         + "and engines on load — the craft will fly very differently from how "
+                         + "and engines on load; the craft will fly very differently from how "
                          + "its builder tested it.";
                 }
 
                 if (title == null) return;
 
-                Debug.LogWarning($"[GeneKerman] {title} — {body}");
+                Debug.LogWarning($"[GeneKerman] {title}: {body}");
                 var mod = GeneKermanMod.Instance;
                 if (mod != null)
                 {

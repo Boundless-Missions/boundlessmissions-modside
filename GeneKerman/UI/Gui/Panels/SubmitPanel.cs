@@ -155,7 +155,7 @@ namespace GeneKerman.UI.Gui
 
             // The window survives scene loads and revalidates itself on each one, so
             // this is a statement of what to do next rather than a dead end.
-            UIF.Muted(card, "This window stays open — it rechecks when you get there.").Body();
+            UIF.Muted(card, "This window stays open; it rechecks when you get there.").Body();
         }
 
         // ── Editor mode (craft_build) ───────────────────────────────────────
@@ -249,7 +249,7 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
-            UIF.Muted(parent, $"{session.SelectedExtras} of {nearby.Count} selected — packed and sent " +
+            UIF.Muted(parent, $"{session.SelectedExtras} of {nearby.Count} selected, packed and sent " +
                               "with this submission.").Body();
 
             var batch = UIF.Box(parent, "Batch").Row(Theme.Space2).H(26);

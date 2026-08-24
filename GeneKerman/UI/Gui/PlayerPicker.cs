@@ -66,6 +66,12 @@ namespace GeneKerman.UI.Gui
         private bool avatarsArrived;
         private float nextAvatarRefresh;
 
+        /// <summary>What StreamerMode answered the last time the list was built.
+        /// Streamer mode flips this on its own — OBS opening is not a click anyone
+        /// made in here — so the picker has to notice the same way it notices
+        /// arriving avatars.</summary>
+        private bool detailsHidden;
+
         /// <summary>The chosen player, or null/empty when nothing is selected.</summary>
         public string SelectedId { get; private set; }
         public string SelectedName { get; private set; }
@@ -124,6 +130,27 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         public void Tick()
         {
+            // Not rate-limited like the avatar batch below: this changes when the
+            // player flips a switch or starts OBS, which is rare and wants to look
+            // immediate.
+            bool hidden = StreamerMode.HideDetails;
+            if (hidden != detailsHidden)
+            {
+                // Recorded here and not left to RefreshList, which returns early when
+                // the list host is gone (between OnShown and the first Build, or after
+                // a scene change) — that would leave the flag disagreeing and re-run
+                // this branch every frame.
+                detailsHidden = hidden;
+                // Hand the faces back before redrawing without them. "Hidden" should
+                // mean gone rather than merely not drawn, and the rebuild on the next
+                // line is what guarantees nothing is still pointing at the textures
+                // this destroys — there is no frame in between for a row to render
+                // against a dead one.
+                if (hidden) Dispose();
+                RefreshList();
+                return;
+            }
+
             if (!avatarsArrived || Time.unscaledTime < nextAvatarRefresh) return;
 
             avatarsArrived = false;
@@ -217,6 +244,7 @@ namespace GeneKerman.UI.Gui
         {
             if (listHost == null || listHost.Go == null) return;
 
+            detailsHidden = StreamerMode.HideDetails;
             listHost.ClearChildren();
 
             if (loading || (corps == null && error == null))
@@ -273,9 +301,13 @@ namespace GeneKerman.UI.Gui
                 if (string.IsNullOrEmpty(p.Id) || p.Id == me) continue;
                 if (favoritesOnly && !Favorites.IsFavorite(p.Id)) continue;
 
+                // The corp name is searchable only while it is *shown*: matching on a
+                // hidden field answers a query with rows that look like they do not
+                // match it, which reads as the search being broken.
                 if (q.Length > 0 &&
                     (p.Name ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0 &&
-                    (p.Corp ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0)
+                    (detailsHidden ||
+                     (p.Corp ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0))
                     continue;
 
                 list.Add(p);
@@ -319,7 +351,7 @@ namespace GeneKerman.UI.Gui
             // where it is while picking one.
             UIF.Label(text, p.Name, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null)
                .Bold(selected).Ellipsis();
-            if (!string.IsNullOrEmpty(p.Corp)) UIF.Muted(text, p.Corp).Ellipsis();
+            if (!detailsHidden && !string.IsNullOrEmpty(p.Corp)) UIF.Muted(text, p.Corp).Ellipsis();
 
             if (p.Level > 0) UIF.Badge(row, "Lv " + p.Level, Theme.MutedForeground);
 
@@ -367,6 +399,13 @@ namespace GeneKerman.UI.Gui
 
         private Texture2D AvatarTexture(Player p)
         {
+            // First, ahead of the cache: while details are hidden the picture is not
+            // to be drawn *and* not to be fetched. Falling through to the initials
+            // placeholder is what keeps the rows their normal height, and the initial
+            // itself gives nothing away — it is the first letter of the name printed
+            // beside it.
+            if (detailsHidden) return null;
+
             if (string.IsNullOrEmpty(p.Id)) return null;
 
             Texture2D tex;

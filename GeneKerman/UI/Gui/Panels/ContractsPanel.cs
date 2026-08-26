@@ -1021,7 +1021,7 @@ namespace GeneKerman.UI.Gui
                                 : "The crew (the wreck may be left behind)");
                     double minDv = MiniJSON.GetDouble(rtSpec, "min_dv", 0);
                     if (minDv > 0)
-                        Section(card, "Δv on arrival", $"≥{minDv:F0} m/s left on the delivering craft");
+                        Section(card, "Δv on arrival", $"at least {minDv:F0} m/s left on the delivering craft");
                 }
             }
 

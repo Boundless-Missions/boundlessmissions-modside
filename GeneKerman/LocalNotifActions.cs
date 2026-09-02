@@ -33,11 +33,29 @@ namespace GeneKerman
         /// <summary>Repair kerbals whose profession no installed mod defines.</summary>
         public const string RepairTraits = "repair_traits";
 
+        /// <summary>Release borrowed kerbals stranded in the roster with no craft and no
+        /// contract. Deliberately a button rather than part of the automatic sweep — see
+        /// VesselTransfer.OrphanedBorrowedCrew for the rescue-in-progress case that an
+        /// automatic purge would destroy.</summary>
+        public const string ReleaseOrphanCrew = "release_orphan_crew";
+
         /// <summary>The action a notification carries, or "" for the ordinary kind.
         /// Unknown keys read as "" — a notification raised by a newer version of this
         /// mod must not draw a button that cannot do anything.</summary>
         public static string Of(Dictionary<string, object> n)
         {
+            if (n == null) return "";
+            // LOCAL notifications only, which is what this file is named for and what
+            // its header describes — but nothing used to enforce it. The key was read
+            // off any notification in the feed, server-sent ones included, so a
+            // malicious or repointed server could draw one of these buttons on a
+            // notification of its own choosing. The reach is small today (the actions
+            // are local repairs and each still needs a click), but the shape is the
+            // problem: the next action key added here would inherit it silently.
+            //
+            // `type == "local"` is set by RaiseLocalNotification and is not something
+            // the server's own feed produces.
+            if (MiniJSON.GetString(n, "type") != "local") return "";
             var data = MiniJSON.GetDict(n, "data");
             if (data == null) return "";
             string action = MiniJSON.GetString(data, DataKey);
@@ -50,6 +68,7 @@ namespace GeneKerman
             switch (action)
             {
                 case RepairTraits: return "Fix professions";
+                case ReleaseOrphanCrew: return "Release stranded crew";
                 default: return null;
             }
         }
@@ -70,6 +89,12 @@ namespace GeneKerman
             {
                 switch (action)
                 {
+                    case ReleaseOrphanCrew:
+                        message = VesselTransfer.PurgeOrphanedBorrowedCrew();
+                        // Neutral for the same reason as the trait fix below: the same
+                        // call answers "nothing to release" and "could not drop 2".
+                        title = "Stranded crew";
+                        break;
                     case RepairTraits:
                         message = TraitRepair.Repair();
                         // Neutral on purpose: the same call reports "nothing to repair"

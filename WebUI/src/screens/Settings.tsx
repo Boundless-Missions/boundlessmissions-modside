@@ -6,13 +6,14 @@ import {
   Check,
   EyeOff,
   Loader2,
+  MessageSquare,
   Radio,
   Server,
   ShieldOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { BridgeError, type Settings as ModSettings, api } from "@/lib/bridge";
+import { BridgeError, type Profile, type Settings as ModSettings, api } from "@/lib/bridge";
 import { cn } from "@/lib/utils";
 
 /**
@@ -76,6 +77,7 @@ export function Settings({
       <div className="space-y-4">
         <PrivacyCard settings={settings} onApplied={setSettings} />
         <TogglesCard settings={settings} onApplied={setSettings} />
+        <DiscordCard linked={settings.linked === true} refreshKey={refreshKey} />
         <AboutCard settings={settings} />
       </div>
     </div>
@@ -355,6 +357,97 @@ function TogglesCard({
             </Button>
           )}
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * The one card here that is not a mod setting.
+ *
+ * Everything above is written to settings.cfg and takes effect on this PC. This is
+ * stored on the account, because the thing it controls — the @-mention the bot puts
+ * on a corp-channel post — is written by the server, and no file on this machine has
+ * a say in it. So it reads the profile rather than `/gk/settings`, and writes through
+ * the API proxy to /api/v1/user/preferences.
+ *
+ * The switch is drawn only once the profile has arrived. A switch shown at its default
+ * before the real value lands would flip under anyone who had turned it off.
+ */
+function DiscordCard({ linked, refreshKey }: { linked: boolean; refreshKey: number }) {
+  const [pings, setPings] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!linked) return;
+    setFailed(false);
+    try {
+      setPings((await api.get<Profile>("/api/v1/user/profile")).corp_pings !== false);
+    } catch {
+      setFailed(true);
+    }
+  }, [linked]);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
+
+  // Nothing to draw for an account that does not exist yet: linking happens in the
+  // game, and this switch has no meaning until it has.
+  if (!linked) return null;
+
+  async function set(value: boolean) {
+    setBusy(true);
+    // Optimistic, then corrected by the server's answer — which is the value now
+    // stored, so a refusal puts the switch back rather than leaving it showing a
+    // state that was never saved.
+    setPings(value);
+    try {
+      const r = await api.post<{ corp_pings: boolean }>("/api/v1/user/preferences", {
+        corp_pings: value,
+      });
+      setPings(r.corp_pings !== false);
+    } catch {
+      setPings(!value);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Discord</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-1">
+        {pings === null ? (
+          <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+            {failed ? (
+              <>
+                <AlertTriangle className="size-4 text-destructive" />
+                Could not read your account settings.
+                <Button size="sm" variant="outline" onClick={() => void load()}>
+                  Retry
+                </Button>
+              </>
+            ) : (
+              <>
+                <Loader2 className="size-4 animate-spin" />
+                Loading your account settings…
+              </>
+            )}
+          </div>
+        ) : (
+          <Toggle
+            icon={MessageSquare}
+            label="Mention me in my corporation channel"
+            hint="Contract offers, disputes and hand-offs are posted to your corp channel with a ping so you see them. Off, the same posts still arrive and still say who they are for. Discord just will not notify you, so you would be reading the channel yourself. The in-game notifications are unaffected."
+            checked={pings}
+            busy={busy}
+            onChange={(v) => void set(v)}
+          />
+        )}
       </CardContent>
     </Card>
   );

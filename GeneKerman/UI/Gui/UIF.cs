@@ -629,6 +629,17 @@ namespace GeneKerman.UI.Gui
                 t.alignment = TextAlignmentOptions.Left;
                 t.enableWordWrapping = false;
                 t.raycastTarget = false;
+                // Almost every string that reaches a label here was written by someone
+                // else — a mission text, a notification, a display or corp name — and
+                // TMP parses markup by default. `<size=32767>` or a big `<voffset>`
+                // wrecks the panel's layout, `<nobr>` defeats width fitting, and a
+                // matched `<color>` pair forges a line that looks like the mod wrote
+                // it. Nothing in this UI authors markup (the one place that wanted a
+                // colour asks for it in the `color` argument), so the parser is simply
+                // off; control characters likewise, so a stray \v cannot move text
+                // around either. Same switch, same reason, as the input field below.
+                t.richText = false;
+                t.parseCtrlCharacters = false;
                 // TMP's default overflow truncates at the rect; the layout system
                 // sizes the rect from the text, so Overflow is what makes a single
                 // line actually appear at its natural width.
@@ -647,6 +658,7 @@ namespace GeneKerman.UI.Gui
                 t.fontSize = size;
                 t.color = color ?? Theme.Foreground;
                 t.alignment = TextAnchor.MiddleLeft;
+                t.supportRichText = false;   // as above: peer text, no markup parsing
                 t.horizontalOverflow = HorizontalWrapMode.Overflow;
                 t.verticalOverflow = VerticalWrapMode.Overflow;
                 t.raycastTarget = false;

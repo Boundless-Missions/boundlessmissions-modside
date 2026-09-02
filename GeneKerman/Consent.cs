@@ -31,6 +31,9 @@ namespace GeneKerman
         private static bool loaded;
         private static bool accepted;
         private static int acceptedVersion;
+        /// <summary>The account id that accepted, or "" for a record written before this
+        /// was tracked. See <see cref="AcceptedByCurrentAccount"/>.</summary>
+        private static string acceptedAccountId = "";
 
         // consent.cfg is re-read whenever it changes on disk so manual edits / an
         // external revoke take effect live. Tracked by last-write time; stat is
@@ -51,7 +54,34 @@ namespace GeneKerman
             get
             {
                 EnsureLoaded();
-                return accepted && acceptedVersion >= requiredVersion;
+                return accepted
+                       && acceptedVersion >= requiredVersion
+                       && AcceptedByCurrentAccount;
+            }
+        }
+
+        /// <summary>False when the record was written by a DIFFERENT account than the one
+        /// linked now — which re-raises the consent gate for the new player.
+        ///
+        /// Two states are deliberately treated as "yes". An empty recorded id is a record
+        /// written before this field existed, or one written before any account was linked
+        /// (accepting is what UNBLOCKS linking, so the first acceptance on a fresh install
+        /// has no id to record); revoking consent for every existing install on update
+        /// would be a worse error than the one this closes. And an empty CURRENT id means
+        /// nobody is linked yet, so there is no second player to protect from the first.
+        ///
+        /// The comparison is on the immutable account id, never the display name — the
+        /// same reason the crew-ownership path was moved off display names.</summary>
+        private static bool AcceptedByCurrentAccount
+        {
+            get
+            {
+                if (string.IsNullOrEmpty(acceptedAccountId)) return true;
+                string now = GeneKermanMod.Instance != null
+                                 ? (GeneKermanMod.Instance.LinkedAccountId ?? "")
+                                 : "";
+                if (string.IsNullOrEmpty(now)) return true;
+                return string.Equals(now, acceptedAccountId, StringComparison.Ordinal);
             }
         }
 
@@ -93,6 +123,7 @@ namespace GeneKerman
             // Reset, then reload from disk. A deleted/missing file means no consent.
             accepted = false;
             acceptedVersion = 0;
+            acceptedAccountId = "";
             if (writeUtc == DateTime.MinValue) return;
 
             try
@@ -103,6 +134,7 @@ namespace GeneKerman
                 {
                     bool.TryParse(gk.GetValue("accepted") ?? "false", out accepted);
                     int.TryParse(gk.GetValue("version") ?? "0", out acceptedVersion);
+                    acceptedAccountId = gk.GetValue("accountId") ?? "";
                 }
             }
             catch (Exception e)
@@ -118,6 +150,9 @@ namespace GeneKerman
         {
             accepted = true;
             acceptedVersion = requiredVersion;
+            acceptedAccountId = GeneKermanMod.Instance != null
+                                    ? (GeneKermanMod.Instance.LinkedAccountId ?? "")
+                                    : "";
             loaded = true;
             try
             {
@@ -130,6 +165,16 @@ namespace GeneKerman
                 gk.AddValue("dataTransmission", true);
                 gk.AddValue("promotionalUse", true);
                 gk.AddValue("version", requiredVersion);
+                // WHO accepted. KSP add-on rule 8.1 asks for the consent of the person
+                // whose data is gathered, and this file is per-INSTALL: on a shared
+                // machine, a household PC or a copied modpack folder, player A's
+                // acceptance silently covered player B, whose display name, avatar,
+                // telemetry, craft files and part catalog then started transmitting on
+                // the strength of somebody else's agreement. The gate is otherwise
+                // airtight, which made this the one remaining way past it.
+                gk.AddValue("accountId", GeneKermanMod.Instance != null
+                                             ? (GeneKermanMod.Instance.LinkedAccountId ?? "")
+                                             : "");
                 gk.AddValue("acceptedUtc", DateTime.UtcNow.ToString("o"));
                 node.Save(ConsentPath);
                 // Record the file's new write time so the next stat doesn't see our

@@ -228,18 +228,36 @@ namespace GeneKerman.UI.Gui
 
             UIF.Button(parent, "Refresh data", () => session.CaptureFlightData(), BtnStyle.Secondary, 28);
 
-            // Multi-craft sending is for ordinary active-vessel contracts only.
-            if (!session.IsRescue) BuildNearbySection(parent);
+            // Offered on every flight submission, rescue included: a rescuer who towed a
+            // stage out or flew a support craft alongside has something to show for it.
+            // What a selected craft *does* differs between the two, and the section says
+            // so rather than leaving the player to assume it works like a hand-over.
+            BuildNearbySection(parent);
         }
 
         // ── Extra crafts (multi-vessel submission) ──────────────────────────
 
         private void BuildNearbySection(El parent)
         {
+            bool rescue = session.IsRescue;
+
             UIF.Label(parent, "Extra crafts in range", Theme.FontSm).Bold();
 
             if (session.PreDisabledByUs)
                 UIF.Muted(parent, "Physics Range Extender is paused; this is the stock range.").Body();
+
+            // Say once, before anything is ticked, that the stranded ship and its crew
+            // are not in this list — a rescuer who cannot find the wreck here would
+            // otherwise reasonably conclude the list is broken.
+            if (rescue && session.RescueExcludedNearby > 0)
+            {
+                UIF.Muted(parent, session.RescueExcludedNearby == 1
+                    ? "One craft nearby belongs to a rescue (a stranded ship, or one of its " +
+                      "crew on EVA) and isn't listed: it is not yours to hand over."
+                    : $"{session.RescueExcludedNearby} craft nearby belong to a rescue (a " +
+                      "stranded ship, or its crew on EVA) and aren't listed: they are not " +
+                      "yours to hand over.").Body();
+            }
 
             var nearby = session.Nearby;
             if (nearby == null || nearby.Count == 0)
@@ -249,8 +267,28 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
-            UIF.Muted(parent, $"{session.SelectedExtras} of {nearby.Count} selected, packed and sent " +
-                              "with this submission.").Body();
+            bool handedOver = session.ExtrasAreHandedOver;
+
+            UIF.Muted(parent, $"{session.SelectedExtras} of {nearby.Count} selected, " +
+                              (handedOver ? "packed and sent with this submission."
+                                          : "sent with this rescue as renders and telemetry.")).Body();
+
+            // A submission hands a ship over permanently, so the one thing a player must
+            // never have to guess at is which of these craft they are giving away. Say it
+            // plainly, and say which of the two things ticking a box does here — on a
+            // rescue whose wreck this save cannot identify it is still the old
+            // renders-only behaviour, and the difference is a ship.
+            if (handedOver)
+                UIF.Muted(parent, "Ticked craft are handed over. They are packed into this " +
+                                  "delivery and deleted from your save once it is accepted, " +
+                                  "along with anyone aboard who isn't your own crew. Your own " +
+                                  "kerbals come back to the roster. This cannot be undone.").Body();
+            else if (rescue)
+                UIF.Muted(parent, "These stay in your save. Only the rescue craft itself changes " +
+                                  "hands; picking one here photographs it and sends its telemetry, " +
+                                  "so the issuer can see what you brought alongside. (Handing extra " +
+                                  "craft over needs this save to know which craft the stranded " +
+                                  "wreck is, and it doesn't for this contract.)").Body();
 
             var batch = UIF.Box(parent, "Batch").Row(Theme.Space2).H(26);
             UIF.Button(batch, "Select all", () => session.SetAllSelected(true), BtnStyle.Ghost, 26).E.Flex(1f);
@@ -293,8 +331,9 @@ namespace GeneKerman.UI.Gui
             UIF.Label(card, "Vessel renders", Theme.FontSm).Bold();
 
             int extras = session.SelectedExtras;
+            string subject = session.IsRescue ? "the rescue craft" : "the contract craft";
             UIF.Muted(card, extras > 0
-                ? $"Renders the contract craft plus {extras} selected extra" + (extras == 1 ? "." : "s.")
+                ? $"Renders {subject} plus {extras} selected extra" + (extras == 1 ? "." : "s.")
                 : "An orthographic blueprint of the craft, captured here.").Body();
 
             if (session.ScreenshotTaken && session.RenderStale)

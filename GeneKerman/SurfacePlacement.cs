@@ -204,7 +204,12 @@ namespace GeneKerman
                     // prevent). Water where the sender had water needs no edit at all.
                     if (terrain > 0.0)
                     {
-                        double newAlt = terrain + Math.Max(0.0, haveAgl ? agl : 0.0);
+                        // MaxTrustedAgl applies here too. The landed branches below both
+                        // gate on it and this one did not, so it was the one path that
+                        // would use an absurd carried height directly — the same "is this
+                        // a measurement or a claim" question, asked about the same field.
+                        double useAgl = (haveAgl && agl <= MaxTrustedAgl) ? agl : 0.0;
+                        double newAlt = terrain + Math.Max(0.0, useAgl);
                         MakeLanded(innerNode, body, newAlt);
                         ForceGroundReseat(innerNode);
                         report.Beached(body.bodyName, alt, newAlt);
@@ -286,8 +291,12 @@ namespace GeneKerman
 
         /// <summary>Whether this VESSEL node describes a craft resting on a surface —
         /// landed, pre-launch or splashed. Read from the flags first and the situation
-        /// second, since a node hand-edited by another mod may carry only one.</summary>
-        private static bool IsOnSurface(ConfigNode node)
+        /// second, since a node hand-edited by another mod may carry only one.
+        ///
+        /// Assembly-visible because VesselTransfer's incoming-orbit guard asks the same
+        /// question and must get the same answer: a surface craft's ORBIT is not what
+        /// places it, and KSP writes `SMA = NaN` into one itself.</summary>
+        internal static bool IsOnSurface(ConfigNode node)
         {
             if (node == null) return false;
             if (ReadBool(node, "landed") || ReadBool(node, "splashed")) return true;
@@ -307,14 +316,34 @@ namespace GeneKerman
             return !string.IsNullOrEmpty(s) && bool.TryParse(s, out b) && b;
         }
 
+        /// <summary>Parse one number from a peer's node: invariant culture, and finite.
+        ///
+        /// Both halves matter and both were missing in places. INVARIANT because a
+        /// GKLAND block is written on one machine and read on another — the writer
+        /// formats with "G17" (invariant by construction for round-tripping), while a
+        /// culture-default parse on a comma-decimal locale rejects "-12.3456" outright,
+        /// so the whole placement silently fell back to no correction at all. FINITE
+        /// because `TryParse` accepts "NaN" and "Infinity", and the arithmetic these
+        /// feed writes an altitude into the save.</summary>
+        private static bool ParseNum(string s, out double v)
+        {
+            v = 0.0;
+            return !string.IsNullOrEmpty(s)
+                && double.TryParse(s, System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out v)
+                && !double.IsNaN(v) && !double.IsInfinity(v);
+        }
+
         private static bool TryReadPlacement(ConfigNode node, out double lat, out double lon, out double alt)
         {
             lat = lon = alt = 0.0;
+            // IsInfinity as well as IsNaN: double.TryParse("Infinity") succeeds, and the
+            // value arrives from a peer's node, so "it parsed" says nothing about it
+            // being a number the arithmetic below can survive.
             return node != null
-                && double.TryParse(node.GetValue("lat"), out lat)
-                && double.TryParse(node.GetValue("lon"), out lon)
-                && double.TryParse(node.GetValue("alt"), out alt)
-                && !double.IsNaN(lat) && !double.IsNaN(lon) && !double.IsNaN(alt);
+                && ParseNum(node.GetValue("lat"), out lat)
+                && ParseNum(node.GetValue("lon"), out lon)
+                && ParseNum(node.GetValue("alt"), out alt);
         }
 
         private static bool TryReadAgl(ConfigNode block, out double agl)
@@ -324,16 +353,23 @@ namespace GeneKerman
 
             // Prefer the precomputed agl; fall back to the pair it was derived from, so a
             // block written by a version that only carried the datum still resolves.
-            if (double.TryParse(block.GetValue("agl"), out agl) && !double.IsNaN(agl))
+            //
+            // The finiteness test is the same one TryReadPlacement applies, and it was
+            // missing here: `double.TryParse("Infinity")` succeeds and is not NaN, so an
+            // `agl = Infinity` in a peer's GKLAND passed. The landed branch happened to
+            // reject it against MaxTrustedAgl, but the SPLASHED→beached branch used it
+            // directly and wrote a non-finite `alt` into the VESSEL node — and the
+            // terrain/alt fallback was worse still, since two Infinities give
+            // `Inf - Inf = NaN`, which `Math.Max(0, NaN)` propagates.
+            if (ParseNum(block.GetValue("agl"), out agl))
                 return true;
 
             double terrain, alt;
-            if (double.TryParse(block.GetValue("terrain"), out terrain)
-                && double.TryParse(block.GetValue("alt"), out alt)
-                && !double.IsNaN(terrain) && !double.IsNaN(alt))
+            if (ParseNum(block.GetValue("terrain"), out terrain)
+                && ParseNum(block.GetValue("alt"), out alt))
             {
                 agl = alt - terrain;
-                return true;
+                return !double.IsNaN(agl) && !double.IsInfinity(agl);
             }
             return false;
         }
@@ -427,7 +463,7 @@ namespace GeneKerman
         {
             double senderRadius;
             if (block == null || body == null) return;
-            if (!double.TryParse(block.GetValue("radius"), out senderRadius)) return;
+            if (!ParseNum(block.GetValue("radius"), out senderRadius)) return;
             if (senderRadius <= 0.0 || body.Radius <= 0.0) return;
 
             double ratio = body.Radius / senderRadius;

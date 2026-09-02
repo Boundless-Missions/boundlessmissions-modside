@@ -36,6 +36,12 @@ namespace GeneKerman
         private static string watchPid;
         private static float watchUntil;
         private static bool hooked;
+        // KSP's EventData.Add builds an EvtDelegate that dereferences evt.Target, so
+        // handing it a *static* method (Target == null) throws NullReferenceException
+        // out of the very button that thawed the wreck (seen 2026-08-30, FAK1 log).
+        // The hook is therefore an instance method on this one object.
+        private sealed class Hook { public void OnVesselChange(Vessel v) => ControlDiag.OnVesselChange(v); }
+        private static readonly Hook hook = new Hook();
 
         /// <summary>Dump now, again in five seconds, and once more when the player
         /// switches to this vessel within the next 15 minutes.</summary>
@@ -49,7 +55,7 @@ namespace GeneKerman
             if (!hooked)
             {
                 hooked = true;
-                GameEvents.onVesselChange.Add(OnVesselChange);
+                GameEvents.onVesselChange.Add(hook.OnVesselChange);
             }
 
             var mod = GeneKermanMod.Instance;

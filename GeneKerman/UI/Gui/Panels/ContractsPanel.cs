@@ -37,7 +37,9 @@
  *
  * Deliberately not here: answering a settle / more-time request as the issuer — that
  * is browser-UI and Discord only today, and the panel says so rather than pretending
- * otherwise.
+ * otherwise. Nor is *asking* for more time: the date form outgrew the action bar and
+ * moved into a window of its own (UI/Gui/Panels/MoreTimePanel.cs), which this panel
+ * opens and tracks but does not draw.
  */
 
 using System;
@@ -118,14 +120,14 @@ namespace GeneKerman.UI.Gui
         private string confirmActionId;
         private string rescueAcceptConfirmId;
 
-        /// <summary>Proposed date for a "More Time" request on a human-issued contract.</summary>
-        private DateTime moreTimeDate = DateTime.Now.Date.AddDays(7);
-        /// <summary>Contract whose more-time date form is expanded. The picker used to
-        /// sit permanently above the button, where it read as furniture rather than as
-        /// part of the ask and was easy to miss — now the button opens it.</summary>
-        private string moreTimeOpenId;
-
-        private readonly DatePicker moreTimePicker = new DatePicker();
+        /// <summary>
+        /// Contract whose more-time window is up, or null. The date, the calendar and
+        /// the send all live in MoreTimePanel now — this is the only thing left here,
+        /// and it exists so the card cannot offer to open a form that is already open.
+        /// It is cleared by the window's own close callback and by nothing else, so the
+        /// two surfaces cannot disagree about whether a request is being written.
+        /// </summary>
+        private string moreTimeWindowId;
 
         /// <summary>Contract whose report box is open, and what has been typed into it.
         /// Held here rather than in the row, because the box is rebuilt on every data
@@ -142,6 +144,14 @@ namespace GeneKerman.UI.Gui
         private SubmissionPreview preview;
         private string previewId;
         private bool previewLoading;
+
+        // The wreck's blueprint and orbit diagram, for a rescue. A separate cache from
+        // the one above rather than a shared one, because a rescue can have both at once
+        // — a submitted rescue shows what the rescuer delivered *and* what they were
+        // asked to go and get, and they are not the same pictures.
+        private SubmissionPreview rescuePreview;
+        private string rescueId;
+        private bool rescueLoading;
 
         /// <summary>
         /// Statuses that can have something to preview. Mirrors `hasSubmission` in
@@ -218,8 +228,8 @@ namespace GeneKerman.UI.Gui
             // player wants the create form, and returning here would take it away.
             if (contracts == null || contracts.Count == 0)
             {
-                // `!requested`: Poll has not yet fired its one on-demand fetch, so
-                // this is the frame before loading starts, not an empty inbox.
+                // `!requested`: no fetch has happened yet, so this is the frame
+                // before loading starts, not an empty inbox.
                 bool pending = main.ContractsLoading || !requested;
                 UIF.Notice(col,
                        pending ? "Loading contracts…" : "No contracts.",
@@ -887,9 +897,10 @@ namespace GeneKerman.UI.Gui
             ClearStatus();
             confirmActionId = null;
             rescueAcceptConfirmId = null;
-            moreTimeOpenId = null;
-            moreTimeDate = DateTime.Now.Date.AddDays(7);
-            moreTimePicker.Close();
+            // moreTimeWindowId is deliberately not reset here: it tracks a window that
+            // outlives the selection (and names its own contract), so clearing it on a
+            // click elsewhere in the inbox would leave the card offering to open a form
+            // that is already on screen.
             reportOpenId = null;
             reportReason = "";
             MarkDirty();
@@ -1025,6 +1036,8 @@ namespace GeneKerman.UI.Gui
                 }
             }
 
+            BuildRescueSchematic(card, c, cid, mType);
+
             string modlist = MiniJSON.GetString(c, "modlist", "");
             if (!string.IsNullOrEmpty(modlist))
             {
@@ -1137,6 +1150,14 @@ namespace GeneKerman.UI.Gui
             if (!string.IsNullOrEmpty(preview.VesselName))
                 UIF.Label(card, preview.VesselName, Theme.FontSm).Bold();
 
+            // Some arrived and could not be opened. Said here rather than swallowed:
+            // a partial set looks exactly like a complete one, and a reviewer deciding
+            // on it has no way to know they are looking at less than was sent.
+            if (preview.Refused > 0)
+                UIF.Muted(card, $"{preview.Refused} more image(s) were submitted but could not " +
+                                "be opened on this machine — this is not what was submitted.",
+                          Theme.FontXs).Body();
+
             // One flat list across both kinds, so the viewer's arrows step through
             // the whole submission rather than through two separate sets.
             var shots = new List<Texture2D>();
@@ -1163,6 +1184,133 @@ namespace GeneKerman.UI.Gui
 
             if (shots.Count > 0)
                 UIF.Muted(card, "Click an image to open it full screen.", Theme.FontXs);
+        }
+
+        /// <summary>
+        /// A rescue's WRECK schematics: the blueprint the issuer's client rendered of
+        /// the stranded ship, and the diagram of where it is. Drawn next to the delivery
+        /// terms above because they answer the same question — what this job is —
+        /// and text alone answers neither: Ap/Pe say how high but never which orbit, and
+        /// nothing in a mission says how big the wreck is, how many docking ports it has
+        /// or whether it has an engine left.
+        ///
+        /// Every rescue issued before this existed, and every one from a client too old
+        /// to render, carries no URLs at all. That draws as *nothing* — no card, no
+        /// heading, no placeholder — because a section saying "no schematic available"
+        /// on half the rescues in the system is worse than the silence it replaces. Only
+        /// a fetch that was started and came back empty says anything.
+        /// </summary>
+        private void BuildRescueSchematic(El card, Dictionary<string, object> c,
+                                          string cid, string mType)
+        {
+            if (mType != "rescue") return;
+
+            string bp = MiniJSON.GetString(c, "rescue_blueprint_url", "");
+            string orbit = MiniJSON.GetString(c, "rescue_orbit_url", "");
+            if (string.IsNullOrEmpty(bp) && string.IsNullOrEmpty(orbit)) return;
+
+            UIF.Divider(card);
+            UIF.Label(card, "THE WRECK", Theme.FontXs, Theme.MutedForeground);
+
+            if (rescueLoading || rescueId != cid)
+            {
+                UIF.Muted(card, "Loading schematics…", Theme.FontSm);
+                return;
+            }
+
+            if (rescuePreview == null || !rescuePreview.HasImages)
+            {
+                UIF.Muted(card, rescuePreview?.Error ?? "No schematics available.", Theme.FontSm).Body();
+                return;
+            }
+
+            // One flat list across both kinds, exactly as BuildSubmission does it, so
+            // the lightbox's arrows step through the whole set rather than two of them.
+            var shots = new List<Texture2D>();
+            var captions = new List<string>();
+            string title = string.IsNullOrEmpty(rescuePreview.VesselName)
+                           ? "Wreck" : rescuePreview.VesselName;
+
+            foreach (var tex in rescuePreview.Blueprints)
+            {
+                if (tex == null) continue;
+                shots.Add(tex);
+                captions.Add(title + " - blueprint");
+            }
+            // "Orbit" only when it is one. A wreck stranded on a surface gets a landing
+            // marker from the same renderer, and the server says which it drew — the
+            // delivery target's own mode cannot answer this, because where the crew must
+            // be dropped off and where the ship is stuck are different places.
+            bool onSurface = MiniJSON.GetBool(c, "rescue_orbit_surface", false);
+            foreach (var tex in rescuePreview.Telemetry)
+            {
+                if (tex == null) continue;
+                shots.Add(tex);
+                captions.Add(title + (onSurface ? " - location & telemetry"
+                                                : " - orbit & telemetry"));
+            }
+
+            for (int i = 0; i < shots.Count; i++)
+                PictureRow(card, shots, captions, i, title);
+
+            if (shots.Count > 0)
+                UIF.Muted(card, "Click an image to open it full screen.", Theme.FontXs);
+        }
+
+        /// <summary>Fetch the open rescue's schematics, once. Called from Poll, for the
+        /// same reason EnsurePreview is: Rebuild runs on every data change, and starting
+        /// the download from there would re-download them each time the list refreshed
+        /// underneath.</summary>
+        private void EnsureRescuePreview(string cid, Dictionary<string, object> c)
+        {
+            string bp = MiniJSON.GetString(c, "rescue_blueprint_url", "");
+            string orbit = MiniJSON.GetString(c, "rescue_orbit_url", "");
+            if (MiniJSON.GetString(c, "mission_type", "") != "rescue" ||
+                (string.IsNullOrEmpty(bp) && string.IsNullOrEmpty(orbit)))
+            {
+                ClearRescuePreview();
+                return;
+            }
+            if (rescueLoading || rescueId == cid) return;
+
+            ClearRescuePreview();
+            rescueId = cid;
+            rescueLoading = true;
+
+            var blueprints = new List<string>();
+            if (!string.IsNullOrEmpty(bp)) blueprints.Add(bp);
+            var telemetry = new List<string>();
+            if (!string.IsNullOrEmpty(orbit)) telemetry.Add(orbit);
+
+            // No name: the contract does not carry the wreck's vessel name (the crew are
+            // named, the ship is not), so BuildRescueSchematic titles it "Wreck" rather
+            // than borrowing the contract's. The orbit diagram prints the real name in
+            // its own info panel, which is where it belongs.
+            string wanted = cid;
+            GeneKermanMod.Instance.RunCoroutine(SubmissionPreviewLoader.FetchImages(
+                blueprints, telemetry, "",
+                "The schematics could not be loaded.", result =>
+                {
+                    rescueLoading = false;
+
+                    // The selection may have moved while this was in flight — same trap
+                    // as the submission preview, same answer: drop the late arrival and
+                    // destroy it, since nothing else will.
+                    if (rescueId != wanted) { result.Dispose(); return; }
+
+                    rescuePreview = result;
+                    MarkDirty();
+                }));
+        }
+
+        private void ClearRescuePreview()
+        {
+            // The viewer borrows these textures; close it before they are destroyed.
+            if (rescuePreview != null) CloseImages();
+
+            rescuePreview?.Dispose();
+            rescuePreview = null;
+            rescueId = null;
         }
 
         /// <summary>
@@ -1423,7 +1571,7 @@ namespace GeneKerman.UI.Gui
                .OnChanged(v => reportReason = v);   // no MarkDirty: a rebuild per keystroke would
                                                     // destroy the box being typed into
             UIF.Muted(box, "This opens a private ticket in Discord with a moderator pinged. " +
-                           "A late delivery or a disagreement about the work is not a report — " +
+                           "A late delivery or a disagreement about the work is not a report; " +
                            "the dispute buttons are for those.").Body();
 
             var row = UIF.Box(box, "ReportRow").Row(Theme.Space2).H(28);
@@ -1511,39 +1659,20 @@ namespace GeneKerman.UI.Gui
                     UIF.Button(bar, "More time", () => main.RequestDispute(cid, "more_time", null, Done()),
                                BtnStyle.Secondary, 28).Interactable(!Busy);
                 }
-                else if (moreTimeOpenId != cid)
-                {
-                    // The date form opens on demand instead of sitting above the
-                    // button permanently — half-hidden furniture nobody connected to
-                    // the ask, and easy to submit with a date never actually chosen.
-                    UIF.Button(bar, "Ask for more time", () =>
-                    {
-                        moreTimeOpenId = cid;
-                        moreTimeDate = DateTime.Now.Date.AddDays(7);
-                        MarkDirty();
-                    }, BtnStyle.Secondary, 28).Interactable(!Busy);
-                }
                 else
                 {
-                    // Pick only, unlike the contract form: a single date on an already
-                    // dense card. Tomorrow at the earliest — "more time" that has
-                    // already elapsed is meaningless, and the API refuses it anyway.
-                    moreTimePicker.Build(bar, DatePicker.Print(moreTimeDate),
-                                         DateTime.Now.Date.AddDays(1),
-                                         picked =>
-                                         {
-                                             moreTimeDate = DatePicker.Parse(picked, moreTimeDate);
-                                             MarkDirty();  // the send button carries the date
-                                         },
-                                         null, "New date");
-                    UIF.Muted(bar, "One ask per dispute; the issuer approves or refuses it.").Body();
-                    UIF.Button(bar, "Request until " + DatePicker.Print(moreTimeDate), () =>
-                    {
-                        moreTimeOpenId = null;
-                        main.RequestDispute(cid, "more_time", DatePicker.Print(moreTimeDate), Done());
-                    }, BtnStyle.Primary, 28).Interactable(!Busy);
-                    UIF.Button(bar, "Never mind", () => { moreTimeOpenId = null; MarkDirty(); },
-                               BtnStyle.Ghost, 28).Interactable(!Busy);
+                    // The date, the calendar and the send are in a window of their own
+                    // (MoreTimePanel). A month grid expanding inside this bar moved
+                    // every button under it while the player was aiming at one, and the
+                    // card had no room to print the deadline the ask is *about*.
+                    bool open = moreTimeWindowId == cid;
+
+                    if (open)
+                        UIF.Muted(bar, "Pick the new deadline in the \"Request more time\" window.").Body();
+
+                    UIF.Button(bar, open ? "Show the request window" : "Ask for more time",
+                               () => OpenMoreTimeWindow(c, cid, isOutgoing),
+                               BtnStyle.Secondary, 28).Interactable(!Busy);
                 }
             }
 
@@ -1559,6 +1688,39 @@ namespace GeneKerman.UI.Gui
             if (!botIssued)
                 UIF.Button(bar, "Settle", () => main.RequestDispute(cid, "settle", null, Done()),
                            BtnStyle.Secondary, 28).Interactable(!Busy);
+        }
+
+        /// <summary>
+        /// Hand the more-time ask to its window, with what the card knows about the
+        /// contract — the mission, who is being asked, and the deadline being moved.
+        ///
+        /// Done() is passed as a factory rather than called here: it marks the panel
+        /// busy the moment it is created, and the request may sit on screen for as long
+        /// as it takes to page to a month. The window makes it when Send is pressed, so
+        /// the inbox behaves exactly as it did — busy while in flight, back to the list
+        /// on success.
+        /// </summary>
+        private void OpenMoreTimeWindow(Dictionary<string, object> c, string cid, bool isOutgoing)
+        {
+            var mod = GeneKermanMod.Instance;
+            if (mod == null) return;
+
+            moreTimeWindowId = cid;
+            string target = cid;   // the tracker is cleared only for the window it opened
+
+            mod.OpenMoreTimeWindow(
+                cid,
+                MiniJSON.GetString(c, "mission"),
+                MiniJSON.GetString(c, isOutgoing ? "contractor_name" : "issuer_name", ""),
+                MiniJSON.GetString(c, "due_date", ""),
+                Done,
+                () =>
+                {
+                    if (moreTimeWindowId == target) moreTimeWindowId = null;
+                    MarkDirty();
+                });
+
+            MarkDirty();
         }
 
         /// <summary>
@@ -1582,9 +1744,14 @@ namespace GeneKerman.UI.Gui
         private void BuildRestoreSubmitted(El bar, Dictionary<string, object> c, string cid)
         {
             var scenario = GKContractScenario.Instance;
-            string pid;
-            if (scenario == null || !scenario.PeekRescueSubmission(cid, out pid)) return;
-            if (VesselTransfer.VesselExists(pid)) return;   // still here — nothing to restore
+            List<string> pids;
+            if (scenario == null || !scenario.PeekRescueSubmissions(cid, out pids)) return;
+            // Every craft that was submitted, not just the contract one: the stored node
+            // is the whole submission, so restoring it spawns all of them. If any is
+            // still in this save the restore would duplicate that hull — refuse rather
+            // than offer a button that half-works.
+            foreach (var pid in pids)
+                if (VesselTransfer.VesselExists(pid)) return;
 
             var roster = HighLogic.CurrentGame != null ? HighLogic.CurrentGame.CrewRoster : null;
             foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
@@ -1647,9 +1814,14 @@ namespace GeneKerman.UI.Gui
             }
 
             // The deliverable belongs to whoever built it, so its crew are tagged
-            // with the contractor's name on import.
+            // with the contractor's name on import — but whether they are *theirs* is
+            // decided on `contractor_id`, the immutable account id the contract list
+            // carries next to the name. A display name is self-chosen and mutable, so
+            // deciding on it lets a builder who takes the recipient's name have the
+            // recipient's own kerbals adopted onto the arriving craft.
             UIF.Button(bar, "Import / download", () => main.RequestDownloadCraft(
-                           cid, MiniJSON.GetString(c, "contractor_name", ""), Done()),
+                           cid, MiniJSON.GetString(c, "contractor_name", ""), Done(),
+                           MiniJSON.GetString(c, "contractor_id", "")),
                        BtnStyle.Primary, 28).Interactable(!Busy);
         }
 
@@ -1768,12 +1940,28 @@ namespace GeneKerman.UI.Gui
             // avatars; both need pumping, and only while it is on screen.
             if (creating) form.Poll();
 
-            if (!requested && main.ContractList == null && !main.ContractsLoading &&
-                mod.Api != null && mod.Api.IsLinked)
+            if (!requested && mod.Api != null && mod.Api.IsLinked)
             {
+                // `requested` means "a fetch has happened", not "this panel fired
+                // one". ClientState refreshes contracts on link and after every
+                // contract action, so the list is often already fetched — and an
+                // empty inbox is a non-null empty list (MiniJSON.GetList never
+                // returns null) — by the time the panel is shown. The old guard
+                // then never fired, and since OnShown clears the flag, nothing was
+                // ever going to set it: an empty inbox sat on "Loading contracts…"
+                // until a contract turned up. So the flag is set for either answer,
+                // and only the fetch itself is conditional.
                 requested = true;
-                main.RequestContractsRefresh();
-                return;
+                if (main.ContractList == null && !main.ContractsLoading)
+                {
+                    main.RequestContractsRefresh();
+                    return;
+                }
+
+                // Nothing to fetch, so neither the count nor the loading flag will
+                // change below — and the frame already drawn says "Loading". Repaint
+                // it by hand or it stays there for the life of the panel.
+                MarkDirty();
             }
 
             if ((main.ContractList?.Count ?? -1) != lastCount ||
@@ -1798,11 +1986,16 @@ namespace GeneKerman.UI.Gui
             if (string.IsNullOrEmpty(openId))
             {
                 ClearPreview();
+                ClearRescuePreview();
             }
             else
             {
                 var open = main.FindContract(openId);
-                if (open != null) EnsurePreview(openId, MiniJSON.GetString(open, "status"));
+                if (open != null)
+                {
+                    EnsurePreview(openId, MiniJSON.GetString(open, "status"));
+                    EnsureRescuePreview(openId, open);
+                }
             }
         }
 
@@ -1835,6 +2028,7 @@ namespace GeneKerman.UI.Gui
             // Textures are not garbage: hold them and every contract ever opened
             // stays resident until the scene changes.
             ClearPreview();
+            ClearRescuePreview();
             form.Dispose();
         }
 
@@ -1845,6 +2039,7 @@ namespace GeneKerman.UI.Gui
             // because it is what stops Poll re-fetching. Without this the submission
             // card stays blank for the rest of the session.
             ClearPreview();
+            ClearRescuePreview();
         }
     }
 }

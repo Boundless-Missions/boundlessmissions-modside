@@ -44,7 +44,12 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         private const float CraftPollSeconds = 1.5f;
 
-        private readonly PlayerPicker picker = new PlayerPicker();
+        // Friends, not the server roster: a quicksend is a hand-over, and for a live
+        // vessel it deletes the ship out of this save. The server refuses a
+        // non-friend anyway (/api/v1/craft/send), so drawing the roster here would
+        // only offer people the send cannot reach.
+        private readonly PlayerPicker picker =
+            new PlayerPicker { From = PlayerPicker.Source.Friends };
 
         private ToolActions.CraftState craft;
         private float nextCraftRead;
@@ -119,13 +124,19 @@ namespace GeneKerman.UI.Gui
             {
                 UIF.Label(card, craft.ActiveVessel + ", sent as a live vessel, crew included.",
                           Theme.FontXs).Body();
-                // A live vessel send is a hand-over, and the player must read that
-                // BEFORE pressing Send — the same reason the rescue form carries an
-                // explicit permanence line.
-                UIF.Muted(card, "This hands the vessel over: it and its crew leave your " +
-                                "save once sent (the ship you're flying goes when you " +
-                                "leave it). If your friend declines, it comes back.",
-                          Theme.FontXs).Body();
+                if (!string.IsNullOrEmpty(craft.VesselSendBlock))
+                    // Instead of the permanence line, not alongside it: while the send
+                    // is refused, what the player needs is the thing to go and fix, and
+                    // warning about consequences of a send that cannot happen buries it.
+                    UIF.Muted(card, craft.VesselSendBlock, Theme.FontXs).Body();
+                else
+                    // A live vessel send is a hand-over, and the player must read that
+                    // BEFORE pressing Send — the same reason the rescue form carries an
+                    // explicit permanence line.
+                    UIF.Muted(card, "This hands the vessel over: it and its crew leave your " +
+                                    "save once sent (the ship you're flying goes when you " +
+                                    "leave it). If your friend declines, it comes back.",
+                              Theme.FontXs).Body();
             }
             else if (kind == "craft")
             {
@@ -146,17 +157,22 @@ namespace GeneKerman.UI.Gui
                 UIF.Muted(card, "Fly a vessel, or open a saved craft in the editor, to send it.").Body();
             }
 
-            picker.Build(card, "No other players found to send to.");
+            picker.Build(card, "No friends yet. Add one in the Friends panel: "
+                               + "by Boundless username, or from your Discord server.");
 
-            bool ready = kind != null && picker.HasSelection && !Busy;
+            bool ready = craft.CanSend && picker.HasSelection && !Busy;
             string label = Busy ? "Sending…"
                          : picker.HasSelection ? "Send to " + picker.SelectedName
-                         : "Pick a player";
+                         : "Pick a friend";
 
             UIF.Button(card, label, () =>
             {
                 string k = craft.SendKind;
-                if (k == null || !picker.HasSelection) return;
+                // Re-read rather than trusting `ready`: the card is drawn from a poll up
+                // to a second old, and a ship can throttle up or hit atmosphere between
+                // the draw and the click. ToolActions refuses again on its own behalf;
+                // this only keeps the UI from starting a send it can see is doomed.
+                if (k == null || !craft.CanSend || !picker.HasSelection) return;
 
                 var done = Begin(CardSend);
                 mod.RunCoroutine(ToolActions.QuicksendCurrent(

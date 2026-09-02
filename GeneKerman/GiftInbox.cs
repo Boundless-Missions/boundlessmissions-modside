@@ -107,11 +107,16 @@ namespace GeneKerman
             if (HighLogic.CurrentGame == null) return false;
             var scene = HighLogic.LoadedScene;
 
+            // A live vessel joins the universe (ProtoVessel.Load) and writes the save,
+            // neither of which may happen while the scene is still loading — see
+            // GeneKermanMod.SceneSettled for the duplicate-vessel save that produced.
+            // An unsettled scene leaves the entry queued for the next poll.
             if (source == "rescue_delivery" || source == "gift_vessel" ||
                 source == "submission_restore")
-                return scene == GameScenes.FLIGHT ||
-                       scene == GameScenes.SPACECENTER ||
-                       scene == GameScenes.TRACKSTATION;
+                return GeneKermanMod.SceneSettled &&
+                       (scene == GameScenes.FLIGHT ||
+                        scene == GameScenes.SPACECENTER ||
+                        scene == GameScenes.TRACKSTATION);
 
             return scene == GameScenes.SPACECENTER || scene == GameScenes.EDITOR ||
                    scene == GameScenes.FLIGHT || scene == GameScenes.TRACKSTATION;
@@ -163,7 +168,9 @@ namespace GeneKerman
             }
             else
             {
-                onDone(true, "Accepted. It will arrive next time you're at the Space Center.");
+                onDone(true, source == "gift_vessel"
+                    ? "Accepted. It will spawn once you're at the Space Center or in flight."
+                    : "Accepted. It will arrive next time you're at the Space Center.");
             }
         }
 

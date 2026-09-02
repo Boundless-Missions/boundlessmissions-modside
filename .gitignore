@@ -16,3 +16,17 @@
 
 # Keep the build script
 !build.sh
+
+# Per-install runtime state, never source. PluginData holds the player's own
+# settings.cfg, their consent record, their session token and (dev builds only) the
+# debug bridge's handshake. A `settings.cfg` was committed here once and, because
+# build.sh only writes its default when the file is ABSENT, that stale copy meant the
+# corrected default was never written — and it was then deployed into every dev
+# instance carrying three keys nothing reads (checkInterval, enableKVV,
+# enableContractInjection) plus enableCheckpointPhotos=false.
+GameData/BoundlessMissions/PluginData/
+
+# ...but keep the bundled third-party assembly, which SHIPS to players and whose
+# absence from the repo means a fresh clone cannot build and nothing would ever
+# notice the file changing. `*.dll` above would otherwise exclude it.
+!GeneKerman/lib/websocket-sharp.dll

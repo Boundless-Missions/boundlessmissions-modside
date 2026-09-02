@@ -38,6 +38,7 @@
 
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using UnityEngine;
 
 namespace GeneKerman
@@ -266,6 +267,8 @@ namespace GeneKerman
             StockReseatCycle(wreck, names, seated);
             SpawnMissingIvas(wreck, seated);
             NotifyCrewChanged(wreck);
+            RefreshControlCaches(wreck);
+            RepairCrewSkillRegistration(seated);
             PersistIfPossible(wreck);
             GKContractScenario.Instance?.RemoveImmunity(rec.ContractId);
             Debug.Log($"[GeneKerman] RescueFreeze: thawed {revived}/{rec.Crew.Count} kerbal(s) " +
@@ -273,8 +276,16 @@ namespace GeneKerman
 
             // The SAS-after-thaw bug has outlived two fixes; until a dump from a real
             // repro names the broken link, every thaw records its own control chain
-            // (now, in 5 s, and when the player switches to the wreck).
-            ControlDiag.Arm(wreck, "post-thaw");
+            // (now, in 5 s, and when the player switches to the wreck). Guarded because
+            // a diagnostic must never be what breaks the thaw it is diagnosing — the
+            // 2026-08-30 FAK1 log has ControlDiag.Arm throwing straight out of the button
+            // that thawed the wreck (a static GameEvents handler; KSP's EvtDelegate ctor
+            // dereferences evt.Target), which cost that playtest the two follow-up dumps.
+            try { ControlDiag.Arm(wreck, "post-thaw"); }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] RescueStasis: control diagnostic failed: {ex.Message}");
+            }
 
             if (revived > 0 && !manual) Announce(revived, rations);
         }
@@ -723,6 +734,348 @@ namespace GeneKerman
             {
                 Debug.LogWarning($"[GeneKerman] RescueStasis: crew refresh failed: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Re-derive, now, the two stored numbers that decide whether a thawed pod has SAS.
+        ///
+        /// Neither is read live, and that is the trap this method exists to close.
+        /// <c>Part.PartValues.AutopilotSkill</c> is a cached value that only changes when
+        /// <c>EventValueWrapper.Update()</c> re-invokes the delegates each crew member's
+        /// ExperienceTrait registered on the part, and stock does that once a frame from
+        /// <c>Part.Update()</c> (for exactly the crewable parts this walks).
+        /// <c>ModuleCommand.GetControlSourceState()</c> is not a computation either — it
+        /// returns whatever <c>ModuleCommand.FixedUpdate</c> last stored, and the pilot
+        /// count behind it is what decides PARTIAL_MANNED versus full control.
+        ///
+        /// So seating a kerbal leaves both numbers still describing a pod that was empty,
+        /// until the next frame ticks. Anything that reads the vessel at the end of a thaw
+        /// — the player's own eyes a frame later, and every control dump this file has ever
+        /// taken — sees that stale pair, which is why a one-frame lag keeps being mistaken
+        /// for the bug: on the 2026-08-30 FAK1 log the post-thaw dump reported
+        /// <c>APSkill=-1</c> and <c>mc.state=KerbalPartial</c> for a pod holding two
+        /// level-5 Pilots whose every non-cached field was correct.
+        ///
+        /// Doing that work a few milliseconds early is a no-op wherever the thaw already
+        /// works: the next frame computes the identical values from the identical inputs.
+        /// What it buys is that the numbers become evidence — an APSkill still at -1
+        /// *after* this call means the experience traits were never registered on the part,
+        /// which is a different bug from a stale cache and is indistinguishable from one
+        /// otherwise.
+        /// </summary>
+        private static void RefreshControlCaches(Vessel wreck)
+        {
+            if (wreck == null || !wreck.loaded || wreck.parts == null) return;
+
+            foreach (Part p in wreck.parts)
+            {
+                if (p == null) continue;
+                try
+                {
+                    // Same condition stock's own per-frame refresh uses, so this asks for
+                    // nothing it wasn't going to do anyway.
+                    if (p.CrewCapacity > 0 && p.PartValues != null) p.PartValues.Update();
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] RescueStasis: skill refresh failed for " +
+                                     $"'{PartLabel(p)}': {ex.Message}");
+                }
+                try
+                {
+                    var commands = p.FindModulesImplementing<ModuleCommand>();
+                    if (commands == null) continue;
+                    foreach (var mc in commands)
+                        if (mc != null) mc.UpdateControlState();
+                }
+                catch (System.Exception ex)
+                {
+                    Debug.LogWarning($"[GeneKerman] RescueStasis: control-source refresh failed " +
+                                     $"for '{PartLabel(p)}': {ex.Message}");
+                }
+            }
+        }
+
+
+        // ── Self-heal: seated crew whose experience traits were never registered ───
+
+        /// <summary>
+        /// Repair the one failure <see cref="RefreshControlCaches"/> can now prove: crew
+        /// aboard, traits intact, and the part's autopilot skill still sitting at the
+        /// empty-pod sentinel because their ExperienceTrait was never registered on it.
+        ///
+        /// The detection is an arithmetic contradiction, not a heuristic. Registration
+        /// hangs a delegate on <c>PartValues.AutopilotSkill</c> pointing at
+        /// <c>Experience.Effects.AutopilotSkill.GetValue()</c>, which returns
+        /// <c>Mathf.Max(pcm.experienceLevel, 0)</c> — never negative, and never overridable
+        /// (the method is private, and the delegate is bound to it non-virtually). The
+        /// comparison starts each <c>Update()</c> at its default of −1 and keeps the
+        /// largest value any registered delegate returns. So for a part holding assigned
+        /// crew whose trait carries that effect:
+        ///
+        ///     registered  ⟹  value ≥ 0        hence        value &lt; 0  ⟹  not registered
+        ///
+        /// which is why this cannot fire on a healthy vessel: −1 after a fresh
+        /// <c>Update()</c> is not "the skill is low" or "the cache is stale", it is
+        /// "no crew delegate is attached to this part at all". The refresh is what makes
+        /// the read admissible — it is re-done here, and a refresh that throws abandons
+        /// the part rather than judging it on a stale number.
+        ///
+        /// The repair is stock's own registration call, <c>ExperienceEffect.Register(part)</c>
+        /// — exactly the loop body of <c>ExperienceTrait.Register</c>, which is what
+        /// <c>Part.AddCrewmember</c> reaches through <c>pcm.RegisterExperienceTraits</c>.
+        /// It is used per effect rather than through <c>RegisterExperienceTraits</c> for
+        /// one reason: <c>EventValueComparison.Add</c> does not de-duplicate while
+        /// <c>Remove</c> takes off a single entry, so registering an effect that is already
+        /// attached would leave a phantom behind when the kerbal later leaves — a pod that
+        /// keeps a departed pilot's SAS. Every effect is therefore membership-tested
+        /// first, and one that cannot be tested is left alone unless it is the autopilot
+        /// effect the arithmetic already proved missing.
+        ///
+        /// Scope is the parts this thaw just seated into, nothing else on the vessel.
+        ///
+        /// Nothing here reads <c>Vessel.VesselValues</c> or <c>CanEngageSAS</c>, deliberately:
+        /// those are memoised per frame by <c>PartValuesComparison.get_value</c>, so touching
+        /// them now would freeze a pre-repair number into the frame and hand ControlDiag's
+        /// post-thaw dump — which runs after this — a stale answer to the question it exists
+        /// to ask. Everything below is read off <c>PartValues</c>, which we refresh ourselves.
+        /// </summary>
+        private static void RepairCrewSkillRegistration(List<Part> seated)
+        {
+            if (seated == null || seated.Count == 0) return;
+            try
+            {
+                foreach (Part p in seated)
+                {
+                    try { RepairPartSkillRegistration(p); }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning($"[GeneKerman] RescueStasis: skill-registration " +
+                                         $"self-heal failed for '{PartLabel(p)}': {ex.Message}");
+                    }
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] RescueStasis: skill-registration self-heal " +
+                                 $"aborted: {ex.Message}");
+            }
+        }
+
+        private static void RepairPartSkillRegistration(Part p)
+        {
+            if (p == null || p.CrewCapacity <= 0) return;
+            if (p.protoModuleCrew == null || p.protoModuleCrew.Count == 0) return;
+            var values = p.PartValues;
+            if (values == null || values.AutopilotSkill == null) return;
+
+            // Only crew that are actually aboard and actually claim autopilot: without one
+            // of these there is no contradiction to detect and nothing to repair.
+            var candidates = new List<ProtoCrewMember>();
+            foreach (var pcm in p.protoModuleCrew)
+            {
+                if (pcm == null) continue;
+                if (pcm.rosterStatus != ProtoCrewMember.RosterStatus.Assigned) continue;
+                if (pcm.experienceTrait == null) continue;
+                if (!HasAutopilotEffect(pcm)) continue;
+                candidates.Add(pcm);
+            }
+            if (candidates.Count == 0) return;
+
+            // Re-run the refresh here so the number judged below is this frame's, not one
+            // RefreshControlCaches may have failed to take.
+            try { values.Update(); }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] RescueStasis: skill-registration self-heal " +
+                                 $"skipped '{PartLabel(p)}': PartValues.Update threw " +
+                                 $"{ex.GetType().Name}: {ex.Message}");
+                return;
+            }
+
+            int before = values.AutopilotSkill.value;
+            if (before >= 0) return;   // registered, therefore healthy: strict no-op.
+
+            // Broken, and provably so. Everything from here is loud on purpose: a self-heal
+            // that engages is the evidence that registration — and not some later link in
+            // the control chain — is what the thawed-SAS bug has been all along.
+            Debug.LogWarning(
+                $"[GeneKerman] RescueStasis: SKILL REGISTRATION MISSING on '{PartLabel(p)}' " +
+                $"after thaw. before: APSkill={before} APKerbal={SafeValue(values.AutopilotKerbalSkill)} " +
+                $"APSAS={SafeValue(values.AutopilotSASSkill)} isControlSource={p.isControlSource} " +
+                $"{CommandStates(p)}; crew: {DescribeCandidates(candidates)}. " +
+                $"A registered autopilot effect cannot report a negative skill, so the " +
+                $"experience traits were never attached to this part. Repairing.");
+
+            int registered = 0, skipped = 0, blind = 0;
+            foreach (var pcm in candidates)
+            {
+                foreach (var fx in EffectsOf(pcm))
+                {
+                    if (fx == null) continue;
+                    bool? present = IsEffectRegisteredOn(values, fx);
+                    if (present == true) { skipped++; continue; }
+                    if (present == null)
+                    {
+                        // Membership unknown (reflection unavailable). Register only what the
+                        // arithmetic proved absent; anything else risks a duplicate.
+                        if (!(fx is Experience.Effects.AutopilotSkill)) { blind++; continue; }
+                    }
+                    try { fx.Register(p); registered++; }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogWarning($"[GeneKerman] RescueStasis: re-registering " +
+                                         $"'{fx.GetType().Name}' for '{pcm.name}' on " +
+                                         $"'{PartLabel(p)}' threw {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+            }
+
+            try { values.Update(); } catch (System.Exception) { /* reported by the after-state */ }
+            try
+            {
+                var commands = p.FindModulesImplementing<ModuleCommand>();
+                if (commands != null)
+                    foreach (var mc in commands)
+                        if (mc != null) mc.UpdateControlState();
+            }
+            catch (System.Exception) { /* reported by the after-state */ }
+
+            int after = values.AutopilotSkill.value;
+            string tail = $"registered {registered} effect(s), {skipped} already attached, " +
+                          $"{blind} left alone (unverifiable). after: APSkill={after} " +
+                          $"APKerbal={SafeValue(values.AutopilotKerbalSkill)} " +
+                          $"APSAS={SafeValue(values.AutopilotSASSkill)} " +
+                          $"isControlSource={p.isControlSource} {CommandStates(p)}";
+
+            if (after >= 0)
+                Debug.LogWarning($"[GeneKerman] RescueStasis: SKILL REGISTRATION REPAIRED on " +
+                                 $"'{PartLabel(p)}': {tail}. Trait registration was the broken " +
+                                 $"link; SAS should be available on this vessel.");
+            else
+                Debug.LogWarning($"[GeneKerman] RescueStasis: SKILL REGISTRATION REPAIR DID NOT " +
+                                 $"TAKE on '{PartLabel(p)}': {tail}. The skill is still at the " +
+                                 $"empty-pod sentinel, so the cause is downstream of registration " +
+                                 $"(next suspect: a CommNetVessel replacement such as " +
+                                 $"RealAntennas' RACommNetVessel, which Vessel.CurrentControlLevel " +
+                                 $"defers to while CommNet is on). Please report this line.");
+        }
+
+        /// <summary>The effects a kerbal's trait carries; empty rather than null on any doubt.</summary>
+        private static List<Experience.ExperienceEffect> EffectsOf(ProtoCrewMember pcm)
+        {
+            try
+            {
+                var fx = pcm?.experienceTrait?.Effects;
+                if (fx != null) return fx;
+            }
+            catch (System.Exception) { /* fall through */ }
+            return new List<Experience.ExperienceEffect>();
+        }
+
+        private static bool HasAutopilotEffect(ProtoCrewMember pcm)
+        {
+            foreach (var fx in EffectsOf(pcm))
+                if (fx is Experience.Effects.AutopilotSkill) return true;
+            return false;
+        }
+
+        // PartValues' event lists are private, and the entries wrapping each delegate are a
+        // private nested type — but the delegate's target (the ExperienceEffect instance
+        // itself) is a public field on it, which is the whole question: is THIS effect
+        // already hooked to this part? Reflection, and null on any failure, so that an
+        // unknown answer is never mistaken for "no".
+        private static FieldInfo[] _partValueFields;
+        private static readonly Dictionary<System.Type, FieldInfo> _eventListFields =
+            new Dictionary<System.Type, FieldInfo>();
+        private static readonly Dictionary<System.Type, FieldInfo> _originatorFields =
+            new Dictionary<System.Type, FieldInfo>();
+
+        private static bool? IsEffectRegisteredOn(PartValues values, Experience.ExperienceEffect fx)
+        {
+            try
+            {
+                if (_partValueFields == null)
+                    _partValueFields = typeof(PartValues).GetFields(BindingFlags.Public | BindingFlags.Instance);
+
+                bool sawAnyList = false;
+                foreach (var field in _partValueFields)
+                {
+                    object holder = field.GetValue(values);
+                    if (holder == null) continue;
+
+                    System.Type ht = holder.GetType();
+                    FieldInfo listField;
+                    if (!_eventListFields.TryGetValue(ht, out listField))
+                    {
+                        listField = ht.GetField("events", BindingFlags.NonPublic | BindingFlags.Instance);
+                        _eventListFields[ht] = listField;
+                    }
+                    if (listField == null) continue;
+
+                    var entries = listField.GetValue(holder) as System.Collections.IEnumerable;
+                    if (entries == null) continue;
+                    sawAnyList = true;
+
+                    foreach (object entry in entries)
+                    {
+                        if (entry == null) continue;
+                        System.Type et = entry.GetType();
+                        FieldInfo originator;
+                        if (!_originatorFields.TryGetValue(et, out originator))
+                        {
+                            originator = et.GetField("originator", BindingFlags.Public | BindingFlags.Instance);
+                            _originatorFields[et] = originator;
+                        }
+                        if (originator == null) continue;
+                        if (ReferenceEquals(originator.GetValue(entry), fx)) return true;
+                    }
+                }
+                return sawAnyList ? (bool?)false : null;
+            }
+            catch (System.Exception)
+            {
+                return null;
+            }
+        }
+
+        private static string SafeValue(EventValueComparison<int> v)
+        {
+            try { return v == null ? "?" : v.value.ToString(); }
+            catch (System.Exception) { return "?"; }
+        }
+
+        private static string CommandStates(Part p)
+        {
+            try
+            {
+                var commands = p.FindModulesImplementing<ModuleCommand>();
+                if (commands == null || commands.Count == 0) return "mc=none";
+                var parts = new List<string>();
+                foreach (var mc in commands)
+                {
+                    if (mc == null) continue;
+                    parts.Add($"{((CommNet.ICommNetControlSource)mc).GetControlSourceState()}" +
+                              $"(minCrew={mc.minimumCrew})");
+                }
+                return "mc=" + string.Join(",", parts.ToArray());
+            }
+            catch (System.Exception ex) { return "mc=threw " + ex.GetType().Name; }
+        }
+
+        private static string DescribeCandidates(List<ProtoCrewMember> crew)
+        {
+            var bits = new List<string>();
+            foreach (var pcm in crew)
+            {
+                try
+                {
+                    bits.Add($"{pcm.name} trait={pcm.trait} level={pcm.experienceLevel} " +
+                             $"inactive={pcm.inactive} seat={(pcm.seat == null ? "null" : "set")}");
+                }
+                catch (System.Exception) { bits.Add("?"); }
+            }
+            return string.Join("; ", bits.ToArray());
         }
 
         /// <summary>Persist the change so stasis survives a quit. Only saves outside flight

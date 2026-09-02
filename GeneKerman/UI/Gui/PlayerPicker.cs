@@ -9,6 +9,12 @@
  * Favourites come from Favorites.cs (PluginData), the same store the browser UI writes
  * through /gk/favorites, so a star set in one front end is a star in the other.
  *
+ * Two sources, chosen by the owner (see Source). Contract creation lists the server
+ * roster — a contract is an offer of work and anyone may be offered it. Quicksend
+ * lists FRIENDS, because a send is a hand-over: a live vessel leaves the sender's
+ * save. The list here is only the drawing of that rule; /api/v1/craft/send enforces
+ * it, so a picker showing the wrong set cannot turn into a send to a stranger.
+ *
  * The list rebuilds itself, not the panel. Typing in the search box must filter as you
  * type, and a panel rebuild would destroy the box mid-keystroke — SidebarPanel.Tick even
  * refuses to do it while a field has focus. So the picker keeps a handle on its own list
@@ -33,7 +39,23 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         private const float AvatarRefreshSeconds = 0.3f;
 
-        private List<object> corps;          // raw dicts from /api/v1/corps/list
+        /// <summary>Which server list this picker draws.</summary>
+        internal enum Source
+        {
+            /// <summary>Everyone with a corp — the contract contractor list.</summary>
+            Roster,
+            /// <summary>Accepted friends only — the quicksend recipient list.</summary>
+            Friends,
+        }
+
+        /// <summary>Set before the first EnsureLoaded; changing it later re-fetches
+        /// on the next Reset, which is what a panel does when it is re-shown.</summary>
+        internal Source From = Source.Roster;
+
+        /// <summary>Parsed at fetch time rather than on every redraw: the two sources
+        /// name their fields differently and normalising once is what keeps the
+        /// filtering, sorting and row drawing below source-agnostic.</summary>
+        private List<Player> players;
         private bool loading;
         private bool requested;
         private string error;
@@ -95,21 +117,25 @@ namespace GeneKerman.UI.Gui
             loading = true;
             error = null;
 
-            mod.RunCoroutine(mod.Api.GetCorps((ok, data, err) =>
+            ApiClient.ApiCallback<Dictionary<string, object>> done = (ok, data, err) =>
             {
                 loading = false;
                 if (ok && data != null)
                 {
-                    corps = MiniJSON.GetList(data, "corps");
+                    players = Parse(data);
                     error = null;
                 }
                 else
                 {
-                    corps = null;
+                    players = null;
                     error = err ?? "Failed to load players.";
                 }
                 RefreshList();
-            }));
+            };
+
+            mod.RunCoroutine(From == Source.Friends
+                             ? mod.Api.GetFriends(done)
+                             : mod.Api.GetCorps(done));
         }
 
         /// <summary>Forget the roster and the selection: a new visit starts clean.</summary>
@@ -247,7 +273,7 @@ namespace GeneKerman.UI.Gui
             detailsHidden = StreamerMode.HideDetails;
             listHost.ClearChildren();
 
-            if (loading || (corps == null && error == null))
+            if (loading || (players == null && error == null))
             {
                 UIF.Muted(listHost, "Loading players…").Body();
                 return;
@@ -273,41 +299,81 @@ namespace GeneKerman.UI.Gui
             foreach (var c in shown) Row(content, c);
         }
 
+        /// <summary>
+        /// One response, whichever endpoint it came from.
+        ///
+        /// The second line of a row is "the detail": a corp name on the roster, the
+        /// player's Boundless username among friends. Both are the same kind of
+        /// thing to everything downstream — searchable while shown, hidden together
+        /// under streamer mode — so they share one field rather than teaching the
+        /// row about its source.
+        /// </summary>
+        private static List<Player> Parse(Dictionary<string, object> data)
+        {
+            var list = new List<Player>();
+            // Which endpoint answered is decided by the KEY, not by whether the list
+            // it holds is empty: MiniJSON.GetList never returns null — it hands back
+            // an empty list for a missing key — so "friends came back non-null" is
+            // true of a corps response too, and testing it that way made the roster
+            // branch below unreachable and the contract picker permanently empty.
+            if (data != null && data.ContainsKey("friends"))
+            {
+                foreach (var entry in MiniJSON.GetList(data, "friends"))
+                {
+                    var d = entry as Dictionary<string, object>;
+                    if (d == null) continue;
+                    string uname = MiniJSON.GetString(d, "username");
+                    list.Add(new Player
+                    {
+                        Id = MiniJSON.GetString(d, "user_id"),
+                        Name = MiniJSON.GetString(d, "name"),
+                        Detail = string.IsNullOrEmpty(uname) ? "" : "@" + uname,
+                        Level = MiniJSON.GetInt(d, "level"),
+                        AvatarUrl = MiniJSON.GetString(d, "avatar_url"),
+                    });
+                }
+                return list;
+            }
+
+            foreach (var entry in MiniJSON.GetList(data, "corps"))
+            {
+                var d = entry as Dictionary<string, object>;
+                if (d == null) continue;
+                list.Add(new Player
+                {
+                    Id = MiniJSON.GetString(d, "owner_id"),
+                    Name = MiniJSON.GetString(d, "owner_name"),
+                    Detail = MiniJSON.GetString(d, "corp_name"),
+                    Level = MiniJSON.GetInt(d, "level"),
+                    AvatarUrl = MiniJSON.GetString(d, "avatar_url"),
+                });
+            }
+            return list;
+        }
+
         private List<Player> Filter()
         {
             var list = new List<Player>();
-            if (corps == null) return list;
+            if (players == null) return list;
 
             string me = OwnUserId();
             string q = (query ?? "").Trim().ToLowerInvariant();
 
-            foreach (var entry in corps)
+            foreach (var p in players)
             {
-                var d = entry as Dictionary<string, object>;
-                if (d == null) continue;
-
-                var p = new Player
-                {
-                    Id = MiniJSON.GetString(d, "owner_id"),
-                    Name = MiniJSON.GetString(d, "owner_name"),
-                    Corp = MiniJSON.GetString(d, "corp_name"),
-                    Level = MiniJSON.GetInt(d, "level"),
-                    AvatarUrl = MiniJSON.GetString(d, "avatar_url"),
-                };
-
                 // No self-send and no self-contract; the classic windows filter the
                 // same way. A missing profile means no id to compare, and showing
                 // yourself is better than showing nobody.
                 if (string.IsNullOrEmpty(p.Id) || p.Id == me) continue;
                 if (favoritesOnly && !Favorites.IsFavorite(p.Id)) continue;
 
-                // The corp name is searchable only while it is *shown*: matching on a
-                // hidden field answers a query with rows that look like they do not
+                // The detail line is searchable only while it is *shown*: matching on
+                // a hidden field answers a query with rows that look like they do not
                 // match it, which reads as the search being broken.
                 if (q.Length > 0 &&
                     (p.Name ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0 &&
                     (detailsHidden ||
-                     (p.Corp ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0))
+                     (p.Detail ?? "").ToLowerInvariant().IndexOf(q, StringComparison.Ordinal) < 0))
                     continue;
 
                 list.Add(p);
@@ -351,7 +417,7 @@ namespace GeneKerman.UI.Gui
             // where it is while picking one.
             UIF.Label(text, p.Name, Theme.FontSm, selected ? Theme.AccentForeground : (Color?)null)
                .Bold(selected).Ellipsis();
-            if (!detailsHidden && !string.IsNullOrEmpty(p.Corp)) UIF.Muted(text, p.Corp).Ellipsis();
+            if (!detailsHidden && !string.IsNullOrEmpty(p.Detail)) UIF.Muted(text, p.Detail).Ellipsis();
 
             if (p.Level > 0) UIF.Badge(row, "Lv " + p.Level, Theme.MutedForeground);
 
@@ -431,6 +497,10 @@ namespace GeneKerman.UI.Gui
         private static Texture2D Decode(bool ok, byte[] bytes)
         {
             if (!ok || bytes == null || bytes.Length == 0) return null;
+            // The avatar URL is whatever the server sent, and the bytes whatever that
+            // host returned: judge the header before Unity allocates from it. See
+            // ToolActions.ImageIsSafeToDecode.
+            if (!ToolActions.ImageIsSafeToDecode(bytes, "an avatar")) return null;
 
             var tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
             if (!tex.LoadImage(bytes))
@@ -500,7 +570,8 @@ namespace GeneKerman.UI.Gui
         {
             public string Id;
             public string Name;
-            public string Corp;
+            /// <summary>Corp name on the roster, "@username" among friends.</summary>
+            public string Detail;
             public int Level;
             public string AvatarUrl;
         }

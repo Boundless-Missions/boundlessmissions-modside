@@ -103,14 +103,36 @@ namespace GeneKerman
         sealed class Parser : IDisposable
         {
             const string WORD_BREAK = "{}[],:\"";
+
+            /// <summary>
+            /// How deeply objects and arrays may nest before the parse is abandoned.
+            ///
+            /// ParseValue → ParseObject/ParseArray recurse once per level, so a body of
+            /// nothing but "[" — a few tens of kilobytes — exhausts the stack, and a
+            /// StackOverflowException on Mono cannot be caught: the process dies, taking
+            /// whatever flight was unsaved with it. Every response body from the server
+            /// comes through here, including the unauthenticated /version/check, so this
+            /// is reachable by anything that can answer as the server. No legitimate
+            /// payload here nests past a handful of levels.
+            /// </summary>
+            const int MAX_DEPTH = 32;
+
             StringReader json;
+            int depth;
+            bool tooDeep;
 
             Parser(string jsonString) { json = new StringReader(jsonString); }
 
             public static object Parse(string jsonString)
             {
                 using (var p = new Parser(jsonString))
-                    return p.ParseValue();
+                {
+                    object result = p.ParseValue();
+                    // All-or-nothing: a document that hit the limit is reported as
+                    // unparseable rather than as a half-read one, so a caller cannot act
+                    // on the top-level fields of a body that was truncated mid-parse.
+                    return p.tooDeep ? null : result;
+                }
             }
 
             public void Dispose() { json.Dispose(); }
@@ -168,6 +190,7 @@ namespace GeneKerman
 
             object ParseValue()
             {
+                if (tooDeep) return null;
                 switch (NextToken)
                 {
                     case TOKEN.STRING: return ParseString();
@@ -183,18 +206,20 @@ namespace GeneKerman
 
             Dictionary<string, object> ParseObject()
             {
+                if (!Descend()) return null;
                 var table = new Dictionary<string, object>();
                 while (true)
                 {
+                    if (tooDeep) { depth--; return null; }
                     switch (NextToken)
                     {
-                        case TOKEN.NONE: return null;
-                        case TOKEN.CURLY_CLOSE: return table;
+                        case TOKEN.NONE: depth--; return null;
+                        case TOKEN.CURLY_CLOSE: depth--; return table;
                         case TOKEN.COMMA: continue;
                         default:
                             string name = ParseString();
-                            if (name == null) return null;
-                            if (NextToken != TOKEN.COLON) return null;
+                            if (name == null) { depth--; return null; }
+                            if (NextToken != TOKEN.COLON) { depth--; return null; }
                             table[name] = ParseValue();
                             break;
                     }
@@ -203,14 +228,16 @@ namespace GeneKerman
 
             List<object> ParseArray()
             {
+                if (!Descend()) return null;
                 var array = new List<object>();
                 while (true)
                 {
+                    if (tooDeep) { depth--; return null; }
                     var token = NextToken;
                     switch (token)
                     {
-                        case TOKEN.NONE: return null;
-                        case TOKEN.SQUARED_CLOSE: return array;
+                        case TOKEN.NONE: depth--; return null;
+                        case TOKEN.SQUARED_CLOSE: depth--; return array;
                         case TOKEN.COMMA: continue;
                         default:
                             // Re-read the value since NextToken consumed characters for non-string/non-number
@@ -224,6 +251,22 @@ namespace GeneKerman
                             break;
                     }
                 }
+            }
+
+            /// <summary>Enter one nesting level, or refuse and poison the parse. The
+            /// counter is decremented on every path out of ParseObject/ParseArray, so a
+            /// wide-but-shallow document is unaffected.</summary>
+            bool Descend()
+            {
+                if (depth >= MAX_DEPTH)
+                {
+                    tooDeep = true;
+                    UnityEngine.Debug.LogWarning("[GeneKerman] MiniJSON: refused a response " +
+                                                 $"nested deeper than {MAX_DEPTH} levels.");
+                    return false;
+                }
+                depth++;
+                return true;
             }
 
             string ParseString()

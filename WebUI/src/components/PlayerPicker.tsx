@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Loader2, Search, Star, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { type Corp, type Profile, type Settings, api, imageUrl } from "@/lib/bridge";
+import { type Corp, type FriendList, type Profile, type Settings, api, imageUrl } from "@/lib/bridge";
 import { cn } from "@/lib/utils";
 
 /**
@@ -14,15 +14,27 @@ import { cn } from "@/lib/utils";
  * Favorites live in the mod's PluginData, not in this browser: the bridge binds a new
  * ephemeral port each session, so 127.0.0.1:<port> is a different origin on every KSP
  * launch and localStorage would silently start empty every time.
+ *
+ * Two sources. Contract creation lists the server roster — a contract is an offer of
+ * work and anyone may be offered it. Quicksend lists FRIENDS, because a send is a
+ * hand-over: a live vessel leaves the sender's save. This is only the drawing of that
+ * rule; /api/v1/craft/send enforces it, so a picker showing the wrong set cannot turn
+ * into a send to a stranger. Friends are mapped into the same row shape as corps —
+ * the handle stands in for the corp name — so everything below stays source-agnostic.
  */
 export function PlayerPicker({
   value,
   onChange,
   emptyLabel = "No other players found.",
+  source = "roster",
+  refreshKey = 0,
 }: {
   value: string;
   onChange: (corp: Corp | null) => void;
   emptyLabel?: string;
+  source?: "roster" | "friends";
+  /** Bump to refetch — a friend accepted in the card above this one. */
+  refreshKey?: number;
 }) {
   const [corps, setCorps] = useState<Corp[] | null>(null);
   const [me, setMe] = useState("");
@@ -35,10 +47,27 @@ export function PlayerPicker({
   const [hideDetails, setHideDetails] = useState(false);
 
   useEffect(() => {
-    api
-      .get<{ corps: Corp[] }>("/api/v1/corps/list")
-      .then((r) => setCorps(r.corps ?? []))
-      .catch(() => setCorps([]));
+    if (source === "friends") {
+      api
+        .get<FriendList>("/api/v1/friends")
+        .then((r) =>
+          setCorps(
+            (r.friends ?? []).map((f) => ({
+              owner_id: f.user_id,
+              owner_name: f.name,
+              corp_name: f.username ? `@${f.username}` : "",
+              avatar_url: f.avatar_url ?? null,
+              level: f.level ?? 0,
+            }))
+          )
+        )
+        .catch(() => setCorps([]));
+    } else {
+      api
+        .get<{ corps: Corp[] }>("/api/v1/corps/list")
+        .then((r) => setCorps(r.corps ?? []))
+        .catch(() => setCorps([]));
+    }
 
     // Own id, so the list can drop self — there is no self-send and no self-contract,
     // and the classic windows filter the same way.
@@ -53,7 +82,7 @@ export function PlayerPicker({
       .catch(() => {
         /* favorites are a convenience; the picker works without them */
       });
-  }, []);
+  }, [source, refreshKey]);
 
   // Polled rather than read once, and at the same cadence the mod scans at: streamer
   // mode turns itself on when OBS starts, which is a change nobody made in this tab.

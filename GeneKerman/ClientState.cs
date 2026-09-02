@@ -37,6 +37,17 @@ namespace GeneKerman
         private bool missionsLocked;
         private List<object> contracts;
         private List<object> notifications;
+        // The Finance tab's blob: balance, lifetime totals, the daily series and a
+        // page of recent movements, exactly as /api/v1/finance returned it. Held
+        // here rather than in the panel for the reason every other cache is — a
+        // panel is destroyed and rebuilt, and re-fetching a history on every
+        // rebuild would hammer the server for data that has not changed.
+        private Dictionary<string, object> finance;
+        // The page currently held, so a refresh after sending money re-reads the
+        // same slice of the ledger the player was looking at rather than jumping
+        // them back to the top.
+        private int financeOffset;
+        private string financeCategory = "";
         // Client-raised notifications (photo shared, craft installed, device
         // approved, …) have no server record, so they're kept here and re-merged
         // into `notifications` on every refresh — a bare server fetch would wipe
@@ -45,6 +56,7 @@ namespace GeneKerman
 
         // Loading states
         private bool loadingMissions, loadingContracts, loadingProfile, loadingNotifs;
+        private bool loadingFinance;
 
         // Craft import queue — crafts the player selected in Discord. The mod polls
         // /api/v1/craft/imports/pending and auto-imports each into the active save.
@@ -136,6 +148,57 @@ namespace GeneKerman
         internal bool ProfileLoading => loadingProfile;
         internal void RequestProfileRefresh() => RefreshProfile();
 
+        /// <summary>
+        /// Corp-channel deliveries @-mention this account (server-side preference,
+        /// carried on the profile). True before the first fetch, which is the
+        /// server's default too — a switch has to draw *something*, and the panel
+        /// showing it waits on <see cref="ProfileData"/> being non-null anyway.
+        /// </summary>
+        internal bool CorpPings => profile == null || MiniJSON.GetBool(profile, "corp_pings", true);
+
+        /// <summary>
+        /// Record a preference the server has just confirmed, so the switch that
+        /// flipped it stays where the player put it.
+        ///
+        /// Writing into the cached blob rather than re-fetching the profile is the
+        /// point: a refetch costs a round trip to learn something the write already
+        /// told us, and until it landed the panel would redraw with the old value —
+        /// the switch visibly springing back and then flipping again.
+        /// </summary>
+        internal void NoteCorpPings(bool enabled)
+        {
+            if (profile != null) profile["corp_pings"] = enabled;
+        }
+
+        /// <summary>The finance blob. Null before the first fetch.</summary>
+        internal Dictionary<string, object> FinanceData => finance;
+        internal bool FinanceLoading => loadingFinance;
+        internal int FinanceOffset => financeOffset;
+        internal string FinanceCategory => financeCategory;
+
+        /// <summary>
+        /// Re-read the wallet history. <paramref name="offset"/> and
+        /// <paramref name="category"/> are remembered, so the plain no-argument
+        /// refresh below re-reads whatever page is on screen.
+        /// </summary>
+        internal void RequestFinanceRefresh(int offset, string category)
+        {
+            financeOffset = offset < 0 ? 0 : offset;
+            financeCategory = category ?? "";
+            RefreshFinance();
+        }
+
+        internal void RequestFinanceRefresh() => RefreshFinance();
+
+        /// <summary>
+        /// Send coins to another player, then re-read both the finance blob and the
+        /// profile — the balance is shown in two places and they must not disagree.
+        /// The refresh is fired on success only: a refused transfer moved nothing.
+        /// </summary>
+        internal void RequestSendMoney(string toUserId, int amount, string note,
+                                       Action<bool, string> onDone)
+            => GeneKermanMod.Instance.RunCoroutine(DoSendMoney(toUserId, amount, note, onDone));
+
         /// <summary>This week's missions, plus the two facts that qualify them.</summary>
         internal IList<object> MissionList => missions;
         internal string MissionWeekKey => weekKey;
@@ -195,8 +258,13 @@ namespace GeneKerman
         internal void RequestReportContract(string contractId, string reason, Action<bool, string> onDone)
             => GeneKermanMod.Instance.RunCoroutine(DoReportContract(contractId, reason, onDone));
 
-        internal void RequestDownloadCraft(string contractId, string ownerName, Action<bool, string> onDone)
-            => GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(contractId, ownerName, onDone));
+        /// <summary><paramref name="ownerId"/> is the deliverable's owner as an immutable
+        /// account id (the contract's `contractor_id`), which is what crew ownership is
+        /// decided on; <paramref name="ownerName"/> stays for the tag text and as the
+        /// fallback for a caller that has no id. See VesselTransfer.DecideComingHome.</summary>
+        internal void RequestDownloadCraft(string contractId, string ownerName, Action<bool, string> onDone,
+                                           string ownerId = "")
+            => GeneKermanMod.Instance.RunCoroutine(DoDownloadCraft(contractId, ownerName, onDone, ownerId));
 
         /// <summary>Spawn an accepted rescue's stranded vessel into this save. Takes the
         /// contract dict rather than the pieces because everything the spawn needs — the
@@ -225,7 +293,12 @@ namespace GeneKerman
                 MiniJSON.GetString(contract, "issuer_name", ""),
                 kerbals,
                 MiniJSON.GetString(contract, "life_support", "none"),
-                onDone));
+                onDone,
+                // The issuer's immutable account id, which the contract list carries
+                // alongside the display name. It is what crew ownership is decided on;
+                // the name is passed too, and is only used for the tag text and as the
+                // fallback comparison for a contract written before the server sent it.
+                MiniJSON.GetString(contract, "issuer_id", "")));
         }
 
         internal void RequestLogoutAllDevices()
@@ -505,8 +578,78 @@ namespace GeneKerman
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetProfile((ok, data, err) =>
             {
                 loadingProfile = false;
-                if (ok) profile = data;
+                if (!ok) return;
+                profile = data;
+                // The same response the mod's identity comes from, so adopt it here too.
+                // Updating only this cache is what left a client that started while the
+                // server was down with an empty LinkedAccountId for the whole session:
+                // InitialFetch is the only other setter and it runs once, so every later
+                // refresh re-read the id and threw it away. See NoteProfileIdentity.
+                GeneKermanMod.Instance.NoteProfileIdentity(data);
             }));
+        }
+
+        /// <summary>
+        /// Fetch the wallet history for the page currently selected.
+        ///
+        /// A failed fetch deliberately leaves the previous blob in place rather than
+        /// nulling it: a dropped request would otherwise blank a screen the player is
+        /// reading, and stale history is far better than none. The panel distinguishes
+        /// the two by watching <see cref="FinanceLoading"/>.
+        /// </summary>
+        private void RefreshFinance()
+        {
+            if (loadingFinance) return;          // one in flight is enough
+            var api = GeneKermanMod.Instance != null ? GeneKermanMod.Instance.Api : null;
+            if (api == null || !api.IsLinked) return;
+
+            loadingFinance = true;
+            GeneKermanMod.Instance.RunCoroutine(api.GetFinance(
+                FinanceGraphDays, FinancePageSize, financeOffset, financeCategory,
+                (ok, data, err) =>
+                {
+                    loadingFinance = false;
+                    if (ok && data != null) finance = data;
+                }));
+        }
+
+        /// <summary>How many days of bars the graph asks for.</summary>
+        internal const int FinanceGraphDays = 14;
+
+        /// <summary>How many movements one page of the list holds.</summary>
+        internal const int FinancePageSize = 40;
+
+        private System.Collections.IEnumerator DoSendMoney(string toUserId, int amount, string note,
+                                        Action<bool, string> onDone)
+        {
+            var api = GeneKermanMod.Instance != null ? GeneKermanMod.Instance.Api : null;
+            if (api == null || !api.IsLinked)
+            {
+                if (onDone != null) onDone(false, "Not linked to an account.");
+                yield break;
+            }
+
+            bool sent = false;
+            string message = "";
+            yield return api.SendMoney(toUserId, amount, note, (ok, data, err) =>
+            {
+                sent = ok;
+                message = ok
+                    ? MiniJSON.GetString(data, "message", "Sent.")
+                    : (err ?? "Transfer failed");
+            });
+
+            if (sent)
+            {
+                // Both, and in this order: the panel shows the balance from the
+                // finance blob and the Profile tab shows it from the profile blob,
+                // so refreshing one leaves the other quietly wrong until something
+                // else happens to touch it.
+                RefreshFinance();
+                RefreshProfile();
+            }
+
+            if (onDone != null) onDone(sent, message);
         }
 
         private void RefreshMissions()
@@ -533,7 +676,14 @@ namespace GeneKerman
             GeneKermanMod.Instance.RunCoroutine(GeneKermanMod.Instance.Api.GetActiveContracts((ok, data, err) =>
             {
                 loadingContracts = false;
-                if (ok) contracts = MiniJSON.GetList(data, "contracts");
+                if (ok)
+                {
+                    contracts = MiniJSON.GetList(data, "contracts");
+                    // The rescue landing-site markers are derived from this list, so a
+                    // freshly accepted (or just-ended) rescue draws — or disappears —
+                    // on the refresh rather than on the next idle sync.
+                    RescueWaypoints.Poke();
+                }
             }));
         }
 
@@ -625,21 +775,37 @@ namespace GeneKerman
             // on accept silently lost the wreck whenever accept happened from the editor.
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/accept", "{}", (ok, resp, status) =>
             {
-                if (ok)
+                // Two kinds of refusal, and this used to report neither. A business rule
+                // arrives as HTTP 200 + success:false with the reason in `message` ("Contract
+                // is not pending." — it was withdrawn or accepted while this panel sat open),
+                // which a status-only check read as *accepted*. A wrong recipient or a deleted
+                // contract arrives as 403/404 with the reason in FastAPI's `detail`. Both are
+                // sentences the player can act on, and "Failed to accept contract" is not.
+                var d = MiniJSON.DeserializeDict(resp);
+                bool success = ok && d != null && MiniJSON.GetBool(d, "success", false);
+                string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+
+                if (success)
                 {
-                    SetStatus("(Ok) Contract accepted!");
+                    if (string.IsNullOrEmpty(msg)) msg = "Contract accepted!";
+                    SetStatus("(Ok) " + msg);
                     RefreshContracts();
-                    onDone?.Invoke(true, "Contract accepted.");
+                    onDone?.Invoke(true, msg);
                 }
                 else
                 {
-                    SetStatus("(No) Failed to accept contract.");
-                    onDone?.Invoke(false, "Failed to accept contract.");
+                    string err = RefusalMessage(status, d, "Couldn't accept the contract");
+                    SetStatus("(No) " + err);
+                    // Deliberately no RefreshContracts() here, even though a refusal usually
+                    // means the offer moved on under us. The panel draws this message inside
+                    // the open contract's detail pane, and a re-read that drops the contract
+                    // from the list closes that pane — taking the explanation with it.
+                    onDone?.Invoke(false, err);
                 }
             });
         }
 
-        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals, string builtWithLs = "none", Action<bool, string> onDone = null)
+        private System.Collections.IEnumerator DoSpawnRescueWreck(string contractId, string wreckUrl, RescueTargetSpec target, string issuerName, List<string> rescueKerbals, string builtWithLs = "none", Action<bool, string> onDone = null, string issuerId = "")
         {
             // The scenario is what makes every guard below real: without it the dedup
             // and the freeze records have nowhere to live, and a null-Instance spawn
@@ -690,19 +856,50 @@ namespace GeneKerman
                 // stale epoch forward and placing it wherever the source vessel would be at
                 // the current universe time. Crew are tagged with the issuer's name; the
                 // rescuer collects them and brings them to the target to complete.
-                string name = VesselTransfer.ImportVesselAtTarget(node, null, issuerName, myName);
+                // Ownership is decided on `issuerId` — the issuer's immutable account id,
+                // now carried on the contract list next to the display name. The name is
+                // still passed because it is the tag text ("{owner}'s {kerbal}"), and it
+                // is still the fallback comparison when the id is absent: a contract
+                // fetched from a server that predates the field, or an old cached list.
+                // Not fail-closed on a missing id, deliberately — refusing to strip the
+                // tag makes an honest returning kerbal read as borrowed, and
+                // PurgeBorrowedGhostCrew then deletes it. VesselTransfer.DecideComingHome
+                // logs the fallback once per session.
+                string name = VesselTransfer.ImportVesselAtTarget(
+                    node, null, issuerName, myName, null, issuerId);
                 if (!string.IsNullOrEmpty(name))
                 {
                     // Mark imported only on a real spawn, so a scene-guard / parse
                     // failure leaves the contract retryable instead of locked out.
                     GKContractScenario.Instance?.MarkVesselImported(contractId);
 
+                    // Write down what the wreck IS, while it is unambiguous. Later — at
+                    // submission, with its crew aboard the rescue craft and its freeze
+                    // record long dropped — nothing else in this save can tell it apart
+                    // from a support craft the rescuer flew out, and the extras list is a
+                    // list of craft to hand over. On a crew-only rescue the server never
+                    // sends wreck_parts, so this is the only answer there is.
+                    // The renames ride with the record. TagCrew moves an arriving kerbal
+                    // out of the way when this roster already holds the name, and from
+                    // that moment the contract's list — written on the issuer's machine,
+                    // held by the server, and never told — names nobody in this save. The
+                    // freeze below and the hand-over that eventually settles these crew
+                    // both work by name, so an unrecorded rename means the stranded crew
+                    // are never lifted out of the life-support simulation at all.
+                    GKContractScenario.Instance?.RecordRescueWreck(
+                        contractId, VesselTransfer.LastSpawnedPid,
+                        VesselTransfer.PartFlightIdsOf(VesselTransfer.LastSpawnedPid),
+                        VesselTransfer.LastCrewRenames);
+
                     // Emergency freeze: the stranded crew are lifted out of the simulation
                     // (and released by every installed LS mod) until the rescuer reaches the
                     // wreck, which also gets a ration kit of THIS install's life support in
                     // case it was built for another mod.
-                    RescueImmunityGuardian.Register(contractId, VesselTransfer.LastSpawnedPid,
-                                                    rescueKerbals, builtWithLs);
+                    RescueImmunityGuardian.Register(
+                        contractId, VesselTransfer.LastSpawnedPid,
+                        GKContractScenario.Instance?.LocalRescueCrewNames(contractId, rescueKerbals)
+                            ?? rescueKerbals,
+                        builtWithLs);
                     string dest = target != null ? target.body : "the target";
                     SetStatus($"🛟 Stranded vessel '{name}' is adrift. Find it and bring the crew to {dest}.");
                     onDone?.Invoke(true, $"'{name}' is adrift. Find it and bring the crew to {dest}.");
@@ -792,20 +989,33 @@ namespace GeneKerman
         {
             yield return GeneKermanMod.Instance.Api.Post($"/api/v1/contracts/{contractId}/cancel", "{}", (ok, resp, status) =>
             {
-                if (ok)
+                // Same soft-failure contract as accept, and one refusal here is shaped as a
+                // sentence on purpose: a contractor who already accepted is told to use Give
+                // Up instead and what the fine costs. `USE_GIVE_UP` is returned as a 200
+                // rather than a 403 precisely so both clients can render that text — and
+                // trusting the HTTP status alone rendered it as "Contract cancelled".
+                var d = MiniJSON.DeserializeDict(resp);
+                bool success = ok && d != null && MiniJSON.GetBool(d, "success", false);
+                string msg = d != null ? MiniJSON.GetString(d, "message", "") : "";
+
+                if (success)
                 {
-                    SetStatus("🗑 Contract cancelled.");
+                    if (string.IsNullOrEmpty(msg)) msg = "Contract cancelled.";
+                    SetStatus("🗑 " + msg);
                     // Clear enforcer if it was active for this contract
                     if (EditorPartEnforcer.Instance != null &&
                         EditorPartEnforcer.Instance.ActiveContractId == contractId)
                         EditorPartEnforcer.Instance.StopEnforcing();
                     RefreshContracts();
-                    onDone?.Invoke(true, "Contract cancelled.");
+                    onDone?.Invoke(true, msg);
                 }
                 else
                 {
-                    SetStatus("(No) Failed to cancel contract.");
-                    onDone?.Invoke(false, "Failed to cancel contract.");
+                    string err = RefusalMessage(status, d, "Couldn't cancel the contract");
+                    SetStatus("(No) " + err);
+                    // See DoAcceptContract: refreshing here would close the pane the message
+                    // is drawn in.
+                    onDone?.Invoke(false, err);
                 }
             });
         }
@@ -879,14 +1089,24 @@ namespace GeneKerman
         }
 
         /// <summary>
-        /// Why a report did not land, in words the player can act on.
+        /// Why a contract action did not land, in words the player can act on.
+        ///
+        /// The two shapes a refusal arrives in are both read here, because a caller
+        /// cannot know in advance which one it will get. A *business rule* is a 200
+        /// with `success:false` and the sentence in `message` ("Contract is not
+        /// pending.", "Use Give Up instead; it costs the agreed 1,000 KCoin fine.");
+        /// a wrong recipient or a missing contract is a 403/404 with the sentence in
+        /// FastAPI's `detail`. Either way the server already wrote the explanation,
+        /// and a client that replaces it with "failed" only sends the player back to
+        /// press the same button.
         ///
         /// FastAPI puts a deliberate refusal in `detail` as a string; a validation
         /// failure puts a list of objects there instead, which would ToString() as a
-        /// type name — so anything that is not a string is dropped and the status
-        /// carries the number a maintainer needs instead.
+        /// type name — so anything that is not a string is dropped and `fallback`
+        /// carries the status number a maintainer needs instead.
         /// </summary>
-        private static string ReportRefusal(long status, Dictionary<string, object> body)
+        internal static string RefusalMessage(long status, Dictionary<string, object> body,
+                                             string fallback)
         {
             if (status == 0)
                 return "Couldn't reach the server; check you're online and try again.";
@@ -899,18 +1119,21 @@ namespace GeneKerman
                 detail = MiniJSON.GetString(body, "message", null);
 
             return string.IsNullOrEmpty(detail)
-                ? "The server refused the report (HTTP " + status + ")."
+                ? fallback + " (HTTP " + status + ")."
                 : detail;
         }
 
-        private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "", Action<bool, string> onDone = null)
+        private static string ReportRefusal(long status, Dictionary<string, object> body)
+            => RefusalMessage(status, body, "The server refused the report");
+
+        private System.Collections.IEnumerator DoDownloadCraft(string contractId, string ownerName = "", Action<bool, string> onDone = null, string ownerId = "")
         {
             SetStatus("[+] Fetching craft info...");
             yield return CraftDelivery.Deliver(contractId, ownerName, (ok, msg) =>
             {
                 SetStatus((ok ? "(Ok) " : "(No) ") + msg);
                 onDone?.Invoke(ok, msg);
-            });
+            }, ownerId);
         }
 
         // ── Craft import queue ──────────────────────────────────────────────
@@ -943,6 +1166,80 @@ namespace GeneKerman
             }));
         }
 
+        /// <summary>
+        /// The crew names an arriving payload is <i>attested</i> to be bringing home to
+        /// this save, or null when nothing attests to anything.
+        ///
+        /// Two things can attest, and both are records the server kept rather than
+        /// anything the payload says.
+        ///
+        /// A rescue this player <b>issued</b> attests with its <c>rescue_kerbals</c>,
+        /// tagged by this very client when it handed the wreck over and held by the
+        /// server ever since. A <b>friend quicksend</b> attests with the
+        /// <c>homebound</c> list the server puts on the import entry: it recorded which
+        /// of this save's own crew left for that friend on the outbound leg, and offers
+        /// them back only on a return from that same friend (see
+        /// <c>data/crew_ledger.py</c>). Neither is a list a counterparty can write —
+        /// whoever is returning the craft can only bring back kerbals this save actually
+        /// sent <i>them</i>.
+        ///
+        /// Everything else — a third party's multi-hop, a contractor's own submission
+        /// coming back — has no such record and gets the plain refusal (see
+        /// VesselTransfer.ApplyIncomingOwnershipTag).
+        ///
+        /// Until the quicksend half existed, an honest round trip cost a player their
+        /// crew's identity for the life of the save: lend a crewed ship to a friend, get
+        /// it back, and the kerbals returned double-tagged and <c>borrowed</c>, eligible
+        /// for <see cref="VesselTransfer.PurgeBorrowedGhostCrew"/> to delete outright.
+        ///
+        /// <paramref name="ready"/> separates "nothing to attest" from "cannot tell yet".
+        /// A rescue delivery that arrives before the contract list has ever been fetched
+        /// is not un-attested, it is un-checked, and treating the two the same would
+        /// re-tag the issuer's own kerbals under the rescuer — which is exactly the
+        /// corruption the allow-list exists to prevent. The caller defers instead.
+        /// </summary>
+        private List<string> HomeboundCrewFor(
+            Dictionary<string, object> entry, string source, string refId, out bool ready)
+        {
+            ready = true;
+
+            // The quicksend half. The attestation rides on the entry itself, so unlike
+            // the rescue case below there is nothing to fetch and nothing to defer on:
+            // the server either vouched for these names or it did not. `Has` rather
+            // than a count, because an absent list and an empty one must not read the
+            // same — "nobody vouched" keeps the impersonation refusal, while an empty
+            // attested list would be a promise with nothing behind it.
+            if (source == "gift_vessel")
+            {
+                if (!MiniJSON.Has(entry, "homebound")) return null;
+                var vouched = new List<string>();
+                foreach (var k in MiniJSON.GetList(entry, "homebound"))
+                    if (k != null && !string.IsNullOrEmpty(k.ToString())) vouched.Add(k.ToString());
+                return vouched.Count > 0 ? vouched : null;
+            }
+
+            if (source != "rescue_delivery" || string.IsNullOrEmpty(refId)) return null;
+            if (contracts == null) { ready = false; return null; }
+
+            foreach (var o in contracts)
+            {
+                var c = o as Dictionary<string, object>;
+                if (c == null || MiniJSON.GetString(c, "contract_id") != refId) continue;
+                // Not ours to attest: on the contractor's side this contract's crew are
+                // somebody else's kerbals, and nothing here may strip a tag off them.
+                if (!MiniJSON.GetBool(c, "is_outgoing")) return null;
+                var names = new List<string>();
+                foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
+                    if (k != null && !string.IsNullOrEmpty(k.ToString())) names.Add(k.ToString());
+                return names.Count > 0 ? names : null;
+            }
+            // The list is loaded and does not carry this contract (purged, or from a
+            // guild this account no longer reads). Nothing is attested, which costs an
+            // ownership tag rather than a kerbal — and, unlike the un-fetched case, it
+            // resolves to the same answer next time, so deferring here would loop.
+            return null;
+        }
+
         private System.Collections.IEnumerator DoProcessImport(Dictionary<string, object> entry)
         {
             string importId = MiniJSON.GetString(entry, "import_id", "");
@@ -953,6 +1250,14 @@ namespace GeneKerman
             string source = MiniJSON.GetString(entry, "source", "");
             string vesselNodeUrl = MiniJSON.GetString(entry, "vessel_node_url", null);
             string ownerName = MiniJSON.GetString(entry, "owner_name", "");
+            // The immutable account id of whoever owns the arriving crew. `owner_name` is
+            // still what gets written into a roster tag ("A's Jeb" is for a human to
+            // read), but only this decides whether those kerbals are OURS — a display
+            // name is self-chosen and not unique, so deciding on it let anyone rename
+            // themselves to a victim and have the victim's own kerbals adopted onto the
+            // arriving vessel. Empty on entries queued before the server carried it; see
+            // VesselTransfer.DecideComingHome for what happens then.
+            string ownerId = MiniJSON.GetString(entry, "owner_id", "");
             string flagUrl = MiniJSON.GetString(entry, "flag_url", null);
 
             // Flag-design payout: a delivered flag PNG. Install it into the flag picker
@@ -1041,27 +1346,67 @@ namespace GeneKerman
 
                 string myName = GeneKermanMod.Instance.LinkedUsername;
                 string refId = MiniJSON.GetString(entry, "ref_id", "");
+
+                // Which of these crew, if any, this save is *owed back*. The names on a
+                // returning craft look exactly like a forgery — "{me}'s Jeb" written by
+                // somebody else — so nothing in the payload can tell them apart, and only
+                // a record the server kept can: the contract, for a rescue this player
+                // issued, or the crew ledger, for a friend returning a ship this save
+                // lent them. See VesselTransfer.ApplyIncomingOwnershipTag.
+                bool attestable;
+                var homebound = HomeboundCrewFor(entry, source, refId, out attestable);
+                if (!attestable)
+                {
+                    // The contract list has not been fetched yet this session, so we
+                    // cannot tell the honest return from the forgery. Guessing costs the
+                    // issuer their own kerbals, and the payload is not going anywhere:
+                    // ask for the list and leave the entry queued for the next poll.
+                    RefreshContracts();
+                    processingImports.Remove(importId);
+                    yield break;
+                }
+
                 bool spawned = false;
+                bool unpackRefused = false;
+                string importRefusal = null;
                 yield return GeneKermanMod.Instance.Api.DownloadFile(vesselNodeUrl, (ok, fileData) =>
                 {
                     if (!ok || fileData == null) return;
-                    string node = CraftDelivery.DecompressToString(fileData);
-                    string vesselName = VesselTransfer.ImportVesselAtTarget(node, null, ownerName, myName);
+                    string node = CraftDelivery.DecompressToString(fileData, out unpackRefused);
+                    if (unpackRefused) return;
+                    // Fleet-aware: a rescue submission may now carry extra craft the
+                    // rescuer sent alongside, packed as a GKFLEET container. Both this
+                    // delivery (to the issuer) and the restore (back to the contractor)
+                    // are that same stored node, so both have to spawn every vessel in
+                    // it — and the restore has to know which one is the contract craft.
+                    string vesselName;
+                    var spawnedPids = VesselTransfer.ImportDeliveredFleet(
+                        node, ownerName, myName, out vesselName, homebound, ownerId);
+                    // A payload refused for its node count is the same permanent case
+                    // the decompression cap refuses: the bytes are the same bytes every
+                    // time, so leaving it queued is a re-download and a re-refusal on
+                    // every launch rather than a retry.
+                    importRefusal = VesselTransfer.LastImportRefusal;
                     if (!string.IsNullOrEmpty(vesselName))
                     {
                         spawned = true;
                         // A restored submission is still what this save owes the
-                        // contract: re-key the contract→pid record to the spawned copy,
-                        // or a later approval's removal targets the pid the player
-                        // recovered and the restored hull would survive the hand-over.
-                        if (source == "submission_restore" && !string.IsNullOrEmpty(refId))
-                            GeneKermanMod.Instance.RecordRescueSubmission(
-                                refId, VesselTransfer.LastImportedPid);
+                        // contract: re-key the contract→pid record to the spawned
+                        // copies, or a later approval's removal targets the pids the
+                        // player recovered and the restored hulls would survive the
+                        // hand-over. Primary first — ImportDeliveredFleet guarantees
+                        // that ordering, and the removal path relies on it to decide
+                        // which entry carries the contract's crew list.
+                        if (source == "submission_restore" && !string.IsNullOrEmpty(refId) &&
+                            spawnedPids.Count > 0)
+                            GeneKermanMod.Instance.RecordRescueSubmission(refId, spawnedPids);
 
                         // A gift_vessel whose owner is *us* is our own quicksend coming
                         // home after a decline, not a present from ourselves.
                         bool isReturn = source == "gift_vessel" &&
-                                        !string.IsNullOrEmpty(myName) && ownerName == myName;
+                                        VesselTransfer.DecideComingHome(
+                                            ownerId, GeneKermanMod.Instance.LinkedAccountId,
+                                            ownerName, myName, out _);
                         string title = isReturn ? "📪 Vessel Returned"
                                      : source == "gift_vessel" ? "🎁 Vessel Received"
                                      : source == "submission_restore" ? "Craft restored"
@@ -1071,14 +1416,58 @@ namespace GeneKerman
                             : source == "submission_restore"
                             ? $"{vesselName} is back where it was when you submitted. It still belongs to the contract."
                             : $"{vesselName}{(source == "gift_vessel" && !string.IsNullOrEmpty(ownerName) ? $" from {ownerName}" : "")} has arrived in your save.";
+                        // A fleet arrives under the primary's name; say how many came
+                        // with it, or the other hulls read as craft that appeared from
+                        // nowhere in the tracking station.
+                        if (spawnedPids.Count > 1)
+                            body += $" {spawnedPids.Count - 1} more craft came with it.";
                         GeneKermanMod.Instance.ShowNotification(title, body);
                     }
                 });
-                if (!spawned)
+                if (!spawned && !unpackRefused && importRefusal == null)
                 {
                     processingImports.Remove(importId);
                     yield break;
                 }
+                // Only a SIZE refusal acks, and the split is the whole point.
+                //
+                // Everything in this branch is a live vessel the other side has already
+                // let go of: ToolActions.Quicksend deletes the sender's ship and crew on
+                // the server's `ok`, a rescue delivery is the issuer's own wreck coming
+                // home, and a submission_restore is a craft that left the contractor's
+                // save when they submitted it. The server's stored snapshot is therefore
+                // the ONLY remaining copy, and /done is what tells it to drop that copy.
+                // Acking a refusal here destroyed the ship outright: refused, acked,
+                // snapshot gone, and it exists in neither save.
+                //
+                // The unpack cap is different, and may still ack. It is derived from the
+                // server's own upload ceiling, so nothing the server accepted can trip
+                // it — a payload that does is bytes no client will ever unpack, and the
+                // snapshot it names is not a ship anybody can be given back.
+                //
+                // A node-level refusal is a CLIENT policy constant (MaxFleetVessels, the
+                // orbit guard) rather than a property of the bytes: a later build can
+                // relax it and import the very same payload. So it is left queued — not
+                // as a retry, since the entry stays in `processingImports` and is not
+                // re-downloaded again this session, but so that the copy survives.
+                //
+                // `spawned` outranks both. A fleet whose extras were refused after the
+                // primary went in has been consumed: leaving it queued would re-import
+                // and duplicate what did spawn, which is the one outcome worse than
+                // losing the extras.
+                if (!spawned && !unpackRefused)
+                {
+                    GeneKermanMod.Instance.ShowNotification("(No) Delivery was refused",
+                        $"{craftName} was not imported: {importRefusal}. Nothing was spawned, and " +
+                        "it has been LEFT in your import queue so the sender's copy is not thrown " +
+                        "away — nothing has been lost. Please report this with your KSP.log.");
+                    yield break;   // deliberately no /done: the ack is what drops the snapshot
+                }
+                if (unpackRefused)
+                    GeneKermanMod.Instance.ShowNotification("(No) Delivery could not be unpacked",
+                        $"{craftName} could not be unpacked safely — it is past the size limit or " +
+                        "damaged — and has been cleared from your import queue. Nothing was spawned. " +
+                        "Please report this with your KSP.log; the sender can try again.");
                 yield return GeneKermanMod.Instance.Api.Post(
                     $"/api/v1/craft/imports/{importId}/done", "{}", (ok, resp, status) => { });
                 processingImports.Remove(importId);
@@ -1090,10 +1479,11 @@ namespace GeneKerman
             if (!string.IsNullOrEmpty(craftUrl))
             {
                 bool installed = false;
+                string refusal = null;
                 yield return GeneKermanMod.Instance.Api.DownloadFile(craftUrl, (ok, fileData) =>
                 {
                     if (!ok || fileData == null) return;
-                    string path = CraftInstaller.Install(fileData, craftFilename, loadmeta);
+                    string path = CraftInstaller.Install(fileData, craftFilename, loadmeta, out refusal);
                     if (path != null)
                     {
                         installed = true;
@@ -1101,12 +1491,19 @@ namespace GeneKerman
                             $"{craftName} saved to your Ships folder.");
                     }
                 });
-                if (!installed)
+                if (!installed && refusal == null)
                 {
                     // Leave it queued for the next poll (e.g. a download hiccup).
                     processingImports.Remove(importId);
                     yield break;
                 }
+                // A payload this build refuses is refused identically every time, so
+                // leaving it queued is a silent loop rather than a retry: ack it and say
+                // what happened. Falls through to the ack below.
+                if (refusal != null)
+                    GeneKermanMod.Instance.ShowNotification("(No) Craft could not be installed",
+                        $"{craftName} was dropped from your import queue: {refusal}. " +
+                        "Please report this with your KSP.log.");
             }
 
             // Ack — remove from the player's queue so it isn't installed again.

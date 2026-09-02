@@ -30,8 +30,15 @@ namespace GeneKerman
         /// <summary>
         /// Downloads and installs whatever a contract delivered. Calls
         /// <paramref name="onDone"/> exactly once, with a player-facing message.
+        ///
+        /// <paramref name="ownerId"/> is the deliverable owner's immutable account id
+        /// (the contract's `contractor_id`) and is what crew ownership is decided on;
+        /// <paramref name="ownerName"/> is the display name, used for the tag text and
+        /// as the fallback when a caller has no id. It is optional because one caller —
+        /// the browser UI's bridge — is handed only a name by the page.
         /// </summary>
-        public static IEnumerator Deliver(string contractId, string ownerName, Action<bool, string> onDone)
+        public static IEnumerator Deliver(string contractId, string ownerName, Action<bool, string> onDone,
+                                          string ownerId = "")
         {
             var mod = GeneKermanMod.Instance;
             if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
@@ -55,7 +62,7 @@ namespace GeneKerman
             // not just its design.
             if (!string.IsNullOrEmpty(vesselNodeUrl))
             {
-                yield return ImportVessel(contractId, vesselNodeUrl, ownerName, onDone);
+                yield return ImportVessel(contractId, vesselNodeUrl, ownerName, onDone, ownerId);
                 yield break;
             }
 
@@ -87,7 +94,8 @@ namespace GeneKerman
         }
 
         private static IEnumerator ImportVessel(string contractId, string vesselNodeUrl,
-                                                string ownerName, Action<bool, string> onDone)
+                                                string ownerName, Action<bool, string> onDone,
+                                                string ownerId = "")
         {
             var mod = GeneKermanMod.Instance;
             string myName = mod.LinkedUsername;
@@ -107,9 +115,32 @@ namespace GeneKerman
 
             // A submission may carry several crafts (GKFLEET) or one (legacy VESSEL);
             // ImportFleet spawns each and installs any embedded blueprints.
-            int imported = VesselTransfer.ImportFleet(vesselNodeStr, ownerName, myName);
+            //
+            // Ownership decides on `ownerId` when the caller had one. /api/v1/craft/
+            // download/{contract_id} answers with the files alone and carries no party
+            // id, so the id has to come from the caller's own copy of the contract —
+            // and from the CONTRACT, never from whoever asked. Both front ends read
+            // `contractor_id` off the contract list this client already holds: the
+            // sidebar passes it directly, and the browser bridge looks it up by contract
+            // id rather than accepting the `owner_id` the page posts, because a page is
+            // exactly the thing RM1 stopped trusting when it moved this decision off the
+            // display name. Either way, a contract not in the cache (or an older server
+            // that sends no id) leaves it empty and DecideComingHome falls back to the
+            // display-name comparison, logged once. The fallback is deliberate rather
+            // than fail-closed — refusing to strip would tag a genuinely returning
+            // kerbal as borrowed and PurgeBorrowedGhostCrew would then delete it.
+            int imported = VesselTransfer.ImportFleet(vesselNodeStr, ownerName, myName, null, ownerId);
 
-            if (imported <= 0) { onDone(false, "Failed to import vessel."); yield break; }
+            if (imported <= 0)
+            {
+                // Say which of the two it was. A refusal is permanent — the same bytes
+                // will be refused again — so "try again" is the wrong advice for it.
+                string refusal = VesselTransfer.LastImportRefusal;
+                onDone(false, refusal != null
+                    ? "This delivery was refused: " + refusal + "."
+                    : "Failed to import vessel.");
+                yield break;
+            }
 
             if (imported > 1)
                 mod.ShowNotification("Crafts Received", $"{imported} crafts arrived in your save.");
@@ -120,27 +151,34 @@ namespace GeneKerman
             onDone(true, imported == 1 ? "Vessel imported." : $"{imported} crafts imported.");
         }
 
-        /// <summary>Gunzip (if needed) a downloaded vessel-node blob into its UTF-8 text.</summary>
+        /// <summary>Gunzip (if needed) a downloaded vessel-node blob into its UTF-8 text.
+        /// The expansion is capped (see <see cref="CraftInstaller.TryGunzip"/>) because
+        /// the blob is a peer's file: a gzip bomb here would be decompressed straight
+        /// into memory before anything looked at it.</summary>
         public static string DecompressToString(byte[] fileData)
         {
+            bool refused;
+            return DecompressToString(fileData, out refused);
+        }
+
+        /// <summary><see cref="DecompressToString(byte[])"/>, additionally saying whether
+        /// the empty string means "this payload will never unpack here" rather than
+        /// "nothing came".
+        ///
+        /// It has to be told apart, because the two want opposite handling. Leaving a
+        /// queue entry unacked asks for the same bytes again, which is right for a
+        /// download that failed and a permanent loop for one the cap refuses: it is
+        /// re-downloaded and re-refused every launch, with nothing said to the player.
+        /// A refusal acks and explains instead.</summary>
+        public static string DecompressToString(byte[] fileData, out bool refused)
+        {
+            refused = false;
+            if (fileData == null) return "";
             byte[] rawData = fileData;
-            if (fileData != null && fileData.Length >= 2 && fileData[0] == 0x1F && fileData[1] == 0x8B)
+            if (CraftInstaller.IsGzip(fileData) && !CraftInstaller.TryGunzip(fileData, out rawData))
             {
-                try
-                {
-                    using (var ms = new MemoryStream(fileData))
-                    using (var gz = new GZipStream(ms, CompressionMode.Decompress))
-                    using (var output = new MemoryStream())
-                    {
-                        gz.CopyTo(output);
-                        rawData = output.ToArray();
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogWarning($"[GeneKerman] Vessel node decompression failed: {ex.Message}");
-                    rawData = fileData;
-                }
+                refused = true;
+                return "";
             }
             return Encoding.UTF8.GetString(rawData);
         }

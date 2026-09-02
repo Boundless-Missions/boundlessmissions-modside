@@ -14,6 +14,9 @@
  *   - "active_vessel": Must submit from Flight. Sends: craft + loadmeta + telemetry
  *     + screenshot, and the vessel's situation and body must match.
  *   - "rescue": active_vessel, plus the stranded crew (and sometimes the wreck).
+ *     Extras in range are handed over like any other submission's, provided this save
+ *     can tell the stranded wreck apart from the craft the rescuer brought (see
+ *     ExtrasAreHandedOver); when it cannot, they ride as renders + telemetry only.
  *
  * The server tells us what type + requirements via the contract data. We enforce
  * it here so players get immediate feedback, not a server rejection.
@@ -32,8 +35,12 @@ using UnityEngine;
 
 namespace GeneKerman
 {
-    /// <summary>One other craft inside physics range, offered as an extra to pack
-    /// into this submission.</summary>
+    /// <summary>One other craft inside physics range, offered as an extra to send with
+    /// this submission. A selected extra is packed into the delivered GKFLEET bundle as a
+    /// live craft and leaves this save when the contract settles — except on a rescue
+    /// whose wreck this save cannot identify, where it contributes its renders and
+    /// telemetry only and stays put (see SubmissionSession.ExtrasAreHandedOver, and
+    /// SubmitPanel for the wording that tells the player which of the two it is).</summary>
     public sealed class NearbyCraft
     {
         public Vessel Vessel;
@@ -97,6 +104,33 @@ namespace GeneKerman
 
         private List<NearbyCraft> nearbyEntries = new List<NearbyCraft>();
         public IList<NearbyCraft> Nearby => nearbyEntries;
+
+        /// <summary>How many craft in physics range were left out of
+        /// <see cref="Nearby"/> because they are part of this rescue itself — the
+        /// stranded vessel, or one of the stranded crew standing on EVA. Offering
+        /// either as an "extra" would be offering the issuer their own ship back a
+        /// second time; the view says so rather than leaving them silently missing.</summary>
+        public int RescueExcludedNearby { get; private set; }
+
+        /// <summary>
+        /// Whether ticking a nearby craft actually hands it over — packed into the
+        /// delivered vessel node, and removed from this save when the contract settles.
+        ///
+        /// Always true off a rescue. On a rescue it is true only when this save can say
+        /// which craft the stranded wreck is, because the extras list is a list of ships
+        /// to give away and the wreck must never be one of them. Two sources answer
+        /// that: the server's wreck_parts, which it only pins for a "vessel" recovery,
+        /// and this save's own record of what it spawned (RescueWreckRecord), which a
+        /// contract accepted before that record existed does not have.
+        ///
+        /// When it is false the section keeps working exactly as it did before extras
+        /// were ever handed over on a rescue: a ticked craft is rendered and its
+        /// telemetry sent, and it stays in the save. That is a real feature for the
+        /// issuer, so it is kept rather than the list being hidden — but the copy in
+        /// SubmitPanel has to say which of the two is happening, since one of them is
+        /// permanent.
+        /// </summary>
+        public bool ExtrasAreHandedOver { get; private set; } = true;
 
         /// <summary>The "select everything within N km" box, kept as typed text so a
         /// half-entered number survives a rebuild.</summary>
@@ -193,6 +227,8 @@ namespace GeneKerman
 
             ActiveVessel = null;
             nearbyEntries = new List<NearbyCraft>();
+            RescueExcludedNearby = 0;
+            ExtrasAreHandedOver = true;
 
             SceneValid = false;
             VesselValid = false;
@@ -605,8 +641,12 @@ namespace GeneKerman
             StatusIsError = false;
             Touch();
 
-            // Rescue is strictly single-vessel — leave PRE alone for it.
-            PreDisabledByUs = !IsRescue && PhysicsRangeManager.TryDisable();
+            // Every flight submission can now carry extra craft, rescue included, so
+            // the neighbour list has to mean the same thing on both: what is in *stock*
+            // physics range. PRE's inflated bubble would otherwise offer a rescuer a
+            // craft 40 km away as "in range" while the "within N km" box measured
+            // against a range the recipient's game does not have.
+            PreDisabledByUs = PhysicsRangeManager.TryDisable();
             if (PreDisabledByUs)
             {
                 // Give KSP a few frames + a beat to drop now-out-of-range vessels.
@@ -642,13 +682,62 @@ namespace GeneKerman
                     if (e.Vessel != null) prevSelected[e.Vessel.id] = e.Selected;
 
             nearbyEntries = new List<NearbyCraft>();
+            RescueExcludedNearby = 0;
+            ExtrasAreHandedOver = true;
 
             var active = FlightGlobals.ActiveVessel;
             if (active == null) return;
             Vector3d aPos = active.GetWorldPos3D();
 
+            // On a rescue, the things that must not be offered as extras (below).
+            HashSet<uint> rescueHullParts = null;
+            HashSet<string> strandedCrew = null;
+            HashSet<string> wreckPids = null;
+            if (IsRescue)
+            {
+                // The wreck, identified from both directions. The server pins
+                // wreck_parts only for a "vessel" recovery, so on a crew-only rescue it
+                // has nothing to say; this save's own record of every wreck it has
+                // spawned covers that, and covers a second rescue's wreck parked in the
+                // same place, which the contract in hand could never describe.
+                rescueHullParts = new HashSet<uint>();
+                if (rescueTarget != null && rescueTarget.wreckParts != null)
+                    foreach (var fid in rescueTarget.wreckParts) rescueHullParts.Add(fid);
+
+                var scenario = GKContractScenario.Instance;
+                bool knowsThisWreck = rescueHullParts.Count > 0;
+                if (scenario != null)
+                {
+                    foreach (var fid in scenario.AllRescueWreckPartIds()) rescueHullParts.Add(fid);
+                    wreckPids = scenario.AllRescueWreckPids();
+                    // Immunity records name a wreck whose crew are still frozen — a
+                    // different contract's, at this point, since ours must be aboard to
+                    // submit at all. Cheap, and it catches the case before the pid record
+                    // existed for that contract.
+                    if (scenario.Immunities != null)
+                        foreach (var rec in scenario.Immunities)
+                            if (rec != null && !string.IsNullOrEmpty(rec.VesselPid))
+                                wreckPids.Add(rec.VesselPid);
+                    if (scenario.KnowsRescueWreck(ContractId)) knowsThisWreck = true;
+                }
+
+                // Fail closed. Not knowing which craft the wreck is means every tick in
+                // this list could be it, so nothing here is handed over — the section
+                // falls back to the renders-and-telemetry behaviour it has always had.
+                ExtrasAreHandedOver = knowsThisWreck;
+
+                if (rescueKerbals != null && rescueKerbals.Count > 0)
+                    strandedCrew = new HashSet<string>(rescueKerbals, StringComparer.Ordinal);
+            }
+
             foreach (var v in VesselDataCollector.GetNearbyVessels(active))
             {
+                if (IsRescue && IsPartOfThisRescue(v, rescueHullParts, strandedCrew, wreckPids))
+                {
+                    RescueExcludedNearby++;
+                    continue;
+                }
+
                 var entry = new NearbyCraft
                 {
                     Vessel = v,
@@ -661,6 +750,63 @@ namespace GeneKerman
             }
 
             nearbyEntries.Sort((a, b) => a.Distance.CompareTo(b.Distance));
+        }
+
+        /// <summary>
+        /// Whether a neighbouring craft is part of a rescue rather than something the
+        /// rescuer brought along, and so must never be offered as an extra.
+        ///
+        /// Three tests, in the order of how much they prove.
+        ///
+        /// <paramref name="hullParts"/> is part flightIDs — the same identity
+        /// <see cref="ValidateWreckAboard"/> matches on, the one thing that survives the
+        /// export/import that put the wreck in this save, and the one that survives it
+        /// being docked to and released again. It is the union of what the server pinned
+        /// for this contract (a "vessel" recovery only) and what this save recorded when
+        /// it spawned any wreck of its own.
+        ///
+        /// <paramref name="wreckPids"/> is the same wrecks by vessel pid, plus any wreck
+        /// still holding frozen crew. Weaker than flightIDs — a pid does not survive
+        /// undocking — but it costs one comparison and covers a wreck recorded before
+        /// its parts were.
+        ///
+        /// <paramref name="stranded"/>: a stranded kerbal standing on EVA is a vessel in
+        /// their own right. Sending one as an "extra" would offer the issuer a second
+        /// copy of a kerbal whose only correct route home is aboard the rescue craft,
+        /// which is what <see cref="ValidateRescue"/> already insists on.
+        ///
+        /// The first two are deliberately not scoped to *this* contract: a rescuer
+        /// running two rescues must not hand the second one's wreck to the first one's
+        /// issuer. Over-excluding costs a craft that could have been sent; under-
+        /// excluding gives away a hull carrying somebody else's contract.
+        /// </summary>
+        private bool IsPartOfThisRescue(Vessel v, HashSet<uint> hullParts,
+                                        HashSet<string> stranded, HashSet<string> wreckPids)
+        {
+            if (v == null) return true;
+
+            if (hullParts != null && hullParts.Count > 0)
+            {
+                if (v.parts != null)
+                    foreach (Part p in v.parts)
+                        if (p != null && hullParts.Contains(p.flightID)) return true;
+                // Loaded vessels have live parts; read the snapshots too rather than
+                // let a vessel mid-load answer "not the wreck" because its part list
+                // hasn't been built yet.
+                var snaps = v.protoVessel?.protoPartSnapshots;
+                if (snaps != null)
+                    foreach (var pps in snaps)
+                        if (pps != null && hullParts.Contains(pps.flightID)) return true;
+            }
+
+            if (wreckPids != null && wreckPids.Count > 0 && wreckPids.Contains(v.id.ToString()))
+                return true;
+
+            if (stranded != null)
+                foreach (var pcm in VesselTransfer.CrewOf(v))
+                    if (pcm != null && stranded.Contains(pcm.name)) return true;
+
+            return false;
         }
 
         public void SetAllSelected(bool value)
@@ -690,7 +836,7 @@ namespace GeneKerman
         {
             get
             {
-                if (IsRescue || nearbyEntries == null) return 0;
+                if (nearbyEntries == null) return 0;
                 int n = 0;
                 foreach (var e in nearbyEntries) if (e.Selected && e.Vessel != null) n++;
                 return n;
@@ -725,7 +871,7 @@ namespace GeneKerman
             string activePath = VesselRenderer.CaptureVessel(active);
             if (!string.IsNullOrEmpty(activePath)) screenshotPaths.Add(activePath);
 
-            if (!IsRescue && nearbyEntries != null)
+            if (nearbyEntries != null)
             {
                 foreach (var e in nearbyEntries)
                 {
@@ -782,7 +928,7 @@ namespace GeneKerman
             unchecked
             {
                 int h = PartsFingerprint(GetSubmissionParts());
-                if (!IsRescue && nearbyEntries != null)
+                if (nearbyEntries != null)
                 {
                     foreach (var e in nearbyEntries)
                     {
@@ -921,6 +1067,35 @@ namespace GeneKerman
                 yield break;
             }
 
+            // A vessel already given away (quicksent, or issued as a rescue) and only
+            // waiting for its deferred removal is not ours to hand over again.
+            if (MissionType != "craft_build")
+            {
+                string sentRefusal = GeneKermanMod.Instance?.PendingRemovalRefusal(FlightGlobals.ActiveVessel);
+                if (sentRefusal != null) { Fail(sentRefusal); yield break; }
+
+                // Same question for every craft ticked alongside it, when ticking one
+                // hands it over. A selected extra is as much a live vessel leaving this
+                // save as the contract craft is, and a hull already given away and only
+                // waiting for its deferred removal must not go to a second recipient —
+                // that is the 2026-08-30 duplicate, reached through the extras list
+                // instead of through the active vessel.
+                if (ExtrasAreHandedOver && nearbyEntries != null)
+                {
+                    foreach (var e in nearbyEntries)
+                    {
+                        if (!e.Selected || e.Vessel == null) continue;
+                        string extraRefusal = GeneKermanMod.Instance?.PendingRemovalRefusal(e.Vessel);
+                        if (extraRefusal != null)
+                        {
+                            Fail($"\"{e.Vessel.vesselName}\" can't be sent with this submission.\n"
+                                 + extraRefusal);
+                            yield break;
+                        }
+                    }
+                }
+            }
+
             yield return new WaitForSeconds(1.5f);
 
             // Last word on render freshness, unthrottled: the throttled per-frame check
@@ -982,6 +1157,10 @@ namespace GeneKerman
             string vesselDataJson = null;
             string vesselNodeData = null;
             string cheatReport = null;
+            // Declared out here because the rescue hand-over record below has to name
+            // exactly the craft that were packed, and nothing else may.
+            var selectedExtras = new List<Vessel>();
+            List<string> handedOverPids = null;
 
             if (MissionType == "craft_build" && !string.IsNullOrEmpty(EditorCraftPath))
             {
@@ -1005,10 +1184,11 @@ namespace GeneKerman
                     { "active_vessel", ActiveVessel.ToDict() },
                 };
 
-                // Extra crafts the player toggled on (never for rescue — that flow is
-                // strictly single-vessel and tracks the handed-over craft by pid).
-                var selectedExtras = new List<Vessel>();
-                if (!IsRescue && nearbyEntries != null)
+                // Extra crafts the player toggled on. Offered on a rescue too — a
+                // rescuer who towed a stage out or flew a support craft alongside has
+                // something to show for it — but what "sent" means differs, and the
+                // difference is decided at the vessel-node export below, not here.
+                if (nearbyEntries != null)
                     foreach (var e in nearbyEntries)
                         if (e.Selected && e.Vessel != null) selectedExtras.Add(e.Vessel);
 
@@ -1057,9 +1237,82 @@ namespace GeneKerman
                 // (gender / profession / courage / stupidity) and owner tag. When extras
                 // are selected this becomes a GKFLEET bundle carrying every craft's state,
                 // flags and blueprint; otherwise it's a single VESSEL node as before.
-                vesselNodeData = selectedExtras.Count > 0
-                    ? VesselTransfer.ExportFleet(FlightGlobals.ActiveVessel, selectedExtras, true)
-                    : VesselTransfer.ExportActiveVessel(true);
+                //
+                // On a rescue the extras are handed over too — but only when this save
+                // can say which craft the stranded wreck is. ExtrasAreHandedOver is that
+                // answer (see BuildNearbyEntries); false keeps the older behaviour, where
+                // a ticked craft rides along as a render and telemetry and stays here.
+                //
+                // Everything the earlier note listed as a prerequisite is in place, and
+                // each of them is load-bearing rather than tidy:
+                //
+                //  1. The delivery import is fleet-aware and reports what it spawned.
+                //     ClientState's rescue_delivery / submission_restore handler now
+                //     calls VesselTransfer.ImportDeliveredFleet, which understands a
+                //     GKFLEET container, installs each vessel's embedded blueprint, and
+                //     returns the spawned pids PRIMARY FIRST. LastImportedPid names the
+                //     last vessel of a fleet, so the restore's re-key would otherwise
+                //     pin an extra and a later approval would delete the wrong hull.
+                //     The primary is identified by the "primaryPid" value ExportFleet
+                //     writes on the container and by node order, which ExportFleet also
+                //     guarantees — both, so neither being lost is fatal.
+                //  2. GKContractScenario.rescueSubmittedPids holds a LIST per contract,
+                //     primary first, and RecordRescueSubmission REPLACES it. The server
+                //     overwrites delivered_vessel_node_url on every resubmission, so an
+                //     appending record would queue the previous attempt's hulls for
+                //     deletion when this one is approved. Its RECORD format survives a
+                //     downgrade untouched: an older build reads pid with GetValue and
+                //     gets the first value, which is the rescue craft, so it leaves the
+                //     extras behind rather than deleting the wrong ship.
+                //  3. Both removal triggers in GeneKermanMod.cs — MaybeHandleRescueRemoval
+                //     and the authoritative ReconcileRescueVessels — go through
+                //     QueueRescueHandover, which queues every recorded pid with crew fate
+                //     BorrowedOnly (the rescuer's own pilots are not part of the
+                //     hand-over) and attaches the contract's kerbal list to the FIRST
+                //     entry only: RemoveContractCrew hunts those names save-wide, so an
+                //     extra carrying them would kill the rescued crew off a rescue craft
+                //     that may not have left yet. Not smuggled into
+                //     ForgetRescueSubmission, which also runs on the cancelled-contract
+                //     path where the craft stays.
+                //  4. IsPartOfThisRescue no longer depends on the server having sent
+                //     wreck flightIDs, which it does only for a "vessel" recovery. Every
+                //     wreck this save spawns is recorded (pid + part flightIDs) at spawn,
+                //     so an emptied stranded hull parked alongside on a crew-only rescue
+                //     is recognised. A contract accepted before that record existed has
+                //     neither source, and ExtrasAreHandedOver is false for it.
+                //  5. A selected extra is now asked PendingRemovalRefusal too, at the top
+                //     of this coroutine. It was only ever asked of the active vessel,
+                //     which was sound while an extra never left the save; a hull already
+                //     given away and waiting on its deferred removal would otherwise go
+                //     to a second recipient through the extras list — the 2026-08-30
+                //     duplicate by another door. And what is recorded as handed over is
+                //     read back out of ExportFleet rather than rebuilt from the ticks,
+                //     so an extra the export dropped is not deleted here for a delivery
+                //     it was never in.
+                //
+                // The server half went first: _extract_crew_names and _extract_part_uids
+                // in api_server.py read the primary VESSEL node only, so the rescue
+                // rechecks cannot be satisfied by a craft riding alongside the one being
+                // handed over. A "vessel" recovery therefore needs the wreck to arrive
+                // docked, grabbed or towed as one vessel — ticking it as an extra does
+                // not satisfy it, which is the semantics that check has always had.
+                if (selectedExtras.Count > 0 && ExtrasAreHandedOver)
+                {
+                    vesselNodeData = VesselTransfer.ExportFleet(
+                        FlightGlobals.ActiveVessel, selectedExtras, true, out handedOverPids);
+                }
+                else
+                {
+                    vesselNodeData = VesselTransfer.ExportActiveVessel(true);
+                    if (FlightGlobals.ActiveVessel != null)
+                        handedOverPids = new List<string>
+                            { FlightGlobals.ActiveVessel.id.ToString() };
+                }
+
+                // The export is what leaves; the list is only a claim about it. An
+                // export that produced nothing hands nothing over, and a craft recorded
+                // as handed over is a craft deleted from this save on approval.
+                if (string.IsNullOrEmpty(vesselNodeData)) handedOverPids = null;
             }
 
             // Read every captured render (active + selected extras).
@@ -1107,10 +1360,24 @@ namespace GeneKerman
                 ? deltaVVac.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)
                 : null;
 
-            // For rescue, remember which craft we handed over so it can be removed
-            // from our save once the issuer approves and it's delivered to them.
-            string submittedPid = (IsRescue && FlightGlobals.ActiveVessel != null)
-                ? FlightGlobals.ActiveVessel.id.ToString() : null;
+            // For rescue, remember every craft we handed over so each can be removed
+            // from our save once the issuer approves and they are delivered.
+            //
+            // The ACTIVE vessel FIRST, then whatever was packed alongside it. That
+            // order is not presentation: the removal path attaches the contract's
+            // kerbal list to the first entry alone (RemoveContractCrew hunts those
+            // names save-wide, so an extra carrying them would settle the rescued crew
+            // on behalf of a hull that never held them), an older build reading this
+            // record back takes the first value as the whole of it, and the delivered
+            // node's own first VESSEL is what the server rechecks the rescue against.
+            // Exactly the vessels ExportFleet packs, in the order it packs them.
+            //
+            // Taken from the export itself rather than rebuilt from what was ticked.
+            // ExportFleet drops an extra it cannot serialise — one unreadable craft must
+            // not fail a whole submission — so a list rebuilt from the ticks would name
+            // a craft the issuer never receives, and approval would delete it here: a
+            // ship destroyed at one end and never created at the other.
+            List<string> submittedPids = IsRescue ? handedOverPids : null;
 
             // Carry the craft's custom mission flags so the receiving player sees
             // them instead of a missing decal (the live vessel node embeds its own).
@@ -1179,8 +1446,8 @@ namespace GeneKerman
                             return;
                         }
 
-                        if (!string.IsNullOrEmpty(submittedPid))
-                            GeneKermanMod.Instance.RecordRescueSubmission(ContractId, submittedPid);
+                        if (submittedPids != null && submittedPids.Count > 0)
+                            GeneKermanMod.Instance.RecordRescueSubmission(ContractId, submittedPids);
 
                         if (reviewStatus == "approved")
                         {
@@ -1190,6 +1457,10 @@ namespace GeneKerman
                             EditorPartEnforcer.Instance?.StopEnforcing();
                             Close();
                             GeneKermanMod.Instance.RefreshContracts();
+                            // Out of flight the way the hand-over paths go. Nothing is
+                            // waiting on it — see ReturnToSpaceCenterAfterSubmit — it is
+                            // just that the mission is over and the flight is not.
+                            GeneKermanMod.Instance.ReturnToSpaceCenterAfterSubmit();
                         }
                         else if (reviewStatus == "refused")
                         {
@@ -1202,6 +1473,11 @@ namespace GeneKerman
                             EditorPartEnforcer.Instance?.StopEnforcing();
                             Close();
                             GeneKermanMod.Instance.RefreshContracts();
+                            // Same as the approved branch. Deliberately NOT on the
+                            // "refused" branch above: a refusal is something the player
+                            // may want to fix and resubmit from the flight they are in,
+                            // and taking the scene away is the opposite of helpful.
+                            GeneKermanMod.Instance.ReturnToSpaceCenterAfterSubmit();
                         }
                     }
                     else

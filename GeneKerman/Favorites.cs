@@ -6,7 +6,8 @@
  * time KSP starts — localStorage would be empty on every launch and the feature would
  * quietly never work. PluginData is the only storage that survives a restart.
  *
- * Stored as a flat ConfigNode of repeated `id = <discord user id>` values.
+ * Stored as a flat ConfigNode of repeated `id = <account id>` values — a Discord
+ * snowflake for most players, "a_…" for a website-only Boundless account.
  */
 
 using System;
@@ -56,12 +57,25 @@ namespace GeneKerman
             return favorite;
         }
 
-        // Discord snowflakes. Digits only, so nothing that reaches the file can be
-        // mistaken for a key, a node name, or a comment when it is read back.
+        // Account ids: a Discord snowflake is digits, a Boundless website account is
+        // "a_" + a Firebase uid. Digits alone was the original test and it quietly
+        // made every website-only player unstarrable — the id was simply dropped on
+        // the way to the file, so the star came back off on the next launch.
+        //
+        // The character set stays deliberately narrow rather than becoming "anything
+        // short": nothing that reaches the file may be mistaken for a key, a node
+        // name, or a comment when ConfigNode reads it back.
         private static bool IsPlausibleId(string s)
         {
-            if (s.Length == 0 || s.Length > 24) return false;
-            foreach (char c in s) if (c < '0' || c > '9') return false;
+            if (s.Length == 0 || s.Length > 48) return false;
+            foreach (char c in s)
+            {
+                bool okChar = (c >= '0' && c <= '9')
+                           || (c >= 'a' && c <= 'z')
+                           || (c >= 'A' && c <= 'Z')
+                           || c == '_' || c == '-';
+                if (!okChar) return false;
+            }
             return true;
         }
 

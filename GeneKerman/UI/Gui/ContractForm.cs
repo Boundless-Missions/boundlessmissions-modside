@@ -442,11 +442,11 @@ namespace GeneKerman.UI.Gui
                     // ASCII "-", not a real minus sign: the sidebar borrows KSP's TMP
                     // font, which has no U+2212 glyph, so it drew as a tofu box in
                     // front of the number. Same reason MarketPanel spells out "funds".
-                    UIF.Muted(parent, "North–south position: 0° is the equator, +90° the "
+                    UIF.Muted(parent, "North-south position: 0° is the equator, +90° the "
                                       + "north pole, -90° the south pole.").Body();
                     Caption(parent, "LONGITUDE (°)");
                     UIF.TextField(parent, lonText, "0").OnChanged(s => lonText = s);
-                    UIF.Muted(parent, "East–west position, -180° to 180° around the body's "
+                    UIF.Muted(parent, "East-west position, -180° to 180° around the body's "
                                       + "prime meridian; east is positive.").Body();
                     Caption(parent, "MARGIN (°, MIN " + ContractCreation.MinMarginSurfaceDeg + ")");
                     UIF.TextField(parent, marginPosText, "1").OnChanged(s => marginPosText = s);
@@ -497,7 +497,7 @@ namespace GeneKerman.UI.Gui
 
             if (requireIncl)
             {
-                Caption(parent, "INCLINATION (°, 0–180; OVER 90 IS RETROGRADE)");
+                Caption(parent, "INCLINATION (°, 0-180; OVER 90 IS RETROGRADE)");
                 UIF.TextField(parent, inclText, "0").OnChanged(s => inclText = s);
                 Caption(parent, "PLANE MARGIN (°, MIN " + ContractCreation.MinMarginInclDeg + ")");
                 UIF.TextField(parent, marginInclText, Round(ContractCreation.DefaultMarginInclDeg))

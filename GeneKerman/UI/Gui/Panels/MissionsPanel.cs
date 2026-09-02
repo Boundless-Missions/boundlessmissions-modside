@@ -57,8 +57,8 @@ namespace GeneKerman.UI.Gui
 
             if (missions == null || missions.Count == 0)
             {
-                // `!requested`: Poll has not yet fired its one on-demand fetch, so
-                // this is the frame before loading starts, not an empty week.
+                // `!requested`: no fetch has happened yet, so this is the frame
+                // before loading starts, not an empty week.
                 bool pending = main.MissionsLoading || !requested;
                 UIF.Notice(col, pending ? "Loading missions…" : "No missions available right now.", null);
                 return;
@@ -150,12 +150,23 @@ namespace GeneKerman.UI.Gui
             var main = mod?.State;
             if (main == null) return;
 
-            if (!requested && main.MissionList == null && !main.MissionsLoading &&
-                mod.Api != null && mod.Api.IsLinked)
+            if (!requested && mod.Api != null && mod.Api.IsLinked)
             {
+                // Set for either answer, not only when this panel does the fetching
+                // — see the same guard in ContractsPanel.Poll. A week with no
+                // missions is a non-null empty list somebody else already fetched,
+                // and reading that as still-pending left the panel on
+                // "Loading missions…" for as long as the week stayed empty.
                 requested = true;
-                main.RequestMissionsRefresh();
-                return;
+                if (main.MissionList == null && !main.MissionsLoading)
+                {
+                    main.RequestMissionsRefresh();
+                    return;
+                }
+
+                // No fetch, so nothing below changes; repaint the already-drawn
+                // "Loading missions…" frame by hand.
+                MarkDirty();
             }
 
             if ((main.MissionList?.Count ?? -1) != lastCount ||

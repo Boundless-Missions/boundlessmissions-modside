@@ -172,9 +172,9 @@ namespace GeneKerman.Web
                 // address bar before making the call.
                 try
                 {
-                    using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
                     {
-                        var dict = MiniJSON.DeserializeDict(reader.ReadToEnd());
+                        // Bounded + timed: see Web/BodyReader.cs.
+                        var dict = MiniJSON.DeserializeDict(BodyReader.Read(ctx.Request));
                         if (dict != null) nonce = MiniJSON.GetString(dict, "k");
                     }
                 }
@@ -347,9 +347,9 @@ namespace GeneKerman.Web
             int count = -1;
             try
             {
-                using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
                 {
-                    var dict = MiniJSON.DeserializeDict(reader.ReadToEnd());
+                    // Bounded + timed: see Web/BodyReader.cs.
+                    var dict = MiniJSON.DeserializeDict(BodyReader.Read(ctx.Request));
                     if (dict != null) count = MiniJSON.GetInt(dict, "count");
                 }
             }
@@ -385,12 +385,15 @@ namespace GeneKerman.Web
             string contractId = null, ownerName = "";
             try
             {
-                using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
                 {
-                    var dict = MiniJSON.DeserializeDict(reader.ReadToEnd());
+                    // Bounded + timed: see Web/BodyReader.cs.
+                    var dict = MiniJSON.DeserializeDict(BodyReader.Read(ctx.Request));
                     if (dict != null)
                     {
                         contractId = MiniJSON.GetString(dict, "contract_id");
+                        // owner_name is display text only — it becomes the ownership TAG
+                        // on arriving crew, which is a label. `owner_id` is deliberately
+                        // NOT read: see below.
                         ownerName = MiniJSON.GetString(dict, "owner_name");
                     }
                 }
@@ -410,13 +413,49 @@ namespace GeneKerman.Web
             // leave the tab looking hung. The page follows the job instead.
             queue.RunSync(() =>
             {
+                // Crew ownership is decided on `contractor_id`, and that id is read off
+                // the contract this client already holds — never off the request body.
+                // RM1 moved the decision from a self-chosen display name onto a
+                // server-issued account id precisely so it could not be claimed; taking
+                // it from the local page hands the claim straight back to anything that
+                // can make one same-origin request (XSS in the bundle, or a hand-edited
+                // GameData/BoundlessMissions/WebUI/, which is the surface ApiProxy's
+                // allow-list exists for). Posting the player's own id makes the whole
+                // delivery read as "coming home", so arriving crew adopt the recipient's
+                // own free roster entries by name — and a later hand-over under
+                // LeavesWithCraft then deletes them.
+                //
+                // A contract not in the cache yields "", which is the same degrade an
+                // older server produces and which DecideComingHome answers by falling
+                // back to the display name (logged once). Deliberate rather than
+                // fail-closed: refusing to strip would tag a genuinely returning kerbal
+                // as borrowed, and PurgeBorrowedGhostCrew would then delete it.
+                string ownerId = "";
+                string owner = ownerName;
+                var state = GeneKermanMod.Instance.State;
+                var contract = state != null ? state.FindContract(contractId) : null;
+                if (contract != null)
+                {
+                    ownerId = MiniJSON.GetString(contract, "contractor_id", "");
+                    // And the name from the same place, when it is there. It is only a
+                    // label — but it is also DecideComingHome's fallback when no id
+                    // arrives, so leaving the page's copy in charge of it would keep a
+                    // second, weaker route to the decision the id was moved to.
+                    string fromContract = MiniJSON.GetString(contract, "contractor_name", "");
+                    if (!string.IsNullOrEmpty(fromContract)) owner = fromContract;
+                }
+                else
+                    Debug.LogWarning($"[GeneKerman] /gk install-craft: contract '{contractId}' is " +
+                                     "not in this client's contract list, so crew ownership falls " +
+                                     "back to the display name.");
+
                 GeneKermanMod.Instance.RunCoroutine(
-                    CraftDelivery.Deliver(contractId, ownerName, (ok, msg) =>
+                    CraftDelivery.Deliver(contractId, owner, (ok, msg) =>
                     {
                         server.Jobs.Complete(jobId, ok, msg);
                         // Push the outcome so the page does not have to poll.
                         server.Broadcast("job", server.Jobs.Get(jobId).ToJson());
-                    }));
+                    }, ownerId));
                 return JobResult.Json("{}");
             });
 
@@ -461,6 +500,9 @@ namespace GeneKerman.Web
               // The path itself never leaves the mod.
               .Append(",\"editorSaved\":").Append(Json(state.EditorSaved))
               .Append(",\"activeVessel\":").Append(JobResult.Quote(state.ActiveVessel))
+              // Empty when the flying vessel can be handed over (and always empty when
+              // nothing is being flown, so the blueprint path never reads as blocked).
+              .Append(",\"vesselSendBlock\":").Append(JobResult.Quote(state.VesselSendBlock ?? ""))
               .Append('}');
 
             return JobResult.Json(sb.ToString());
@@ -504,6 +546,22 @@ namespace GeneKerman.Web
 
             // The craft path is resolved on the main thread inside the job — the browser
             // must never supply a filesystem path.
+            //
+            // `recipient_id` DOES come from the page, unlike the owner id MD13 moved
+            // out of it, and that is correct: the recipient is the user's choice and
+            // the page is where they make it. What bounds it is the server —
+            // `/api/v1/craft/send` refuses a recipient who is not an accepted friend,
+            // and `ToolActions` only removes the sender's vessel on the server's `ok`
+            // plus `vessel_returnable`. So the worst a wrong id here can do is offer
+            // the ship to another friend, who must still accept it, and a decline
+            // returns it.
+            //
+            // Deliberately NOT given an extra "confirm" field: with `kind="vessel"`
+            // this is the highest-consequence verb on the /gk surface, but the shipped
+            // WebUI bundle is a built artifact that does not send one, so requiring it
+            // would break quicksend in the browser UI to harden a path whose four
+            // cross-origin barriers were audited clean. If this is ever revisited,
+            // change the bundle and the route together.
             StartJob(ctx, done => ToolActions.QuicksendCurrent(recipientId, recipientName, kind, done));
         }
 
@@ -618,6 +676,30 @@ namespace GeneKerman.Web
                 ModlistMode = MiniJSON.GetString(body, "modlist_mode", ContractCreation.ModlistNone),
                 DurationHours = MiniJSON.GetInt(body, "duration_hours", 24),
             };
+
+            // A rescue DESTROYS the issuer's flying vessel — it is uploaded and then
+            // removed from the save, crew included, and handed to whoever `contractor_id`
+            // names. The sidebar form gates that behind an explicit "this is permanent"
+            // switch, but that switch lived only in the page's own React state and never
+            // crossed the wire, so the route would do it on the page's word alone.
+            //
+            // MB6 looked at the same question for /gk/actions/quicksend and decided to
+            // leave `recipient_id` page-supplied, on two grounds: the shipped bundle sends
+            // no confirm field, and the SERVER refuses a non-friend recipient. Neither
+            // ground covers this route. Contract creation is deliberately not friend-gated
+            // (a contract is an offer of work, and anyone may be offered one), which makes
+            // this the strictly more powerful verb of the two.
+            //
+            // So the confirmation is required here, and the bundle sends it — both halves
+            // changed together, which is the condition MB6 set for ever revisiting this.
+            if (req.Kind == "rescue" && !MiniJSON.GetBool(body, "confirm_permanent", false))
+            {
+                LocalServer.Respond(ctx, 400, "application/json",
+                    "{\"error\":\"confirm_required\",\"message\":\"Issuing a rescue "
+                    + "permanently removes this vessel and its crew from your save. "
+                    + "Confirm before sending.\"}");
+                return;
+            }
 
             var rescue = MiniJSON.GetDict(body, "rescue");
             if (rescue != null)
@@ -762,7 +844,7 @@ namespace GeneKerman.Web
         {
             string jobId = server.Jobs.Begin();
 
-            queue.RunSync(() =>
+            JobResult started = queue.RunSync(() =>
             {
                 GeneKermanMod.Instance.RunCoroutine(makeRoutine((ok, msg) =>
                 {
@@ -772,6 +854,23 @@ namespace GeneKerman.Web
                 return JobResult.Json("{}");
             });
 
+            // The result of RunSync was being discarded, and 202 answered regardless.
+            // MainThreadQueue.Run gives up after 30s (a long modded scene load), marks the
+            // job Abandoned and returns 504 — and Pump then skips it, so the coroutine
+            // never starts. The registry entry stays "running" forever, because
+            // JobRegistry.Expire deliberately only sweeps FINISHED jobs, and the page
+            // polls /gk/jobs/{id} every 2s for the rest of the session. The player sees a
+            // spinner that never resolves and is told nothing.
+            if (started != null && started.Status >= 400)
+            {
+                server.Jobs.Complete(jobId, false, "KSP was busy loading and could not "
+                                                 + "start this. Try again in a moment.");
+                LocalServer.Respond(ctx, started.Status, "application/json",
+                    "{\"job_id\":" + JobResult.Quote(jobId)
+                    + ",\"error\":\"KSP was busy loading and could not start this.\"}");
+                return;
+            }
+
             LocalServer.Respond(ctx, 202, "application/json",
                 "{\"job_id\":" + JobResult.Quote(jobId) + "}");
         }
@@ -780,8 +879,7 @@ namespace GeneKerman.Web
         {
             try
             {
-                using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
-                    return MiniJSON.DeserializeDict(reader.ReadToEnd());
+                return MiniJSON.DeserializeDict(BodyReader.Read(ctx.Request));
             }
             catch (Exception) { return null; }
         }
@@ -791,9 +889,9 @@ namespace GeneKerman.Web
             string url = null;
             try
             {
-                using (var reader = new System.IO.StreamReader(ctx.Request.InputStream, Encoding.UTF8))
                 {
-                    var dict = MiniJSON.DeserializeDict(reader.ReadToEnd());
+                    // Bounded + timed: see Web/BodyReader.cs.
+                    var dict = MiniJSON.DeserializeDict(BodyReader.Read(ctx.Request));
                     if (dict != null) url = MiniJSON.GetString(dict, "url");
                 }
             }

@@ -15,7 +15,9 @@
  * Known residual risk: Application.OpenURL shells out to xdg-open on Linux, so the
  * launch URL — nonce included — is briefly visible in /proc and `ps aux`. The 15s TTL
  * plus single use plus the browser consuming it in ~200ms makes the window narrow, and
- * a hostile local user on the same account could already just read PluginData/session.token.
+ * a hostile local user on the same account could already just read PluginData/session.token
+ * (which is now written 0600 where the platform supports it — see SecureFile; that argument
+ * had been resting on a file the umask made world-readable, so it proved less than it said).
  * Documented, not pretended away.
  */
 

@@ -15,6 +15,108 @@ namespace GeneKerman
 {
     public static class CraftInstaller
     {
+        // ── Bounded gunzip ────────────────────────────────────────────────────
+
+        /// <summary>The server's per-file upload ceiling (api_server.MAX_UPLOAD_BYTES).
+        /// Nothing larger than this can have been stored, so it — not a guess at what a
+        /// craft weighs — is the real bound on what may come back down.</summary>
+        public const int ServerUploadCeilingBytes = 25 * 1024 * 1024;
+
+        /// <summary>
+        /// Ceiling on what one downloaded payload may expand to.
+        ///
+        /// gzip reaches ~1000:1 on repetitive input, so the server's upload limit permits
+        /// a multi-gigabyte expansion from a file that passed every check on the way in —
+        /// and MemoryStream doubles its buffer, so the peak allocation is about twice the
+        /// target before it throws, by which point KSP is gone.
+        ///
+        /// The first cut of this cap was 8 MB, justified by "a few hundred KB", which was
+        /// measured on the small test saves and was wrong about the game people actually
+        /// play. Across the four dev instances the largest single VESSEL node is 3.02 MB
+        /// (563 parts), the largest .craft 1.54 MB, and one carried flag PNG 587 KB as
+        /// base64 — so a live-vessel quicksend of that station is the node plus a ~2 MB
+        /// blueprint plus flag blocks, about 6 MB for *one* vessel, and ImportFleet
+        /// handles a GKFLEET of several. Those payloads uploaded happily and then refused
+        /// to come down, and the refusal is the worst-shaped failure available: the import
+        /// never acks, so it is re-downloaded and re-refused every launch, forever.
+        ///
+        /// So the ceiling is derived from the only number that actually bounds this — what
+        /// the server would store — at 2×, which leaves room for the gzip container's own
+        /// worst case without pretending to know how big a ship is. It is a guard against
+        /// a bomb, not a size policy; the size policy is the server's.
+        /// </summary>
+        public const int MaxDecompressedBytes = 2 * ServerUploadCeilingBytes;
+
+        /// <summary>Count non-overlapping occurrences of an ASCII needle in a byte
+        /// buffer, without materialising the whole payload as a string.
+        ///
+        /// Used to bound a craft's declared part count before anything parses or walks
+        /// it — so the guard cannot itself be the expensive step it is guarding.</summary>
+        internal static int CountOccurrences(byte[] hay, string needle)
+        {
+            if (hay == null || string.IsNullOrEmpty(needle)) return 0;
+            int n = needle.Length, count = 0;
+            for (int i = 0; i + n <= hay.Length; i++)
+            {
+                int j = 0;
+                while (j < n && hay[i + j] == (byte)needle[j]) j++;
+                if (j == n) { count++; i += n - 1; }
+            }
+            return count;
+        }
+
+        /// <summary>True for the gzip magic bytes.</summary>
+        public static bool IsGzip(byte[] data)
+        {
+            return data != null && data.Length >= 2 && data[0] == 0x1F && data[1] == 0x8B;
+        }
+
+        /// <summary>
+        /// Gunzip within <see cref="MaxDecompressedBytes"/>. Over the cap (or on any
+        /// stream error) the payload is reported unusable rather than throwing mid-way
+        /// through an install: the caller leaves its queue entry unacked and says so,
+        /// which is a retry, where a half-applied install cannot be undone.
+        /// </summary>
+        public static bool TryGunzip(byte[] data, out byte[] raw)
+        {
+            raw = null;
+            if (!IsGzip(data)) return false;
+            try
+            {
+                using (var ms = new MemoryStream(data))
+                using (var gz = new System.IO.Compression.GZipStream(
+                           ms, System.IO.Compression.CompressionMode.Decompress))
+                using (var output = new MemoryStream())
+                {
+                    var buf = new byte[64 * 1024];
+                    long total = 0;
+                    int n;
+                    // Read in fixed chunks rather than CopyTo: the cap has to be tested
+                    // between reads, and CopyTo only returns once the whole stream (of
+                    // whatever size the sender chose) is already in memory.
+                    while ((n = gz.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        total += n;
+                        if (total > MaxDecompressedBytes)
+                        {
+                            Debug.LogWarning($"[GeneKerman] Refused a payload that expands past " +
+                                             $"{MaxDecompressedBytes / (1024 * 1024)} MB " +
+                                             $"(from {data.Length} compressed bytes).");
+                            return false;
+                        }
+                        output.Write(buf, 0, n);
+                    }
+                    raw = output.ToArray();
+                    return true;
+                }
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Gzip decompression failed: {ex.Message}");
+                return false;
+            }
+        }
+
         /// <summary>
         /// Install a craft file into the correct Ships/ directory.
         /// Parses the craft header to determine type (VAB/SPH).
@@ -25,32 +127,66 @@ namespace GeneKerman
         /// <returns>Path where the craft was installed, or null on failure</returns>
         public static string Install(byte[] craftData, string craftFileName, string loadmetaContent = null)
         {
+            string refusal;
+            return Install(craftData, craftFileName, loadmetaContent, out refusal);
+        }
+
+        /// <summary>
+        /// <see cref="Install(byte[],string,string)"/>, additionally saying whether the
+        /// failure was the *payload* rather than a passing condition.
+        ///
+        /// The distinction is the whole point: a caller that leaves its queue entry
+        /// unacked is asking for the same bytes again, which is right for a download
+        /// hiccup and a permanent loop for a payload this build will never accept. A
+        /// non-null <paramref name="refusal"/> is a sentence to show the player and a
+        /// signal to ack and move on.
+        /// </summary>
+        public static string Install(byte[] craftData, string craftFileName,
+                                     string loadmetaContent, out string refusal)
+        {
+            refusal = null;
             if (craftData == null || craftData.Length == 0)
             {
                 Debug.LogWarning("[GeneKerman] CraftInstaller: No craft data provided.");
+                refusal = "the file was empty";
                 return null;
             }
 
-            // Decompress if gzipped (gzip magic bytes: 0x1F 0x8B)
+            // Decompress if gzipped (gzip magic bytes: 0x1F 0x8B). A payload that will
+            // not fit the cap is unusable, not "install what came out of it": there is
+            // no partial craft worth writing, and the old fall-back to the raw bytes
+            // would have written the gzip container to disk as a .craft.
             byte[] rawData = craftData;
-            if (craftData.Length >= 2 && craftData[0] == 0x1F && craftData[1] == 0x8B)
+            if (IsGzip(craftData))
             {
-                try
+                if (!TryGunzip(craftData, out rawData))
                 {
-                    using (var ms = new MemoryStream(craftData))
-                    using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionMode.Decompress))
-                    using (var output = new MemoryStream())
-                    {
-                        gz.CopyTo(output);
-                        rawData = output.ToArray();
-                    }
-                    Debug.Log($"[GeneKerman] Decompressed craft file: {craftData.Length} → {rawData.Length} bytes");
+                    Debug.LogWarning("[GeneKerman] CraftInstaller: the craft payload could not be " +
+                                     "decompressed within the size cap; nothing installed.");
+                    refusal = $"it could not be unpacked within the {MaxDecompressedBytes / (1024 * 1024)} MB limit";
+                    return null;
                 }
-                catch (System.Exception ex)
-                {
-                    Debug.LogWarning($"[GeneKerman] Gzip decompression failed, using raw data: {ex.Message}");
-                    rawData = craftData;
-                }
+                Debug.Log($"[GeneKerman] Decompressed craft file: {craftData.Length} → {rawData.Length} bytes");
+            }
+
+            // Bound the PART count before anything walks it.
+            //
+            // The byte cap above bounds the payload but not its SHAPE: a `.craft` is
+            // plain text and a minimal part stanza is a few dozen bytes, so a file
+            // comfortably inside the cap can still declare hundreds of thousands of
+            // parts. Everything downstream is O(parts) on the main thread — the alias
+            // walk, the paint and fuel reconciles, the ScaleBridge pass, and KSP's own
+            // load — so this is the blueprint half of VesselTransfer.MaxPartsPerVessel.
+            // Counted on the raw text rather than after a parse, because the parse is
+            // itself part of the cost being bounded.
+            int partCount = CountOccurrences(rawData, "\npart = ") + CountOccurrences(rawData, "\nPART\n");
+            if (partCount > VesselTransfer.MaxPartsPerVessel)
+            {
+                Debug.LogWarning($"[GeneKerman] CraftInstaller: refusing a craft declaring " +
+                                 $"{partCount} parts (cap {VesselTransfer.MaxPartsPerVessel}).");
+                refusal = $"it declares {partCount} parts, past the " +
+                          $"{VesselTransfer.MaxPartsPerVessel} this can install";
+                return null;
             }
 
             // Pull off the carried thumbnail FIRST of all: the GKTHUMB block is appended
@@ -82,7 +218,8 @@ namespace GeneKerman
             // Warn the player if this craft uses TweakScale and theirs is missing or a
             // different version, then strip the GKTSVER block. Must run BEFORE the flag
             // strip: the version block is appended after the GKFLAG blocks, and the flag
-            // strip cuts everything from the first GKFLAG block to end of file.
+            // strip takes the *trailing run* of them — so anything left sitting after
+            // them stops the run being the tail and no flag installs at all.
             rawData = TweakScaleGuard.CheckAndStripFromCraft(rawData);
 
             // Install any custom mission flags this craft carried and strip the

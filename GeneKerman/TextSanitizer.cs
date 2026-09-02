@@ -26,10 +26,29 @@ namespace GeneKerman
         private static readonly Regex DiscordEmoji =
             new Regex(@"<a?:(\w+):\d+>", RegexOptions.Compiled);
 
+        /// <summary>The longest notification body worth keeping.
+        ///
+        /// This is the single ingestion funnel every notification string passes
+        /// through, which makes it the one place that bounds them all — the carried
+        /// mod list, the part-substitution report, the paint and fuel reconciles, the
+        /// trait downgrades. Each of those is built by joining a list whose length a
+        /// PEER chooses, and the result is handed to a TMP label whose per-character
+        /// arrays are sized from the string. Clamping here fixes every source at once
+        /// and cannot be forgotten by a new one.
+        ///
+        /// 4000 is far past anything a real report produces and still trivially
+        /// renderable; the notification is a summary, and the log has the full text.</summary>
+        public const int MaxNotifLength = 4000;
+
         /// <summary>Strip what KSP's fonts cannot draw from one notification string.</summary>
         public static string CleanNotif(string s)
         {
             if (string.IsNullOrEmpty(s)) return s;
+
+            // Clamp BEFORE the per-character walk below, so an oversized string is not
+            // itself the expensive step.
+            if (s.Length > MaxNotifLength)
+                s = s.Substring(0, MaxNotifLength) + "… (truncated)";
 
             s = DiscordEmoji.Replace(s, "$1");
 

@@ -32,6 +32,19 @@ namespace GeneKerman
         public bool ShowDataPausedWindow { get; set; }  // shown when data sharing is opted out
         public int UnreadNotifications { get; set; }
         public string LinkedUsername { get; private set; } = "";
+        /// <summary>This client's own <b>account id</b> — the immutable key
+        /// `data/accounts.py` assigns, not a display name. It exists because
+        /// <see cref="LinkedUsername"/> cannot decide ownership of anything: a Discord
+        /// display name is self-chosen, changeable and not unique, so deciding "these
+        /// arriving kerbals are mine" on it let anyone rename themselves to a victim
+        /// and have the victim's own crew adopted onto an incoming vessel (and did the
+        /// same by accident between two players sharing a nickname). See
+        /// <see cref="VesselTransfer.DecideComingHome"/>.
+        ///
+        /// Empty until the link response or the first profile fetch lands, and empty
+        /// forever against a server too old to send `user_id` — which is why the
+        /// decision falls back to the name rather than refusing.</summary>
+        public string LinkedAccountId { get; private set; } = "";
 
         // Paths
         public static string ModPath => Path.Combine(KSPUtil.ApplicationRootPath, "GameData", "BoundlessMissions");
@@ -42,6 +55,31 @@ namespace GeneKerman
         private float notificationInterval = 600f; // 10 minutes (fallback poll only)
         private float lastImportCheck;
         private const float ImportInterval = 30f; // craft-import queue poll cadence
+        // When the current scene finished loading (onLevelWasLoadedGUIReady), or -1
+        // while one is still coming up. HighLogic.LoadedScene flips the moment a load
+        // is *requested*, so a scene test alone runs work during the load itself: on
+        // 2026-08-30 the import poll spawned two vessels 3.5 s into a Space Center
+        // load, KSP's own startup then instantiated every proto again, and the save
+        // ended up with two VESSEL nodes per pid — which Kerbalism refuses to load
+        // ("An item with the same key has already been added"). The same early save
+        // ran against an empty vessel list and marked live crew as missing.
+        private float sceneGuiReadyAt = -1f;
+        private const float SceneSettleSeconds = 2f;
+
+        /// <summary>True once the current scene has finished loading and has had a
+        /// moment to run its Start() pass — the earliest it is safe to add a vessel to
+        /// the universe or write the save. False during any scene load.</summary>
+        public static bool SceneSettled
+        {
+            get
+            {
+                var m = Instance;
+                if (m == null || m.sceneGuiReadyAt < 0f) return false;
+                if (Time.realtimeSinceStartup - m.sceneGuiReadyAt < SceneSettleSeconds) return false;
+                if (HighLogic.LoadedSceneIsFlight && !FlightGlobals.ready) return false;
+                return true;
+            }
+        }
         // Rescue-craft reconciliation: one GET against the contract list, only in a
         // scene where a removal could actually run. Cheap enough to do on arrival at
         // the Space Center (OnSceneChange resets the timer), rare enough not to matter
@@ -52,6 +90,9 @@ namespace GeneKerman
         // One roster sweep per arrival in a scene where it can run (OnSceneChange clears
         // it), rather than per frame — it walks the whole roster.
         private bool rosterSwept;
+        /// <summary>One notification fetch per arrival in a scene where a removal could
+        /// actually run. See <see cref="FetchNotificationsOnSceneArrival"/>.</summary>
+        private bool notifFetchedThisScene;
         // Unknown-profession warning: once per session, not once per Space Center visit.
         private bool traitWarningShown;
         private bool initialized;
@@ -62,6 +103,15 @@ namespace GeneKerman
         // Live notification push + de-dup of already-toasted notifications
         private NotificationSocket notifSocket;
         private readonly HashSet<string> seenNotifIds = new HashSet<string>();
+
+        /// <summary>Notifications that arrived with an instruction this client could not
+        /// carry out yet — see <see cref="NeedsLoadedSaveToAct"/>. Held rather than
+        /// dropped, because the live socket pushes each one exactly ONCE and the fallback
+        /// poll runs only while that socket is down: with it up (the normal case) a
+        /// notification consumed at the wrong moment is gone for good. Drained by
+        /// <see cref="DrainDeferredNotifications"/> as soon as a save is loaded.</summary>
+        private readonly List<Dictionary<string, object>> deferredNotifs =
+            new List<Dictionary<string, object>>();
         private bool notifBacklogSeeded; // first poll seeds the panel without toasting
 
         // Toolbar
@@ -86,6 +136,17 @@ namespace GeneKerman
         // Loopback web bridge, live only while the browser UI is in use (enableWebUi
         // in settings.cfg). Binds 127.0.0.1 on an ephemeral port. See Web/LocalServer.cs.
         private Web.LocalServer webServer;
+
+#if GK_DEBUG_PANEL
+        /// <summary>
+        /// The agent-drivable test bridge. COMPILED OUT of production builds — see
+        /// Web/DebugBridge.cs for why it is a second listener rather than routes on
+        /// webServer. Started unconditionally in a dev build: the whole point is
+        /// inspecting a client that has neither the browser UI switched on nor a WebUI
+        /// bundle installed, which is every sidebar test there is.
+        /// </summary>
+        private Web.DebugBridge debugBridge;
+#endif
         private UI.WebUiWindow webUiWindow;
 
         // In-game uGUI sidebar (UI/Gui/). Additive: it does not replace the IMGUI
@@ -98,6 +159,11 @@ namespace GeneKerman
         // outright, so this is the only submission UI the mod has.
         private UI.Gui.SubmitPanel submitPanel;
 
+        // The "ask for more time" form, mounted the same way and for a related
+        // reason: it is read against the deadline it moves, and it used to expand a
+        // month grid inside the dispute action bar.
+        private UI.Gui.MoreTimePanel moreTimePanel;
+
         // Device binding: set while we're blocked on an unrecognized-device challenge.
         private bool deviceGateActive;
         private string deviceGateChallenge;
@@ -107,6 +173,29 @@ namespace GeneKerman
         public bool UpdateRequired { get; private set; }
         public string LatestVersion { get; private set; } = "";
         public string UpdateDownloadUrl { get; private set; } = "";
+
+        /// <summary>
+        /// The update gate's "Download latest" button hands this straight to
+        /// Application.OpenURL, which shells out through xdg-open / ShellExecute — so a
+        /// server-supplied `file://`, UNC path or local executable path would be a
+        /// launch primitive, behind a modal window the player has to act on to get the
+        /// mod back. Only an absolute https URL is stored; anything else is dropped and
+        /// the window shows the version text alone. Same reasoning, and the same shape,
+        /// as GkRoutes' open-url allow-list for the browser bridge.
+        /// </summary>
+        private static string SafeDownloadUrl(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "";
+            Uri uri;
+            if (!Uri.TryCreate(raw.Trim(), UriKind.Absolute, out uri) ||
+                uri.Scheme != Uri.UriSchemeHttps || string.IsNullOrEmpty(uri.Host))
+            {
+                Debug.LogWarning("[GeneKerman] Update: the server's download link is not an " +
+                                 "absolute https URL; not offering it.");
+                return "";
+            }
+            return uri.AbsoluteUri;
+        }
 
         /// <summary>
         /// The player dismissed the update prompt with "Continue anyway". The gate is
@@ -209,6 +298,11 @@ namespace GeneKerman
             };
             checkpointDetector.Register();
 
+#if GK_DEBUG_PANEL
+            debugBridge = new Web.DebugBridge();
+            debugBridge.Start();
+#endif
+
             // Build the sidebar canvas once. Parented to this (DontDestroyOnLoad)
             // GameObject, so the hierarchy survives every scene change and only its
             // textures need regenerating — see SidebarController.OnSceneChange.
@@ -220,6 +314,11 @@ namespace GeneKerman
             sidebar.AddPanel(new UI.Gui.ContractsPanel());
             sidebar.AddPanel(new UI.Gui.NotificationsPanel());
             sidebar.AddPanel(new UI.Gui.MarketPanel());
+            sidebar.AddPanel(new UI.Gui.FinancePanel());
+            // Next to Tools, which is where quicksend lives: the two are read
+            // together — the send picks from this list, and a send that finds
+            // nobody to pick sends the player straight here.
+            sidebar.AddPanel(new UI.Gui.FriendsPanel());
             sidebar.AddPanel(new UI.Gui.ToolsPanel());
             sidebar.AddPanel(new UI.Gui.SettingsPanel());
 
@@ -229,6 +328,11 @@ namespace GeneKerman
             // so it does not open on top of the sidebar panel itself.
             submitPanel = new UI.Gui.SubmitPanel();
             sidebar.AddWindow(submitPanel, 470f, 660f, new Vector2(360f, 0f));
+
+            // A window for the same reason, sized for a month grid: the dispute card
+            // it came off could fit neither the calendar nor the deadline it moves.
+            moreTimePanel = new UI.Gui.MoreTimePanel();
+            sidebar.AddWindow(moreTimePanel, 430f, 560f, new Vector2(340f, 0f));
 
             // Detect installed life-support / DeepFreeze mods once (drives rescue-kerbal
             // immunity and the Kerbalism rescue gate). Reflection-only; safe if none present.
@@ -243,6 +347,7 @@ namespace GeneKerman
 
             // Invalidate UI textures on scene changes
             GameEvents.onGameSceneLoadRequested.Add(OnSceneChange);
+            GameEvents.onLevelWasLoadedGUIReady.Add(OnLevelGuiReady);
 
             // Hide our IMGUI windows whenever the game UI is hidden (F2 or a capture).
             GameEvents.onHideUI.Add(OnHideUI);
@@ -295,7 +400,7 @@ namespace GeneKerman
             }
 
             // launchUrl carries a single-use nonce — never log it. Players upload
-            // KSP.log to Discord routinely, and DeviceId.GetKspLog() does it automatically.
+            // KSP.log to Discord routinely, and this mod attaches it to reports.
             Application.OpenURL(launchUrl);
 
             // Always raise the in-game panel too: if OpenURL silently did nothing
@@ -349,6 +454,13 @@ namespace GeneKerman
             // Center — which is exactly where a leftover craft is visible and fixable.
             lastRescueReconcile = 0f;
             rosterSwept = false;
+            notifFetchedThisScene = false;
+            sceneGuiReadyAt = -1f;
+        }
+
+        private void OnLevelGuiReady(GameScenes scene)
+        {
+            sceneGuiReadyAt = Time.realtimeSinceStartup;
         }
 
         void Update()
@@ -358,6 +470,11 @@ namespace GeneKerman
             // otherwise a request thread blocks for the full 30s timeout, and the page
             // cannot even ask *why* it is unavailable.
             webServer?.Pump();
+#if GK_DEBUG_PANEL
+            // Its own queue, so a stalled browser request cannot starve the harness and
+            // a stalled harness request cannot starve the browser.
+            debugBridge?.Pump();
+#endif
 
             // Hoisted for the same reason as Pump: the sidebar exists in every
             // scene and for unlinked clients too — its own gate cascade decides
@@ -390,7 +507,26 @@ namespace GeneKerman
             // already polluted is what stops the Astronaut Complex offering new hires.
             if (initialized) SweepRosterOnce();
 
-            if (!initialized || !Api.IsLinked) return;
+            // Above the link gate for the same reason: it draws map markers from the
+            // contract list this client already holds, sends nothing, and — run
+            // unconditionally — is also what takes a marker back down when a rescue
+            // ends. Gated below the return, an unlink would strand one on the map.
+            if (initialized) RescueWaypoints.Tick();
+
+            if (!initialized) return;
+
+            if (!Api.IsLinked)
+            {
+                // A dropped token is a dropped identity. The socket the server holds is
+                // authenticated as whoever was linked when it opened, so one left alive
+                // across an unlink keeps delivering that account's notifications into
+                // whatever account links next on this install. ApiClient.ClearToken
+                // closes it at the source; this is the backstop for any path that
+                // clears the token without going through it.
+                if (notifSocket != null && (notifSocket.IsEnabled || notifSocket.IsConnected))
+                    notifSocket.Disconnect();
+                return;
+            }
 
             // Hold rescue-kerbal life-support immunity and perform handoff on contact.
             // Purely local (no network), so it runs even when data-sharing is opted out —
@@ -443,9 +579,16 @@ namespace GeneKerman
             // for everything; the editor is safe for the file-write imports (blueprint
             // installs, flags) — DoProcessImport leaves live-vessel entries queued
             // there, so an accepted .craft lands in the Ships folder without a trip
-            // out of the VAB. Independent of the notifications toggle.
+            // out of the VAB. Flight polls too: it is a legal scene for a live-vessel
+            // delivery (GiftInbox.CanDeliverHere), and a vessel accepted in the SPH
+            // used to sit queued through a whole launch and only appear on the next
+            // walk through the Space Center — fifteen minutes later, on 2026-08-30 —
+            // which reads as "my craft never arrived". Never during a scene load (see
+            // SceneSettled). Independent of the notifications toggle.
             if ((HighLogic.LoadedScene == GameScenes.SPACECENTER ||
-                 HighLogic.LoadedScene == GameScenes.EDITOR) &&
+                 HighLogic.LoadedScene == GameScenes.EDITOR ||
+                 HighLogic.LoadedScene == GameScenes.FLIGHT) &&
+                SceneSettled &&
                 Time.realtimeSinceStartup - lastImportCheck > ImportInterval)
             {
                 lastImportCheck = Time.realtimeSinceStartup;
@@ -471,6 +614,22 @@ namespace GeneKerman
                 lastRescueReconcile = Time.realtimeSinceStartup;
                 StartCoroutine(ReconcileRescueVessels());
             }
+
+            // One catch-up fetch on arriving somewhere a removal can run. The live
+            // socket pushes each notification exactly ONCE, and a push that lands on a
+            // connection which has dropped but not yet been noticed is gone — the
+            // fallback poll below cannot recover it, because that only runs while the
+            // socket reports itself DOWN. Measured 2026-09-02 (§3.19): an accepted
+            // quicksend's echo never arrived, the sender kept a ship the recipient also
+            // had, and only restarting the game — which forces a fetch on connect —
+            // recovered it.
+            //
+            // Same scene rule and the same reasoning as ReconcileRescueVessels above: a
+            // notification is a transient, so anything that must be right cannot depend
+            // on one arriving. Bounded to once per scene arrival rather than a timer, so
+            // it costs one call per visit to the Space Center and nothing while sitting
+            // there.
+            FetchNotificationsOnSceneArrival();
 
             // Notifications can be toggled off in Settings — keep the socket closed
             // and skip polling entirely when disabled.
@@ -515,6 +674,9 @@ namespace GeneKerman
             while (notifSocket.TryDequeue(out var notif))
                 HandleIncomingNotification(notif);
 
+            // Anything parked because no save was loaded when it arrived.
+            DrainDeferredNotifications();
+
             // Commands from the website. Peek-then-drop: one that can't be shown right
             // now (a time-critical prompt is already up) stays queued and is retried
             // next frame, until the socket's 30 s TTL discards it.
@@ -547,6 +709,29 @@ namespace GeneKerman
             notif["title"] = TextSanitizer.CleanNotif(MiniJSON.GetString(notif, "title"));
             notif["message"] = TextSanitizer.CleanNotif(MiniJSON.GetString(notif, "message"));
 
+            // Some notifications are not just text: `rescue_craft_removed` and
+            // `craft_gift_accepted` each carry an instruction to remove a vessel from
+            // this save, and both handlers can only act with a save loaded. Marking one
+            // seen before it has been acted on CONSUMES it — the handler no-ops, the id
+            // is remembered, and no later poll ever reconsiders it.
+            //
+            // That is not hypothetical: on 2026-09-02 an accepted quicksend's echo
+            // arrived while the game sat at the main menu on a different save, was
+            // toasted, no-opped on `!VesselExists`, and was never retried once the right
+            // save was loaded — leaving the sender holding a ship the recipient had also
+            // been given (§3.19). The backlog-seeding pass in CheckNotifications already
+            // guards exactly this ("retry on a later poll; don't mark seen"); the live
+            // path did not.
+            //
+            // Deferred BEFORE the toast as well as before the seen-marking, so the retry
+            // is silent: toasting now and again on the retry would trade a lost removal
+            // for a duplicated notification every poll until a save is open.
+            if (NeedsLoadedSaveToAct(notif) && !TryHandleInstruction(notif))
+            {
+                Park(notif);
+                return;
+            }
+
             string id = MiniJSON.GetString(notif, "id");
             if (!string.IsNullOrEmpty(id) && !seenNotifIds.Add(id))
                 return; // already toasted
@@ -563,14 +748,9 @@ namespace GeneKerman
                 contractId
             );
 
-            // Rescue: when the issuer approves, the rescue craft is delivered to them
-            // and removed from the rescuer's save. Queue removal of the craft this
-            // client submitted for that contract.
-            MaybeHandleRescueRemoval(notif);
-
-            // Quicksend: an acceptance confirms the hand-over — re-assert the removal
-            // if a quickload rolled it back while the offer was pending.
-            MaybeHandleGiftAccepted(notif);
+            // The instruction (if any) was already carried out by TryHandleInstruction
+            // above — before the toast, so one we cannot act on yet is parked silently
+            // rather than announced and then forgotten.
 
             // Keep the panel in sync so the item is already there when opened.
             clientState.AddNotification(notif);
@@ -585,11 +765,22 @@ namespace GeneKerman
             // the game window; the in-game toast is the only thing they will actually
             // see, so it must keep firing regardless of UI mode.
             webServer?.Broadcast("notification", MiniJSON.Serialize(notif));
+#if GK_DEBUG_PANEL
+            // The same tee to the harness. This is what makes a driver event-driven
+            // rather than a polling loop: a craft arriving, a contract being accepted
+            // and a gift being declined are all notifications, and KSP is slow enough
+            // that polling for them is the one genuinely expensive thing a test can do.
+            debugBridge?.Broadcast("notification", MiniJSON.Serialize(notif));
+#endif
 
             // Same reasoning as RefreshContracts() below: tell the page its lists are
             // stale so it can refetch, rather than making it poll.
             if (IsContractEvent(MiniJSON.GetString(notif, "type")))
                 webServer?.Broadcast("contracts_changed", "{}");
+#if GK_DEBUG_PANEL
+            if (IsContractEvent(MiniJSON.GetString(notif, "type")))
+                debugBridge?.Broadcast("contracts_changed", "{}");
+#endif
 
             // Anything that changes a contract's state (a new offer, an acceptance,
             // a submission, an approval/refusal, a cancellation) refreshes the
@@ -598,6 +789,34 @@ namespace GeneKerman
             // first poll's backlog seeding, which doesn't route through here.
             if (IsContractEvent(MiniJSON.GetString(notif, "type")))
                 RefreshContracts();
+
+            // Money that moved while the player was flying — a contract of theirs
+            // approved, a craft of theirs bought, a level-up bonus — only ever
+            // reaches this client as a notification. The profile is otherwise
+            // fetched on link, on opening the panel, and from the Profile tab's
+            // refresh button; there is no timer. Without this the toast reads
+            // "+300 KCoins" and every balance on screen keeps the old number.
+            //
+            // Deliberately fired for EVERY notification rather than a list of
+            // money-moving types. The two costs are wildly asymmetric: a missing
+            // type silently brings the stale-balance bug back for that one event,
+            // while a spurious one is a single cheap GET — and a hardcoded list
+            // here would drift from the server every time a notification is added.
+            // The debounce keeps a burst to one fetch.
+            RequestBalanceSync();
+        }
+
+        // Balance re-reads are coalesced: a backlog draining after a reconnect can
+        // deliver a dozen notifications in one frame, and they all want the same
+        // single answer.
+        private float lastBalanceSync = -999f;
+        private const float BalanceSyncCooldown = 5f;
+
+        private void RequestBalanceSync()
+        {
+            if (Time.realtimeSinceStartup - lastBalanceSync < BalanceSyncCooldown) return;
+            lastBalanceSync = Time.realtimeSinceStartup;
+            clientState?.RequestProfileRefresh();
         }
 
         /// <summary>
@@ -687,11 +906,17 @@ namespace GeneKerman
             GameEvents.onGUIApplicationLauncherReady.Remove(OnToolbarReady);
             GameEvents.onGUIApplicationLauncherDestroyed.Remove(OnToolbarDestroyed);
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneChange);
+            GameEvents.onLevelWasLoadedGUIReady.Remove(OnLevelGuiReady);
             GameEvents.onHideUI.Remove(OnHideUI);
             GameEvents.onShowUI.Remove(OnShowUI);
             checkpointDetector?.Unregister();
             notifSocket?.Disconnect();
             webServer?.Stop();
+#if GK_DEBUG_PANEL
+            // Deletes the handshake file too, so a driver learns the game is gone
+            // instead of timing out against a dead port.
+            debugBridge?.Stop();
+#endif
             // Must run: Destroy() releases the InputLockManager lock, and a leaked
             // control lock outlives this GameObject and soft-bricks the save.
             sidebar?.Destroy();
@@ -1168,6 +1393,47 @@ namespace GeneKerman
 
         // ── Data Fetching ───────────────────────────────────────────────────
 
+        /// <summary>
+        /// Adopt the identity carried on a profile response.
+        ///
+        /// Called from every path that receives one, which is the point. This used to
+        /// live inline in <see cref="InitialFetch"/> alone — a coroutine that runs once,
+        /// two seconds after startup — so a client whose server was unreachable at that
+        /// instant logged "server unreachable" and then ran the entire session with an
+        /// empty <see cref="LinkedAccountId"/>, with no retry short of re-linking or
+        /// restarting. <c>ClientState.RefreshProfile</c> re-fetched the same document
+        /// every refresh and updated only its own cache, so the identity never recovered.
+        ///
+        /// That is not a cosmetic gap. An empty id makes <c>DecideComingHome</c> skip the
+        /// id comparison and fall through to a name compare that is empty too, so it
+        /// answers false for everything: an honest returning kerbal never has its
+        /// ownership tag stripped, and <c>PurgeBorrowedGhostCrew</c> then deletes it —
+        /// the exact failure the second repair round produced. Launching KSP before the
+        /// server was up was enough to reach it.
+        ///
+        /// Empty values are ignored rather than assigned, so a malformed or partial
+        /// response cannot clear an identity that was already established.
+        /// </summary>
+        internal void NoteProfileIdentity(Dictionary<string, object> data)
+        {
+            if (data == null) return;
+
+            string name = MiniJSON.GetString(data, "username");
+            // The profile is the authoritative source of the account id: the link
+            // response carries it too, but only this one is re-fetched every session, so
+            // a client linked by an older server picks the id up here.
+            string id = MiniJSON.GetString(data, "user_id");
+
+            bool gained = string.IsNullOrEmpty(LinkedAccountId) && !string.IsNullOrEmpty(id);
+            if (!string.IsNullOrEmpty(name)) LinkedUsername = name;
+            if (!string.IsNullOrEmpty(id)) LinkedAccountId = id;
+
+            // Logged only when it changes something, so a healthy client does not print
+            // this on every refresh — but a late recovery, which is the case worth
+            // seeing in a bug report, always says so.
+            if (gained) Debug.Log("[GeneKerman] Profile identity established: " + LinkedUsername);
+        }
+
         private IEnumerator InitialFetch()
         {
             yield return new WaitForSeconds(2f); // Let the game settle
@@ -1178,8 +1444,7 @@ namespace GeneKerman
                 if (ok)
                 {
                     clientState.UpdateProfile(data);
-                    LinkedUsername = MiniJSON.GetString(data, "username");
-                    Debug.Log("[GeneKerman] Profile loaded: " + LinkedUsername);
+                    NoteProfileIdentity(data);
                 }
                 else
                 {
@@ -1231,15 +1496,13 @@ namespace GeneKerman
                         // its rescue-craft removal must still fire — so act on it now. If
                         // the save (scenario) isn't loaded yet we can't resolve the craft,
                         // so leave it unseen and let a later poll retry it once a save is in.
-                        string ntype = MiniJSON.GetString(notif, "type");
-                        bool isRescueRemoval = ntype == "rescue_craft_removed";
-                        bool isGiftAccepted = ntype == "craft_gift_accepted";
-                        if ((isRescueRemoval || isGiftAccepted) &&
-                            GKContractScenario.Instance == null)
-                            continue; // retry on a later poll; don't mark seen
-
-                        if (isRescueRemoval) MaybeHandleRescueRemoval(notif);
-                        if (isGiftAccepted) MaybeHandleGiftAccepted(notif);
+                        // Same rule as the live path: act first, and if the instruction
+                        // could not be carried out, leave it UNSEEN so a later poll or a
+                        // Space Center arrival retries it. Previously this only checked
+                        // for a missing scenario; a vessel that could not be found (the
+                        // wrong save loaded) counted as done and was lost — §3.19.
+                        if (NeedsLoadedSaveToAct(notif) && !TryHandleInstruction(notif))
+                            continue; // retry later; don't mark seen
 
                         string id = MiniJSON.GetString(notif, "id");
                         if (!string.IsNullOrEmpty(id)) seenNotifIds.Add(id);
@@ -1265,9 +1528,20 @@ namespace GeneKerman
             sidebar?.SetOpen(true);
             clientState.RefreshAll();
             StartCoroutine(InitialFetch());
+            // Disconnect first, always. Connect() only *enables* the socket — Tick()
+            // reuses an already-open connection — so linking onto an install that
+            // still held a live socket from the previous account would adopt it, and
+            // this player would then be shown that player's notifications. Tearing it
+            // down here forces a fresh handshake with the token we just minted.
+            notifSocket.Disconnect();
             notifSocket.Connect();
 
             LinkedUsername = MiniJSON.GetString(data, "username");
+            // Assigned unconditionally, exactly like the name above: this is a fresh
+            // account, so carrying the previous one's id forward would be worse than
+            // carrying none. LinkResponse has sent user_id since the account work; an
+            // older server leaves it empty until InitialFetch above fills it in.
+            LinkedAccountId = MiniJSON.GetString(data, "user_id");
             RaiseLocalNotification(
                 "Account Linked!",
                 "Welcome, " + LinkedUsername + "!"
@@ -1470,7 +1744,7 @@ namespace GeneKerman
                 }
 
                 LatestVersion = MiniJSON.GetString(data, "latest_version");
-                UpdateDownloadUrl = MiniJSON.GetString(data, "download_url");
+                UpdateDownloadUrl = SafeDownloadUrl(MiniJSON.GetString(data, "download_url"));
                 UpdateRequired = true;
 
                 // Already dismissed this session (e.g. this is the re-check fired by a
@@ -1518,7 +1792,7 @@ namespace GeneKerman
         public void OnVersionGate(string latestVersion, string downloadUrl)
         {
             LatestVersion = latestVersion ?? "";
-            UpdateDownloadUrl = downloadUrl ?? "";
+            UpdateDownloadUrl = SafeDownloadUrl(downloadUrl);
             if (UpdateRequired) return;   // window already up
             UpdateRequired = true;
             ShowLinkWindow = false;
@@ -1622,6 +1896,25 @@ namespace GeneKerman
             });
         }
 
+        /// <summary>
+        /// Called by ApiClient every time the session token is dropped — unlink, log
+        /// out everywhere, a 401, a denied device. The live notification socket is
+        /// authenticated by the token that opened it, so it has to go with it.
+        ///
+        /// Without this, an install that unlinked one account and linked another kept
+        /// the first account's stream open (Connect() reuses a live socket), and every
+        /// notification addressed to the account that used to be signed in here was
+        /// delivered into the feed of the one that is — reading as "someone else's
+        /// contract offer arriving in my game".
+        ///
+        /// Deliberately at the token, not at the six call sites that drop one: the
+        /// socket's identity *is* the token, so the two must never be separable.
+        /// </summary>
+        public void OnTokenCleared()
+        {
+            notifSocket?.Disconnect();
+        }
+
         /// Called by ApiClient when a request comes back 401 — this PC's session is
         /// no longer accepted (expired, or revoked by "log out of all devices", which
         /// invalidates every token minted before it). Nothing here can retry its way
@@ -1636,7 +1929,7 @@ namespace GeneKerman
             // Transient toast, not a stored notification: like the device-denied
             // unlink, persisting it would resurface it after the user re-links.
             Toast("Session expired",
-                "This PC was unlinked. Run /b linkcode in Discord to link again.");
+                "This PC was unlinked. Get a new code at boundlessmissions.com/account, or run /b linkcode in Discord.");
             Debug.Log("[GeneKerman] Session revoked, returned to the link screen.");
         }
 
@@ -1712,9 +2005,40 @@ namespace GeneKerman
                 // token), then unlink so this device stops trying.
                 if (!string.IsNullOrEmpty(reportId))
                 {
-                    Debug.Log("[GeneKerman] Device reported, uploading diagnostics…");
-                    yield return Api.UploadDeviceReport(reportId, (ok, r, s) =>
-                        Debug.Log($"[GeneKerman] Device report upload: ok={ok} ({s})"));
+                    // Ask before anything leaves this machine. The server asking is not
+                    // consent: whatever host the mod points at can answer a device poll
+                    // with "denied" plus a report id, and KSP.log carries the mod list,
+                    // the install paths (which include the OS account name) and the
+                    // system specs. The bug-report card already works this way — its
+                    // "attach my KSP.log" switch is the player's own choice — and this
+                    // is the same file going to the same place.
+                    deviceVerifyWindow.Ask(
+                        "This PC was reported from your Discord account.\n\n" +
+                        "May the mod attach this PC's KSP.log to that report? It lists " +
+                        "your installed mods, your install paths and your system specs. " +
+                        "Nothing is sent unless you choose to send it.",
+                        "Send KSP.log", "Don't send");
+
+                    // Bounded: an unanswered question must not park the rest of the
+                    // flow (unlink, link screen) forever. No answer means no.
+                    float deadline = Time.realtimeSinceStartup + 120f;
+                    while (deviceVerifyWindow.Answer == null &&
+                           Time.realtimeSinceStartup < deadline)
+                        yield return null;
+                    bool sendLog = deviceVerifyWindow.Answer == true;
+                    deviceVerifyWindow.Hide();
+
+                    if (sendLog)
+                    {
+                        Debug.Log("[GeneKerman] Device reported, uploading diagnostics…");
+                        yield return Api.UploadDeviceReport(reportId, (ok, r, s) =>
+                            Debug.Log($"[GeneKerman] Device report upload: ok={ok} ({s})"));
+                    }
+                    else
+                    {
+                        Debug.Log("[GeneKerman] Device reported; the player declined to " +
+                                  "attach KSP.log, so nothing was uploaded.");
+                    }
                 }
                 Api.ClearToken();
                 sidebar?.SetOpen(false);
@@ -1722,7 +2046,7 @@ namespace GeneKerman
                 // Terminal unlink — keep this a transient toast. Persisting it would
                 // make it resurface in the panel the next time the user re-links.
                 Toast("Device not approved",
-                    "This PC was unlinked. Run /b linkcode in Discord to link again.");
+                    "This PC was unlinked. Get a new code at boundlessmissions.com/account, or run /b linkcode in Discord.");
             }
             else // expired
             {
@@ -1758,6 +2082,21 @@ namespace GeneKerman
         }
 
         /// <summary>
+        /// Open the "ask for more time" window on a disputed contract. The one entry
+        /// point, as OpenSubmitWindow is for submission — one instance, re-pointed per
+        /// contract, so a second card cannot mint a second window.
+        /// </summary>
+        /// <param name="onSend">Makes the caller's completion at the moment Send is
+        /// pressed (ContractsPanel.Done), not before — creating it early would mark the
+        /// inbox busy for as long as the calendar is up.</param>
+        /// <param name="onClosed">The window went away, by any route.</param>
+        public void OpenMoreTimeWindow(string contractId, string mission, string issuerName,
+            string currentDue, Func<Action<bool, string>> onSend, Action onClosed)
+        {
+            moreTimePanel?.Open(contractId, mission, issuerName, currentDue, onSend, onClosed);
+        }
+
+        /// <summary>
         /// The account state every front end reads: the sidebar's panels, the browser
         /// bridge and the notification socket. One copy, by reference — see
         /// ClientState.cs on why it is never handed out as a snapshot.
@@ -1786,26 +2125,134 @@ namespace GeneKerman
         /// thing the removal depends on. ReconcileRescueVessels is the authority; this
         /// exists so the common case happens immediately rather than at the next
         /// Space Center visit.</summary>
-        private void MaybeHandleRescueRemoval(Dictionary<string, object> notif)
+        /// <summary>Fetch notifications once per arrival at the Space Center or Tracking
+        /// Station — the scenes where a queued removal can actually run — so an
+        /// instruction whose push was lost is still acted on. Cheap by construction: one
+        /// call per arrival, never on a timer.</summary>
+        private void FetchNotificationsOnSceneArrival()
         {
-            if (notif == null) return;
-            if (MiniJSON.GetString(notif, "type") != "rescue_craft_removed") return;
+            if (notifFetchedThisScene) return;
+            if (HighLogic.LoadedScene != GameScenes.SPACECENTER &&
+                HighLogic.LoadedScene != GameScenes.TRACKSTATION) return;
+            if (Api == null || !Api.IsLinked || !Api.NotificationsEnabled) return;
+            if (GKContractScenario.Instance == null) return;   // no save yet — try again next scene
+
+            notifFetchedThisScene = true;
+            StartCoroutine(CheckNotifications());
+        }
+
+        /// <summary>Hold a notification whose instruction could not be carried out yet,
+        /// de-duped by id. Session-scoped on purpose: across a restart the server copy is
+        /// still unread and the backlog-seeding pass picks it up again, so persisting
+        /// this would only add a second source of truth for the same fact.</summary>
+        private void Park(Dictionary<string, object> notif)
+        {
+            string id = MiniJSON.GetString(notif, "id");
+            foreach (var d in deferredNotifs)
+                if (MiniJSON.GetString(d, "id") == id) return;
+            deferredNotifs.Add(notif);
+        }
+
+        /// <summary>Re-handle notifications parked by <see cref="HandleIncomingNotification"/>
+        /// once a save is loaded and their instruction can actually be carried out.
+        ///
+        /// The list is copied and cleared before replaying, so a notification that defers
+        /// a second time (the scenario went away again mid-drain) is re-parked by the
+        /// normal path rather than mutating the list being walked.</summary>
+        private void DrainDeferredNotifications()
+        {
+            if (deferredNotifs.Count == 0) return;
+            if (GKContractScenario.Instance == null) return;
+
+            var pending = new List<Dictionary<string, object>>(deferredNotifs);
+            deferredNotifs.Clear();
+            foreach (var n in pending)
+                HandleIncomingNotification(n, bumpBadge: false);
+        }
+
+        /// <summary>Whether this notification carries an instruction that cannot be
+        /// carried out without a loaded save — i.e. one of the two whose handlers resolve
+        /// a vessel in THIS save and quietly do nothing when there isn't one.
+        ///
+        /// Kept as a named predicate rather than inlined, because the cost of the list
+        /// falling out of step with the handlers is a silently dropped vessel removal,
+        /// and a reader adding a third such notification needs somewhere obvious to
+        /// register it.</summary>
+        private static bool NeedsLoadedSaveToAct(Dictionary<string, object> notif)
+        {
+            string type = MiniJSON.GetString(notif, "type");
+            return type == "rescue_craft_removed" || type == "craft_gift_accepted";
+        }
+
+        /// <returns>Settled, in the same sense as <see cref="MaybeHandleGiftAccepted"/>.
+        /// Unlike that one, a contract with no recorded submission in this save IS
+        /// settled: that record is per-save and its absence is answered by
+        /// ReconcileRescueVessels, which re-derives the intent from the contract.</returns>
+        private bool MaybeHandleRescueRemoval(Dictionary<string, object> notif)
+        {
+            if (notif == null) return true;
+            if (MiniJSON.GetString(notif, "type") != "rescue_craft_removed") return true;
 
             var data = MiniJSON.GetDict(notif, "data");
             string contractId = data != null ? MiniJSON.GetString(data, "contract_id") : "";
-            if (string.IsNullOrEmpty(contractId)) return;
+            if (string.IsNullOrEmpty(contractId)) return true;
 
             var scenario = GKContractScenario.Instance;
-            if (scenario == null) return; // no save loaded (editor, main menu) — reconcile catches it
+            if (scenario == null) return false; // no save loaded — ask again once there is one
 
             // Peek, queue, and only then forget: the record is the sole link between the
             // contract and a craft in this save, so it outlives a queue attempt that
             // could not land.
-            string pid;
-            if (scenario.PeekRescueSubmission(contractId, out pid) &&
-                QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly,
-                                         crewNames: RescueKerbalsOf(contractId)))
+            List<string> pids;
+            if (scenario.PeekRescueSubmissions(contractId, out pids) &&
+                QueueRescueHandover(pids, RescueKerbalsOf(contractId)))
                 scenario.ForgetRescueSubmission(contractId);
+            return true;
+        }
+
+        /// <summary>Carry out whatever a notification instructs, or report that it cannot
+        /// be done yet. One dispatch point, so a notification is never handled twice —
+        /// which is what happened when the parking guard and the body each called a
+        /// handler.</summary>
+        private bool TryHandleInstruction(Dictionary<string, object> notif)
+        {
+            string type = MiniJSON.GetString(notif, "type");
+            if (type == "rescue_craft_removed") return MaybeHandleRescueRemoval(notif);
+            if (type == "craft_gift_accepted") return MaybeHandleGiftAccepted(notif);
+            return true;   // nothing to carry out
+        }
+
+        /// <summary>
+        /// Queue every craft handed over for one rescue — the rescue craft and any extras
+        /// sent alongside it — for removal from this save. Returns true only when all of
+        /// them are queued (or already gone), i.e. when the caller may forget the record.
+        ///
+        /// Two things are decided here rather than at the call sites, because getting
+        /// either wrong destroys something.
+        ///
+        /// The fate is <see cref="VesselTransfer.CrewFate.BorrowedOnly"/> for every hull:
+        /// the ships and the kerbals picked up are the hand-over, the rescuer's own
+        /// pilots are not, and they go back to the roster as Available.
+        ///
+        /// The contract's kerbal list rides on the FIRST entry only. RemoveContractCrew
+        /// hunts those names wherever they are in the save, so attaching them to an
+        /// extra would have that extra's removal kill the rescued crew off the rescue
+        /// craft — and if the rescue craft's own removal is deferred (the player is
+        /// flying it), it would do so while the craft, and the contract, are still here.
+        /// </summary>
+        private bool QueueRescueHandover(List<string> pids, List<string> contractCrew)
+        {
+            if (pids == null || pids.Count == 0) return false;
+            bool all = true;
+            for (int i = 0; i < pids.Count; i++)
+            {
+                bool queued = QueueRescueVesselRemoval(
+                    pids[i],
+                    crewFate: VesselTransfer.CrewFate.BorrowedOnly,
+                    crewNames: i == 0 ? contractCrew : null);
+                if (!queued) all = false;
+            }
+            return all;
         }
 
         /// <summary>On a "craft_gift_accepted" notification, make sure the quicksent
@@ -1819,20 +2266,62 @@ namespace GeneKerman
         /// (which carries the pid we reported at send time) is the backstop. No crew
         /// list survives the rollback; the hull removal still settles everyone aboard,
         /// which after a rollback is exactly where they are.</summary>
-        private void MaybeHandleGiftAccepted(Dictionary<string, object> notif)
+        /// <returns>True when the instruction is settled and need not be retried: either
+        /// it was carried out, or there was never anything to do. False means "could not
+        /// tell yet" — the caller parks it and asks again on the next Space Center
+        /// arrival.
+        ///
+        /// The distinction that matters is the vessel not being found. That reads as
+        /// "already gone: the normal case", and usually is — but it is equally what a
+        /// DIFFERENT save being loaded looks like, and the two cannot be told apart from
+        /// the pid alone. Guessing "settled" there is how §3.19 lost a hand-over. So it
+        /// is reported unsettled and retried; the cost of being wrong is one cheap
+        /// re-check per Space Center visit for the rest of the session, and the cost of
+        /// the other answer is a duplicated ship.</returns>
+        private bool MaybeHandleGiftAccepted(Dictionary<string, object> notif)
         {
-            if (notif == null) return;
-            if (MiniJSON.GetString(notif, "type") != "craft_gift_accepted") return;
+            if (notif == null) return true;
+            if (MiniJSON.GetString(notif, "type") != "craft_gift_accepted") return true;
 
             var data = MiniJSON.GetDict(notif, "data");
             string pid = data != null ? MiniJSON.GetString(data, "vessel_pid") : "";
-            if (string.IsNullOrEmpty(pid)) return;              // blueprint gift, or an old server
-            if (GKContractScenario.Instance == null) return;    // no save loaded — nothing to check
-            if (!VesselTransfer.VesselExists(pid)) return;      // already gone: the normal case
+            if (string.IsNullOrEmpty(pid)) return true;         // blueprint gift, or an old server
+            if (GKContractScenario.Instance == null) return false;   // no save loaded — ask again
+
+            // Corroborate before destroying anything. This is the shape
+            // MaybeHandleRescueRemoval has always had — it looks its pids up in
+            // PeekRescueSubmissions, so the server chooses which RECORDED hand-over to
+            // settle rather than an arbitrary target — and the reason it matters more
+            // here is the fate: LeavesWithCraft kills everyone aboard and removes them
+            // from the roster, which KSP has no UI to undo. VesselExists is not a guard;
+            // it says "this vessel is in the current save", which is the precondition
+            // for the damage rather than against it.
+            //
+            // The record is per (save, pid, server) and lives in PluginData, not in the
+            // scenario: the very event this echo repairs — a quickload after the send —
+            // rolls the scenario back. Fails closed, so a lost record costs the player a
+            // ship they remove themselves rather than a ship removed for them.
+            string origin = Api != null ? Api.ServerUrl : null;
+            if (!QuicksendLedger.WasHandedOver(pid, origin))
+            {
+                // Recorded, but under a different save folder → the player has another
+                // career open. That is the same "cannot tell yet" the missing-vessel
+                // branch below reports, and for the same reason: guessing "settled"
+                // there is how §3.19 lost a hand-over.
+                if (QuicksendLedger.WasHandedOverFromAnySave(pid, origin)) return false;
+
+                Debug.LogWarning($"[GeneKerman] Ignoring a craft_gift_accepted for vessel {pid}: " +
+                                 "this client has no record of handing it over to this server. " +
+                                 "Nothing was removed.");
+                return true;   // settled — there is nothing here for us to carry out
+            }
+
+            if (!VesselTransfer.VesselExists(pid)) return false;     // gone, or the wrong save
 
             Debug.Log($"[GeneKerman] Accepted quicksend {pid} is still in this save " +
                       "(rolled-back removal?), re-queueing.");
             QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.LeavesWithCraft);
+            return true;
         }
 
         /// <summary>Whether a removal for this pid is still queued — including the
@@ -1842,6 +2331,23 @@ namespace GeneKerman
         {
             var pending = GKContractScenario.Instance?.PendingRescueRemovals;
             return pending != null && !string.IsNullOrEmpty(pid) && pending.ContainsKey(pid);
+        }
+
+        /// <summary>The sentence that refuses sending a vessel whose removal is already
+        /// queued, or null when it may go. A ship the player has already given away
+        /// (quicksend, rescue issue) is still in the save while its removal is
+        /// deferred — they are flying it — and nothing stopped it being exported a
+        /// second time: on 2026-08-30 the same hull went out as a 2-part quicksend
+        /// and, eleven minutes and a Set Orbit later, as a 14-part rescue wreck. Two
+        /// recipients then held two different ships that were both "this one", and
+        /// only one removal ever ran. Every path that hands a live vessel to somebody
+        /// else asks this first.</summary>
+        public string PendingRemovalRefusal(Vessel v)
+        {
+            if (v == null || !HasQueuedRemoval(v.id.ToString())) return null;
+            return $"\"{v.vesselName}\" has already been sent and is waiting to leave your save " +
+                   "(it goes when you leave it, at the latest at the Space Center). It can't be " +
+                   "sent again.";
         }
 
         /// <summary>Drop a queued removal that must no longer run — the recipient
@@ -1917,6 +2423,13 @@ namespace GeneKerman
                         entry.Crew.Add(n);
             }
 
+            // Carry it across the next scene change. The scenario module is destroyed and
+            // rebuilt on every transition and its entries do not survive that (see
+            // GKContractScenario.CarryRemember); without this a removal queued against
+            // the vessel being flown — which cannot be executed until the player leaves
+            // it — is silently dropped after they were told it would happen.
+            GKContractScenario.CarryRemember(pid, pending[pid]);
+
             ProcessPendingRescueRemovals(); // run now wherever it's currently safe
 
             // Still queued → we couldn't delete it yet (it's the craft the player is
@@ -1954,8 +2467,97 @@ namespace GeneKerman
             if (!HighLogic.LoadedSceneIsFlight) return false;
             var v = FlightGlobals.ActiveVessel;
             if (v == null || v.id.ToString() != pid) return false;
-            try { return FlightGlobals.ClearToSave() == ClearToSaveStatus.CLEAR; }
-            catch (Exception) { return false; }
+            // log: true — this is the decision point, and KSP's own "Cannot save"
+            // line next to our notification is what made the 2026-08-30 case
+            // diagnosable from KSP.log alone. See LiveHandoverRefusal.
+            return LiveHandoverRefusal(log: true) == null;
+        }
+
+        /// <summary>Why handing the *active vessel* over cannot complete right now, or
+        /// null when it can. The same read <see cref="CanAutoReturnToSpaceCenter"/>
+        /// makes, minus the pid check, so a caller can ask before it has sent anything.
+        ///
+        /// This is the gate on a live-vessel quicksend, and it exists because only the
+        /// auto-return branch is durable. That branch removes the ship inside a scene
+        /// change KSP saves on; the deferred branch leaves the intent in the scenario's
+        /// memory until the game next writes, and a quickload in that window rolls it
+        /// back with nothing to re-derive it from — a quicksend has no contract for
+        /// ReconcileRescueVessels to read, and the recipient's acceptance echo only
+        /// helps if they accept. Observed in FAK1 on 2026-08-30: sent at 19:27:29 with
+        /// the ship flagged landed at 861,594 km (so ClearToSave refused), quickloaded
+        /// at 19:28:07 before any save, and the Space Center visit at 19:31:45 found an
+        /// empty queue — the server offered a ship the sender still had.
+        ///
+        /// Refusing up front is the honest failure: nothing has been uploaded, so
+        /// nothing is inconsistent, and the player gets a sentence they can act on
+        /// instead of a promise that quietly expires.
+        ///
+        /// Deliberately NOT used when issuing a rescue: that intent is re-derivable
+        /// from the contract, so ReconcileRescueVessels heals the deferred branch there
+        /// and the same gate would refuse a send that was never at risk.
+        ///
+        /// <paramref name="log"/> picks KSP's logging overload. Default false, because
+        /// the UI polls this about once a second to decide whether to offer the button
+        /// and the logging overload writes a "Cannot save" line on every call.</summary>
+        public static string LiveHandoverRefusal(bool log = false)
+        {
+            if (!HighLogic.LoadedSceneIsFlight || FlightGlobals.ActiveVessel == null)
+                return "You have to be flying a vessel to hand it over.";
+
+            ClearToSaveStatus status;
+            // ClearToSave dereferences ActiveVessel without a null check of its own, so
+            // the guard above is load-bearing rather than defensive tidiness.
+            try { status = FlightGlobals.ClearToSave(log); }
+            catch (Exception)
+            {
+                return "KSP can't say whether this flight is settled enough to hand the " +
+                       "vessel over. Try again in a moment.";
+            }
+
+            if (status == ClearToSaveStatus.CLEAR) return null;
+            return "This vessel can't be handed over right now: " + NotClearReason(status) +
+                   " A hand-over has to take the ship out of your save the moment you send " +
+                   "it, and that needs the flight settled enough for KSP to save.";
+        }
+
+        /// <summary>Stock's clear-to-save refusals, said as something to do about it.
+        /// Stock's own strings are phrased about saving ("Cannot &lt;&lt;1&gt;&gt; while
+        /// flying in atmosphere"), which reads as a non-sequitur to someone pressing
+        /// Send. Every member of the enum is covered; the default is kept anyway, since
+        /// a KSP update adding one must degrade to a vague sentence rather than to a
+        /// blank one.</summary>
+        private static string NotClearReason(ClearToSaveStatus status)
+        {
+            switch (status)
+            {
+                case ClearToSaveStatus.NOT_IN_ATMOSPHERE:
+                    return "it's flying in atmosphere — land it or leave the air first.";
+                case ClearToSaveStatus.NOT_UNDER_ACCELERATION:
+                    return "it's under acceleration — let it coast first.";
+                case ClearToSaveStatus.NOT_WHILE_MOVING_OVER_SURFACE:
+                    // Deliberately does not promise that stopping will help. A craft on
+                    // wheels reports this state *permanently*: measured on a stock
+                    // Aeris 4A parked at PRELAUNCH on the runway with the brakes on,
+                    // KSP refused for six attempts across two minutes and never cleared.
+                    // The old wording ("bring it to a stop first") described a temporary
+                    // condition and sent the player to wait out something that never
+                    // ends. A launchpad craft clears immediately, so naming the landing
+                    // gear is the actionable half.
+                    return "it's moving over the surface — bring it to a stop. A craft "
+                         + "resting on wheels can report this no matter how still it "
+                         + "looks; if it will not settle, hand it over from the launchpad "
+                         + "or from orbit instead.";
+                case ClearToSaveStatus.NOT_WHILE_ABOUT_TO_CRASH:
+                    return "it's about to crash.";
+                case ClearToSaveStatus.NOT_WHILE_ON_A_LADDER:
+                    return "someone is on a ladder — get them aboard or onto the ground first.";
+                case ClearToSaveStatus.NOT_WHILE_THROTTLED_UP:
+                    return "the throttle is up — cut it first.";
+                case ClearToSaveStatus.ORBIT_EVENT_IMMINENT:
+                    return "an orbit change is imminent — wait until it's through.";
+                default:
+                    return "KSP won't let this flight be saved as it stands.";
+            }
         }
 
         /// <summary>Save and leave for the Space Center, exactly as the pause menu's
@@ -1966,6 +2568,54 @@ namespace GeneKerman
         /// flight themselves, or put the vessel somewhere no longer clear to save —
         /// then the classic "next Space Center visit" promise still holds, so just
         /// fall back to it).</summary>
+        /// <summary>
+        /// Leave flight for the Space Center after a submission, the way the hand-over
+        /// paths do — the difference being that this one has nothing to remove.
+        ///
+        /// A submission hands nothing over at the time it is made: the rescuer's craft is
+        /// only removed once the issuer *approves*, which is what RecordRescueSubmission
+        /// writes down. So there is no queued removal to wait for and no correctness
+        /// reason to leave flight at all; this is purely so submitting feels like the
+        /// other two outcomes rather than dropping the player back into a flight they are
+        /// finished with.
+        ///
+        /// It still refuses when KSP would refuse to save. That is not a hedge: leaving
+        /// flight writes the save, and forcing one stock would decline is the trade
+        /// <see cref="CanAutoReturnToSpaceCenter"/> already declines to make. The cost of
+        /// stopping here is only that the player leaves flight themselves — nothing is
+        /// lost, unlike the hand-over case where a refused save leaves a hull behind.
+        /// </summary>
+        public void ReturnToSpaceCenterAfterSubmit()
+        {
+            if (!HighLogic.LoadedSceneIsFlight) return;   // editor submits have no flight
+            StartCoroutine(ReturnAfterSubmitRoutine());
+        }
+
+        private IEnumerator ReturnAfterSubmitRoutine()
+        {
+            // The same beat the hand-over routine waits, so the confirmation notification
+            // is on screen before the scene starts changing.
+            yield return new WaitForSeconds(1.5f);
+            if (!HighLogic.LoadedSceneIsFlight) yield break;
+            if (FlightGlobals.ActiveVessel == null) yield break;
+
+            ClearToSaveStatus status;
+            try { status = FlightGlobals.ClearToSave(true); }
+            catch (Exception) { yield break; }
+            if (status != ClearToSaveStatus.CLEAR)
+            {
+                // Said out loud rather than silently skipped: a return that usually
+                // happens and sometimes does not, with no explanation, reads as a bug.
+                RaiseLocalNotification("Submitted",
+                    "Your submission is in. " + NotClearReason(status) +
+                    " Leave flight when you're ready — nothing is waiting on it.");
+                yield break;
+            }
+
+            GamePersistence.SaveGame("persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE);
+            HighLogic.LoadScene(GameScenes.SPACECENTER);
+        }
+
         private IEnumerator ReturnToSpaceCenterRoutine(string pid)
         {
             yield return new WaitForSeconds(1.5f);
@@ -1981,11 +2631,26 @@ namespace GeneKerman
             GKContractScenario.Instance?.RecordRescueSubmission(contractId, pid);
         }
 
+        /// <summary>Record every craft a rescuer handed over for a contract — the rescue
+        /// craft first, then the extras sent with it. Replaces the previous record: only
+        /// the newest submission is ever delivered, so an older attempt's hulls must not
+        /// still be queued for deletion when this one is approved.</summary>
+        public void RecordRescueSubmission(string contractId, IEnumerable<string> pids)
+        {
+            GKContractScenario.Instance?.RecordRescueSubmission(contractId, pids);
+        }
+
         /// <summary>The tagged kerbal names a rescue contract hands over, read from the
         /// cached contract list — on the rescuer's side these are the roster names
         /// exactly ("{issuer}'s {name}"). Null when the contract isn't in the cache;
         /// the removal then settles hull crew only, and the Space Center ghost sweep
-        /// remains the backstop.</summary>
+        /// remains the backstop.
+        ///
+        /// "Exactly" is not free: if this save already held one of those names the import
+        /// renamed the arrival, and the server's list still says what it always said. So
+        /// the list is put through the wreck record's rename map before it leaves here —
+        /// a no-op on every import that collided with nothing, and the difference between
+        /// settling the stranded crew and hunting kerbals who do not exist.</summary>
         private List<string> RescueKerbalsOf(string contractId)
         {
             var list = clientState?.ContractList;
@@ -1997,7 +2662,8 @@ namespace GeneKerman
                 var names = new List<string>();
                 foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
                     if (k != null && !string.IsNullOrEmpty(k.ToString())) names.Add(k.ToString());
-                return names.Count > 0 ? names : null;
+                if (names.Count == 0) return null;
+                return GKContractScenario.Instance?.LocalRescueCrewNames(contractId, names) ?? names;
             }
             return null;
         }
@@ -2060,7 +2726,10 @@ namespace GeneKerman
                 var kerbalNames = new List<string>();
                 foreach (var k in MiniJSON.GetList(c, "rescue_kerbals"))
                     if (k != null && !string.IsNullOrEmpty(k.ToString())) kerbalNames.Add(k.ToString());
-                rescueCrews[cid] = kerbalNames;
+                // Through the wreck record's rename map for the same reason as
+                // RescueKerbalsOf: the server's list cannot know what this save called
+                // them once an arriving name collided with one already in the roster.
+                rescueCrews[cid] = scenario.LocalRescueCrewNames(cid, kerbalNames);
 
                 if (!MiniJSON.GetBool(c, "is_outgoing")) continue;
 
@@ -2099,19 +2768,20 @@ namespace GeneKerman
                 }
                 if (status != "completed") continue;   // not handed over yet
 
-                string pid;
-                if (!scenario.PeekRescueSubmission(cid, out pid)) continue;
+                List<string> pids;
+                if (!scenario.PeekRescueSubmissions(cid, out pids)) continue;
 
                 Debug.Log($"[GeneKerman] Reconcile: rescue {cid} was approved, queueing " +
-                          $"removal of the craft we submitted (pid {pid}).");
-                // Rescuer side: the ship and the kerbals we picked up are the hand-over.
-                // The pilots who flew it there are not, and stay in our roster. The
+                          $"removal of the {pids.Count} craft we submitted " +
+                          $"(pids {string.Join(", ", pids.ToArray())}).");
+                // Rescuer side: the ships and the kerbals we picked up are the hand-over.
+                // The pilots who flew them there are not, and stay in our roster. The
                 // contract's tagged names ride along so a rescued kerbal who stepped
-                // off the craft still leaves by name (BorrowedOnly keeps our own out).
+                // off the craft still leaves by name (BorrowedOnly keeps our own out) —
+                // on the rescue craft's entry alone; see QueueRescueHandover.
                 List<string> handedOver;
                 rescueCrews.TryGetValue(cid, out handedOver);
-                if (QueueRescueVesselRemoval(pid, crewFate: VesselTransfer.CrewFate.BorrowedOnly,
-                                             crewNames: handedOver))
+                if (QueueRescueHandover(pids, handedOver))
                     scenario.ForgetRescueSubmission(cid);
             }
         }
@@ -2141,6 +2811,9 @@ namespace GeneKerman
             // as broken in the same visit.
             RestoreRepairedTraits();
             ReportUnresolvableTraits();
+            // After the Dead/Missing sweep above, so anything it already took is not
+            // offered to the player a second time as something to release.
+            ReportOrphanedBorrowedCrew();
         }
 
         /// <summary>Say out loud when the roster holds a kerbal whose profession nothing
@@ -2148,6 +2821,41 @@ namespace GeneKerman
         /// through drawing the Astronaut Complex, which names neither the kerbal nor the
         /// trait — so the player is left with a screen that looks broken for no reason.
         /// Once per session: it is a property of the save, not of the visit.</summary>
+        /// <summary>Offer to release borrowed kerbals stranded in the roster: no craft
+        /// crews them, no emergency freeze holds them, and no live contract speaks for
+        /// them. Reported once per session, like the trait warning, because it is a
+        /// standing condition rather than an event.
+        ///
+        /// Reported rather than swept, and that is the whole design: see
+        /// VesselTransfer.OrphanedBorrowedCrew for the rescue-in-progress case an
+        /// automatic purge would destroy. What makes them worth mentioning at all is
+        /// that the damage is invisible — KSP's applicant generator refuses any name
+        /// that is a substring of an existing roster entry, silently, so the player sees
+        /// an Astronaut Complex with nobody to hire and nothing that explains it.</summary>
+        private bool orphanCrewWarningShown;
+
+        private void ReportOrphanedBorrowedCrew()
+        {
+            if (orphanCrewWarningShown) return;
+            var stranded = VesselTransfer.OrphanedBorrowedCrew();
+            if (stranded.Count == 0) return;
+
+            orphanCrewWarningShown = true;
+            Debug.LogWarning($"[GeneKerman] {stranded.Count} borrowed kerbal(s) are stranded in " +
+                             $"this roster with no craft and no contract: " +
+                             $"{string.Join(", ", stranded.ToArray())}. They count against the " +
+                             "astronaut-complex hire limit and block their own base names from " +
+                             "the applicant generator; press Release stranded crew to drop them.");
+
+            RaiseLocalNotification("Crew stuck in your roster",
+                $"{stranded.Count} kerbal(s) borrowed from other players are stuck here with no " +
+                $"craft and no active contract: {NameList(stranded, 6)}. They take up astronaut " +
+                "complex slots and quietly block those names from ever being offered to you as " +
+                "applicants. Press Release stranded crew to let them go — they come back if " +
+                "their craft is ever imported again.",
+                null, LocalNotifActions.ReleaseOrphanCrew);
+        }
+
         private void ReportUnresolvableTraits()
         {
             if (traitWarningShown) return;
@@ -2194,6 +2902,27 @@ namespace GeneKerman
                 $"defining it is installed: {NameList(restored, 6)}.");
         }
 
+        /// <summary>How long a non-flight scene must have been up before a queued removal
+        /// is executed in it. Long enough for KSP to finish wiring the orbit renderers a
+        /// deletion would otherwise strand, short enough that the player reaches the Space
+        /// Center and sees the craft gone as promised.</summary>
+        private const float RemovalSceneSettleSeconds = 4f;
+
+        private static GameScenes removalScene = (GameScenes)(-1);
+        private static float removalSceneSince;
+
+        private static bool SceneSettledForRemoval()
+        {
+            var scene = HighLogic.LoadedScene;
+            if (scene != removalScene)
+            {
+                removalScene = scene;
+                removalSceneSince = Time.realtimeSinceStartup;
+                return false;
+            }
+            return Time.realtimeSinceStartup - removalSceneSince >= RemovalSceneSettleSeconds;
+        }
+
         /// <summary>Paces in-flight removal retries — see ProcessPendingRescueRemovals.</summary>
         private float nextFlightRemovalPass;
 
@@ -2222,6 +2951,22 @@ namespace GeneKerman
             {
                 if (Time.realtimeSinceStartup < nextFlightRemovalPass) return;
                 nextFlightRemovalPass = Time.realtimeSinceStartup + 10f;
+            }
+            else if (!SceneSettledForRemoval())
+            {
+                // Let the scene finish building before deleting anything out of it.
+                //
+                // Measured: removing the vessel the player had just been flying, ~100 ms
+                // into the Space Center load, left KSP with an orbit renderer pointing at
+                // a dead vessel — OrbitRendererBase.LateUpdate then threw a
+                // NullReferenceException every frame (66,000 of them), the scene camera
+                // never finished positioning, and the game was effectively hung. The
+                // removal itself was correct; the timing was not.
+                //
+                // Only the non-flight path waits. In flight the pass already skips loaded
+                // vessels and is paced by nextFlightRemovalPass, and the vessel being
+                // flown is refused outright.
+                return;
             }
 
             // Removed = we deleted it (announce); NotFound = already gone (dequeue
@@ -2277,9 +3022,15 @@ namespace GeneKerman
                 var entry = pending[pid];
                 announce.Add(entry != null ? entry.Name : pid);
                 pending.Remove(pid);
+                // Dequeue the carry with it, or the next scene change would restore an
+                // entry this pass has already finished with.
+                GKContractScenario.CarryForget(pid);
             }
             foreach (var pid in gone)
+            {
                 pending.Remove(pid);
+                GKContractScenario.CarryForget(pid);
+            }
 
             // A craft that was already gone (the NotFound case) never got the chance to
             // settle its crew, so its borrowed kerbals are still in the roster with

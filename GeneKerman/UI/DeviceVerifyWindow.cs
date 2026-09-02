@@ -18,6 +18,16 @@ namespace GeneKerman.UI
         public bool Visible { get; private set; }
         private string message = "";
 
+        // Ask mode: the window stops being a notice and becomes a question. Null while
+        // it is unanswered, which is what the caller waits on. Used for exactly one
+        // thing — "may this PC's KSP.log go with the report you filed" — because the
+        // log is the player's mod list, install paths and specs, and the request for it
+        // arrives from the server rather than from anything they did here.
+        private bool asking;
+        private string yesLabel = "Yes";
+        private string noLabel = "No";
+        public bool? Answer { get; private set; }
+
         private GUIStyle titleStyle;
         private GUIStyle boxStyle;
         private GUIStyle bodyStyle;
@@ -26,10 +36,29 @@ namespace GeneKerman.UI
         public void Show(string msg)
         {
             message = msg;
+            asking = false;
+            Answer = null;
             Visible = true;
         }
 
-        public void Hide() => Visible = false;
+        /// <summary>Put a yes/no question up. <see cref="Answer"/> stays null until the
+        /// player presses one of the two buttons; there is no third, closing option,
+        /// because a window dismissed by accident must not read as "yes".</summary>
+        public void Ask(string msg, string yes, string no)
+        {
+            message = msg;
+            yesLabel = yes;
+            noLabel = no;
+            asking = true;
+            Answer = null;
+            Visible = true;
+        }
+
+        public void Hide()
+        {
+            Visible = false;
+            asking = false;
+        }
 
         public void Draw()
         {
@@ -70,8 +99,17 @@ namespace GeneKerman.UI
             GUILayout.Label(message, bodyStyle);
             GUILayout.FlexibleSpace();
             GUILayout.Space(10);
-            if (GUILayout.Button("Close", GUILayout.Height(26)))
+            if (asking)
+            {
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(noLabel, GUILayout.Height(26))) Answer = false;
+                if (GUILayout.Button(yesLabel, GUILayout.Height(26))) Answer = true;
+                GUILayout.EndHorizontal();
+            }
+            else if (GUILayout.Button("Close", GUILayout.Height(26)))
+            {
                 Visible = false;
+            }
             GUILayout.EndVertical();
             GUI.DragWindow();
         }

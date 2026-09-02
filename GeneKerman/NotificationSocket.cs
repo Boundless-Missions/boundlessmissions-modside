@@ -51,6 +51,7 @@ namespace GeneKerman
         private volatile bool versionPoke;    // set by a "version" frame (bg thread), consumed by ConsumeVersionPoke
         private volatile bool policyPoke;     // set by a "policy" frame (bg thread), consumed by ConsumePolicyPoke
         private bool enabled;               // set by Connect()/Disconnect(), read on main thread
+        private volatile int openGeneration; // bumped by Disconnect() to void an in-flight open
         private float nextRetryTime;
         private float lastKeepalive;        // main-thread keepalive timer
         private float retryDelay = 2f;      // backoff: 2s → 30s
@@ -118,10 +119,25 @@ namespace GeneKerman
             nextRetryTime = 0f; // connect on next tick
         }
 
-        /// <summary>Disable the socket and close any open connection.</summary>
+        /// <summary>
+        /// Disable the socket and close any open connection.
+        ///
+        /// This is an *identity* teardown, not just a pause: the connection the server
+        /// holds is authenticated as whoever was linked when it opened, so everything
+        /// that drops the token has to come through here (see ApiClient.ClearToken).
+        /// Two things beyond closing the socket are what make that reliable. The
+        /// `connecting` guard is released, because leaving it set would make Tick()
+        /// treat a never-finished attempt as one still in flight and never reconnect —
+        /// a Disconnect()+Connect() pair (which is exactly what re-linking does) would
+        /// hang forever. And the generation counter is bumped so a ticket request
+        /// already in flight cannot land afterwards and open a socket with a ticket
+        /// minted for the account we just dropped.
+        /// </summary>
         public void Disconnect()
         {
             enabled = false;
+            connecting = false;
+            openGeneration++;
             CloseSocket();
         }
 
@@ -233,6 +249,7 @@ namespace GeneKerman
             connecting = true;
             sendDead = false;
             lastKeepalive = Time.realtimeSinceStartup;
+            int gen = openGeneration;
 
             if (TicketProvider != null)
             {
@@ -241,6 +258,15 @@ namespace GeneKerman
                 // back to the deprecated token URL so the socket still connects.
                 TicketProvider(ticket =>
                 {
+                    // The ticket request spans frames, and the account can be dropped
+                    // inside that window — unlink, log-out-everywhere, a 401. Opening
+                    // now would hand the *next* player a stream addressed to the last
+                    // one, so a Disconnect() since we asked voids this attempt.
+                    if (gen != openGeneration || !enabled)
+                    {
+                        connecting = false;
+                        return;
+                    }
                     string url = string.IsNullOrEmpty(ticket)
                         ? api.NotificationsWebSocketUrl
                         : api.WebSocketUrlForTicket(ticket);

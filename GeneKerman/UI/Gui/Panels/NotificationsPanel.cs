@@ -252,12 +252,29 @@ namespace GeneKerman.UI.Gui
                     MarkDirty();
 
                     Texture2D tex = null;
-                    if (ok && bytes != null)
+                    // A gift blueprint is a peer's image. Judge the header first —
+                    // LoadImage allocates from the declared dimensions, not from the
+                    // byte count. See ToolActions.ImageIsSafeToDecode.
+                    if (ok && bytes != null &&
+                        ToolActions.ImageIsSafeToDecode(bytes, "a gift blueprint"))
                     {
                         tex = new Texture2D(2, 2, TextureFormat.ARGB32, false);
                         if (!tex.LoadImage(bytes)) { Object.Destroy(tex); tex = null; }
                     }
-                    if (tex == null) return;
+                    if (tex == null)
+                    {
+                        // Returning silently drew nothing at all: the player clicks the
+                        // preview and the game does not react, which reads as the button
+                        // being broken rather than as the image being refused.
+                        try
+                        {
+                            ScreenMessages.PostScreenMessage(
+                                "Boundless Missions: that blueprint could not be opened here.",
+                                8f, ScreenMessageStyle.UPPER_CENTER);
+                        }
+                        catch { /* no ScreenMessages in this scene */ }
+                        return;
+                    }
 
                     giftBlueprints[id] = tex;
                     ShowImages(new List<Texture2D> { tex }, new List<string> { caption }, 0, caption);

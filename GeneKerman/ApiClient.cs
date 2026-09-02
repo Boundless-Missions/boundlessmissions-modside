@@ -659,6 +659,12 @@ namespace GeneKerman
             tokensByServer.Remove(serverUrl);
             WriteActiveToken();
             SaveSessions();
+            // The live notification socket was authenticated by the token we just
+            // dropped, and the server keeps pushing down it until it closes. Close it
+            // here rather than at each caller, so no path can drop a token and leave
+            // the previous account's stream feeding this install (see OnTokenCleared).
+            if (GeneKermanMod.Instance != null)
+                GeneKermanMod.Instance.OnTokenCleared();
             Debug.Log("[GeneKerman] Session token cleared.");
         }
 
@@ -675,7 +681,10 @@ namespace GeneKerman
                 else
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(tokenPath));
-                    File.WriteAllText(tokenPath, sessionToken);
+                    // 0600 where the platform has such a thing: this file IS the account.
+                    // It used to take the umask (0644 on a default Linux install), so any
+                    // other user on the machine could read a 30-day bearer token.
+                    SecureFile.WriteAllTextRestricted(tokenPath, sessionToken);
                 }
             }
             catch (Exception e)
@@ -1258,6 +1267,18 @@ namespace GeneKerman
         /// account owner opened. Best-effort; failure just means the ticket stays
         /// partial.
         ///
+        /// Two rules this shares with the bug-report path, and used not to. The log is
+        /// trimmed to head+tail (GetKspLogCapped) rather than sent whole: a modded
+        /// install writes hundreds of megabytes a session, so reading it all was both a
+        /// far bigger disclosure and a self-inflicted stall on the player's machine.
+        /// And the caller must have asked first — DeviceGateFlow puts the question to
+        /// whoever is at this PC before it gets here. A report opened in Discord says
+        /// the account owner wants an answer; it does not say the person sitting at
+        /// this keyboard agreed to hand over their mod list, install paths (which carry
+        /// the OS account name) and system specs. The *server* asking for it is
+        /// certainly not consent: any host the mod is pointed at can answer a poll with
+        /// "denied" plus a report id.
+        ///
         /// No hardware identifier is collected: this used to send the MAC address
         /// too, which was never stored or compared server-side (it only rendered
         /// into the ticket embed) and was self-reported by the very client under
@@ -1275,7 +1296,7 @@ namespace GeneKerman
         {
             if (TransmissionBlocked) { callback(false, null, 0); yield break; }
             string url = serverUrl + "/api/v1/device/report/" + reportId;
-            byte[] logBytes = DeviceId.GetKspLog();
+            byte[] logBytes = DeviceId.GetKspLogCapped(LogHeadBytes, LogTailBytes);
             bool haveLog = logBytes != null && logBytes.Length > 0;
             string note = haveLog
                 ? "KSP.log attached."
@@ -1343,10 +1364,12 @@ namespace GeneKerman
             }
         }
 
-        // Handles the first link step. A token means we're linked (store it). An
-        // "approval_required" status means the user must approve in Discord — the
-        // response carries challenge_id and the caller polls via PollLoginApproval.
-        // Anything else is an error, surfacing the server's detail when present.
+        // Handles the first link step. A token means we're linked (store it).
+        // "approval_required" means the user must approve elsewhere (a Discord DM,
+        // or the account panel for a panel-minted code) and the caller polls via
+        // PollLoginApproval. "totp_required" means the account has an authenticator
+        // and the caller collects a code, then calls SubmitLinkTotp. Both carry a
+        // challenge_id. Anything else is an error, surfacing the server's detail.
         private void HandleLinkResponse(bool ok, string resp,
             ApiCallback<Dictionary<string, object>> callback)
         {
@@ -1360,9 +1383,13 @@ namespace GeneKerman
                     callback(true, data, null);
                     return;
                 }
-                if (MiniJSON.GetString(data, "status") == "approval_required")
+                string status = MiniJSON.GetString(data, "status");
+                // Both mean "not linked yet, the caller has more to do" — the
+                // difference is only which step. approval_required waits for a
+                // button somewhere else; totp_required asks for a code here.
+                if (status == "approval_required" || status == "totp_required")
                 {
-                    callback(true, data, null);   // not linked yet — awaiting approval
+                    callback(true, data, null);
                     return;
                 }
             }
@@ -1373,6 +1400,26 @@ namespace GeneKerman
                 error = MiniJSON.GetString(errData, "detail", error);
             }
             callback(false, null, error);
+        }
+
+        /// <summary>
+        /// Finish a link that stopped for an authenticator code.
+        ///
+        /// The link code is already spent by this point — the server is holding the
+        /// validated result on the challenge — so this is the second half of one
+        /// flow, not a retry of it. A wrong code leaves the challenge alive for
+        /// another attempt until the server's own cap trips.
+        /// </summary>
+        public IEnumerator SubmitLinkTotp(string challengeId, string code,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            string body = MiniJSON.Serialize(new Dictionary<string, object>
+            {
+                { "challenge_id", challengeId },
+                { "code", code },
+            });
+            yield return Post("/api/v1/auth/link/totp", body,
+                (ok, resp, status) => HandleLinkResponse(ok, resp, callback));
         }
 
         /// Log out of every device linked to this account. On success the server
@@ -1477,6 +1524,91 @@ namespace GeneKerman
             });
         }
 
+        /// <summary>
+        /// Turn the @-mention on Discord corp-channel deliveries on or off.
+        ///
+        /// An *account* preference, not a mod setting: the mention is written by the
+        /// bot, so settings.cfg has no say in it and this cannot be stored there. It
+        /// rides the profile on the way back (`corp_pings`), so the only reason to
+        /// call this is to change it — the Settings panel reads the current value
+        /// out of the profile it already has.
+        ///
+        /// The server answers with the value now stored rather than an ack, so the
+        /// caller renders what the write actually did instead of what it asked for.
+        /// </summary>
+        public IEnumerator SetCorpPings(bool enabled, ApiCallback<bool> callback)
+        {
+            var body = new Dictionary<string, object> { { "corp_pings", enabled } };
+            yield return Post("/api/v1/user/preferences", MiniJSON.Serialize(body), (ok, resp, status) =>
+            {
+                var d = string.IsNullOrEmpty(resp) ? null : MiniJSON.DeserializeDict(resp);
+                if (ok && d != null && MiniJSON.GetBool(d, "success"))
+                {
+                    callback(true, MiniJSON.GetBool(d, "corp_pings", enabled), null);
+                    return;
+                }
+                string error = "Could not save the setting";
+                if (d != null)
+                    error = MiniJSON.GetString(d, "message", MiniJSON.GetString(d, "detail", error));
+                // The value is echoed back unchanged on failure so the caller can put
+                // the switch back where it was rather than leaving it showing a state
+                // the server never accepted.
+                callback(false, !enabled, error);
+            });
+        }
+
+        /// <summary>
+        /// The wallet's history: balance, lifetime totals per category, a daily
+        /// series for the graph and the recent movements — all in one call, because
+        /// the Finance panel draws them together and a game client opening a tab
+        /// should not spend four round trips on it.
+        /// </summary>
+        public IEnumerator GetFinance(int days, int limit, int offset, string category,
+                                      ApiCallback<Dictionary<string, object>> callback)
+        {
+            string q = "?days=" + days + "&limit=" + limit + "&offset=" + offset;
+            if (!string.IsNullOrEmpty(category))
+                q += "&category=" + UnityWebRequest.EscapeURL(category);
+            yield return Get("/api/v1/finance" + q, (ok, resp, status) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                    callback(true, MiniJSON.DeserializeDict(resp), null);
+                else
+                    callback(false, null, "Failed to fetch finance history");
+            });
+        }
+
+        /// <summary>
+        /// Send coins to another player. The server answers 200 with
+        /// `success:false` for a refusal it wants worded (insufficient funds, below
+        /// the minimum), so this reads the message out of the body rather than
+        /// treating a 200 as a completed transfer — the same trap the submit path
+        /// hit, where a 200-with-success:false closed the panel as if accepted.
+        /// </summary>
+        public IEnumerator SendMoney(string toUserId, int amount, string note,
+                                     ApiCallback<Dictionary<string, object>> callback)
+        {
+            var body = new Dictionary<string, object>
+            {
+                { "to_user_id", toUserId ?? "" },
+                { "amount", amount },
+                { "note", note ?? "" },
+            };
+            yield return Post("/api/v1/finance/send", MiniJSON.Serialize(body), (ok, resp, status) =>
+            {
+                var d = string.IsNullOrEmpty(resp) ? null : MiniJSON.DeserializeDict(resp);
+                if (ok && d != null && MiniJSON.GetBool(d, "success"))
+                {
+                    callback(true, d, null);
+                    return;
+                }
+                string error = "Transfer failed";
+                if (d != null)
+                    error = MiniJSON.GetString(d, "message", MiniJSON.GetString(d, "detail", error));
+                callback(false, d, error);
+            });
+        }
+
         public IEnumerator GetWeeklyMissions(ApiCallback<Dictionary<string, object>> callback)
         {
             yield return Get("/api/v1/missions/weekly", (ok, resp, status) =>
@@ -1551,6 +1683,78 @@ namespace GeneKerman
         public IEnumerator DismissReadNotifications(ApiCallback callback)
         {
             yield return Delete("/api/v1/user/notifications/read", callback);
+        }
+
+        // ── Friends ─────────────────────────────────────────────────────────
+        //
+        // The friend list is what quicksend picks from, and the server enforces it:
+        // /api/v1/craft/send refuses a recipient who is not an accepted friend, so
+        // these are not a nicer way to draw the roster — they are the only list a
+        // send can come from. Both Discord players and website-only Boundless
+        // accounts appear in it, and nothing here treats the two differently.
+
+        public IEnumerator GetFriends(ApiCallback<Dictionary<string, object>> callback)
+        {
+            yield return Get("/api/v1/friends", (ok, resp, status) =>
+            {
+                if (ok && !string.IsNullOrEmpty(resp))
+                    callback(true, MiniJSON.DeserializeDict(resp), null);
+                else
+                    callback(false, null, "Failed to fetch friends");
+            });
+        }
+
+        /// <summary>
+        /// Ask a player to be friends. `username` is the Boundless username someone
+        /// typed; `userId` is an account id a picker already held. The server takes
+        /// either — a website account has no Discord name to search for, and a
+        /// Discord player picked off the server roster has no username the sender
+        /// necessarily knows.
+        /// </summary>
+        public IEnumerator SendFriendRequest(string username, string userId,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            var body = new Dictionary<string, object>
+            {
+                { "username", username ?? "" },
+                { "user_id", userId ?? "" },
+            };
+            yield return Post("/api/v1/friends/request", MiniJSON.Serialize(body),
+                (ok, resp, status) => FriendReply(ok, resp, status, callback));
+        }
+
+        /// <summary>accept / decline / remove, which is every way a friendship
+        /// changes after the request. One method because the three differ only in
+        /// the word in the path — and because a client that spelled one of them
+        /// differently would leave the pair half-written on the server.</summary>
+        public IEnumerator FriendAction(string otherId, string action,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            yield return Post("/api/v1/friends/" + UnityWebRequest.EscapeURL(otherId ?? "") +
+                              "/" + action, "{}",
+                (ok, resp, status) => FriendReply(ok, resp, status, callback));
+        }
+
+        /// <summary>
+        /// Both refusal shapes, folded into one answer.
+        ///
+        /// A rule the server applies deliberately ("You're already friends.") comes
+        /// back 200 with success:false; a lookup that found nothing, or a rate limit,
+        /// comes back 404/429 with the sentence in FastAPI's `detail`. Either way the
+        /// server has already written the explanation, and replacing it with "failed"
+        /// only sends the player back to press the same button.
+        /// </summary>
+        private static void FriendReply(bool ok, string resp, long status,
+            ApiCallback<Dictionary<string, object>> callback)
+        {
+            var body = string.IsNullOrEmpty(resp) ? null : MiniJSON.DeserializeDict(resp);
+            if (ok && body != null)
+            {
+                callback(true, body, null);
+                return;
+            }
+            callback(false, body,
+                     ClientState.RefusalMessage(status, body, "The server refused that"));
         }
 
         public IEnumerator GetCorps(ApiCallback<Dictionary<string, object>> callback)
@@ -1634,6 +1838,11 @@ namespace GeneKerman
         /// Create a rescue contract. Uploads the issuer's snapshotted vessel (the
         /// wreck, crew already renamed) as a gzipped ConfigNode alongside the target
         /// location and rename map. Multipart because of the file upload.
+        /// <para/>
+        /// Optionally carries the wreck's blueprint render and telemetry, which is the
+        /// only chance anything has to capture them — a moment later the ship is queued
+        /// out of this save. Both are strictly additive: absent, the server creates the
+        /// same rescue an older client always got.
         /// </summary>
         public IEnumerator CreateRescueContract(
             string contractorId, string mission, int payment, int fine, string dueDate,
@@ -1650,7 +1859,12 @@ namespace GeneKerman
             // no particular plane, and the field is then left off entirely so the server
             // stores its own "any plane" rather than a real 0° (equatorial).
             double incl, double marginIncl, string orbitTypes,
-            ApiCallback<Dictionary<string, object>> callback)
+            ApiCallback<Dictionary<string, object>> callback,
+            // What the wreck looks like and where it is. Optional, and trailing so an
+            // older call site compiles unchanged: the server treats both as absent and
+            // the rescue is created exactly as it was before these existed. Never let
+            // a failed render stop a rescue — pass null and send the contract.
+            byte[] blueprintPng = null, string vesselDataJson = null)
         {
             if (TransmissionBlocked) { callback(false, null, "Data sharing is off."); yield break; }
             string url = serverUrl + "/api/v1/contracts/create_rescue";
@@ -1708,9 +1922,21 @@ namespace GeneKerman
             if (lsCrewCapacity > 0)
                 form.Add(new MultipartFormDataSection("ls_crew_capacity", lsCrewCapacity.ToString(inv)));
 
+            // The wreck's telemetry, from which the server draws the orbit diagram. Sent
+            // as JSON rather than as a rendered picture because the drawing is the
+            // server's job (it is the same render every submission gets) and because the
+            // numbers are what a future re-render would need.
+            if (!string.IsNullOrEmpty(vesselDataJson))
+                form.Add(new MultipartFormDataSection("vessel_data", vesselDataJson));
+
             byte[] nodeBytes = Encoding.UTF8.GetBytes(vesselNodeData ?? "");
             byte[] compressed = GzipCompress(nodeBytes);
             form.Add(new MultipartFormFileSection("vessel_node", compressed, "vessel.cfg", "application/gzip"));
+            // Uncompressed: it is already a PNG, and the server stores and serves these
+            // bytes as an image rather than unpacking them like the node above.
+            if (blueprintPng != null && blueprintPng.Length > 0)
+                form.Add(new MultipartFormFileSection(
+                    "blueprint", blueprintPng, "rescue_blueprint.png", "image/png"));
 
             using (var req = UnityWebRequest.Post(url, form))
             {
@@ -1893,21 +2119,138 @@ namespace GeneKerman
         }
 
         /// <summary>
+        /// Largest download this client will accept.
+        ///
+        /// Everything fetched here is a file another player uploaded — a craft, a vessel
+        /// node, a flag, a screenshot — and none of them are large. The server's own
+        /// 25 MB upload ceiling is not this cap: the URL is a signed GCS link, so what
+        /// arrives is whatever that host serves, and the ceiling matters most for the
+        /// payloads that are then *decompressed* (see CraftInstaller.MaxDecompressedBytes,
+        /// which bounds the other half of the same problem).
+        /// </summary>
+        public const int MaxDownloadBytes = 32 * 1024 * 1024;
+
+        /// <summary>
         /// Download a raw file from a URL (for craft files from Firebase Storage).
+        ///
+        /// Deliberately sends no Authorization header — the URL carries its own
+        /// signature and may point at any host — so the checks here are about what may
+        /// come back rather than about who is asking:
+        ///   • the consent gate, like every other outbound call in this file. In
+        ///     practice the call that hands us the URL is gated first, so this is a
+        ///     structural guard rather than a live hole — but the gate is per-call-site
+        ///     and the next method shaped like this one would inherit the omission.
+        ///   • http(s) only. UnityWebRequest will happily read a file:// URL, which
+        ///     would turn a server-supplied string into a local file read. Not
+        ///     https-only, unlike the update gate's download link: this method also
+        ///     fetches from a self-hosted server on plain http (serverProtocol = http)
+        ///     and from the arbitrary image host ToolActions.ImportFlag offers, and a
+        ///     scheme is not what makes those safe — the size, magic-byte and dimension
+        ///     checks their callers apply are.
+        ///   • a byte budget, so a hostile or compromised host cannot answer a craft
+        ///     download with an endless stream.
+        /// The failure log names origin + path only: these URLs carry a signed-token
+        /// query string, which is a bearer capability, and KSP.log is a file the bug
+        /// report tool uploads.
         /// </summary>
         public IEnumerator DownloadFile(string url, System.Action<bool, byte[]> callback)
         {
-            using (var req = UnityWebRequest.Get(url))
+            return DownloadFile(url, callback, null);
+        }
+
+        /// <summary>
+        /// Fetch a URL, optionally enforcing a caller's rule on the host.
+        ///
+        /// <paramref name="hostRule"/> is re-checked against the URL the request
+        /// ACTUALLY ended on, not just the one that was submitted. Redirects are
+        /// followed by default (Unity's limit is 32, and Firebase signed URLs need
+        /// them), so a caller that validated only the submitted URL was validating
+        /// the first hop alone: a public host answering `302 Location:
+        /// http://127.0.0.1:8080/` walked straight past a loopback check. Keeping the
+        /// redirects and re-testing the final host is what lets both work.
+        /// </summary>
+        public IEnumerator DownloadFile(string url, System.Action<bool, byte[]> callback,
+                                        System.Func<Uri, bool> hostRule)
+        {
+            if (TransmissionBlocked) { callback(false, null); yield break; }
+
+            Uri parsed;
+            if (!Uri.TryCreate((url ?? "").Trim(), UriKind.Absolute, out parsed) ||
+                (parsed.Scheme != Uri.UriSchemeHttp && parsed.Scheme != Uri.UriSchemeHttps))
+            {
+                Debug.LogWarning("[GeneKerman] Download refused: not an absolute http(s) URL.");
+                callback(false, null);
+                yield break;
+            }
+            if (hostRule != null && !hostRule(parsed))
+            {
+                Debug.LogWarning("[GeneKerman] Download refused: host not permitted.");
+                callback(false, null);
+                yield break;
+            }
+
+            using (var req = UnityWebRequest.Get(parsed.AbsoluteUri))
             {
                 req.timeout = 30;
-                yield return req.SendWebRequest();
+                var op = req.SendWebRequest();
+                while (!op.isDone)
+                {
+                    // Abort mid-flight rather than only checking the finished size: the
+                    // point of the budget is that the bytes never all arrive.
+                    if (req.downloadedBytes > (ulong)MaxDownloadBytes)
+                    {
+                        req.Abort();
+                        Debug.LogWarning("[GeneKerman] Download refused: over the " +
+                                         $"{MaxDownloadBytes / (1024 * 1024)} MB budget " +
+                                         $"({SafeUrlForLog(parsed)}).");
+                        callback(false, null);
+                        yield break;
+                    }
+                    yield return null;
+                }
 
                 bool ok = !req.isNetworkError && !req.isHttpError;
-                callback(ok, ok ? req.downloadHandler.data : null);
+
+                // Where the request actually ended, after any redirects. `req.url` is
+                // the final URL; if the chain left the permitted set, the body is
+                // discarded — otherwise the rule above only ever described hop one.
+                if (ok && hostRule != null)
+                {
+                    Uri landed;
+                    if (!Uri.TryCreate(req.url ?? "", UriKind.Absolute, out landed) || !hostRule(landed))
+                    {
+                        Debug.LogWarning("[GeneKerman] Download refused: redirected to a host "
+                                         + "that is not permitted.");
+                        callback(false, null);
+                        yield break;
+                    }
+                }
+
+                byte[] data = ok ? req.downloadHandler.data : null;
+                if (ok && data != null && data.Length > MaxDownloadBytes)
+                {
+                    // A response with no Content-Length can finish before the loop above
+                    // sees it; judge the delivered size too.
+                    Debug.LogWarning($"[GeneKerman] Download refused: {data.Length} bytes, over " +
+                                     $"the budget ({SafeUrlForLog(parsed)}).");
+                    ok = false;
+                    data = null;
+                }
+
+                callback(ok, data);
 
                 if (!ok)
-                    Debug.LogWarning($"[GeneKerman] Download failed ({req.responseCode}): {req.error}, url: {url}");
+                    Debug.LogWarning($"[GeneKerman] Download failed ({req.responseCode}): " +
+                                     $"{req.error}, url: {SafeUrlForLog(parsed)}");
             }
+        }
+
+        /// <summary>origin + path, with the query (and any signature in it) dropped.</summary>
+        private static string SafeUrlForLog(Uri uri)
+        {
+            if (uri == null) return "(none)";
+            try { return uri.GetLeftPart(UriPartial.Path); }
+            catch { return uri.Scheme + "://" + uri.Host; }
         }
 
         // ── Utility ─────────────────────────────────────────────────────────

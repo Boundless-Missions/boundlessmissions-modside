@@ -158,6 +158,18 @@ namespace GeneKerman
         {
             if (string.IsNullOrEmpty(installedCraftPath) || pngBytes == null || pngBytes.Length == 0)
                 return;
+
+            // These bytes are a base64 blob lifted out of a peer's GKTHUMB block, and
+            // the file we are about to write is decoded by the STOCK craft browser the
+            // next time the player opens the VAB or SPH — a decoder we do not call and
+            // cannot guard. So the header is judged here, at the write, rather than at
+            // a decode that is somebody else's: Texture2D.LoadImage sizes its allocation
+            // from the declared dimensions, so a few kilobytes whose IHDR says
+            // 60000x60000 asks Unity for ~14 GB, and a thumbnail that fails is a missing
+            // picture in a craft list where the alternative is the editor taking the
+            // game down every time it is opened.
+            if (!ToolActions.ImageIsSafeToDecode(pngBytes, "craft thumbnail")) return;
+
             try
             {
                 string save = HighLogic.SaveFolder;

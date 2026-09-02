@@ -66,8 +66,8 @@ namespace GeneKerman.Web
         /// or null on failure.
         ///
         /// The returned URL contains a single-use nonce and MUST NOT be logged: players
-        /// routinely upload KSP.log to Discord, and DeviceId.GetKspLog() uploads it
-        /// automatically for device reports. Log <see cref="Url"/> instead.
+        /// routinely upload KSP.log to Discord, and this mod attaches it to bug and
+        /// device reports. Log <see cref="Url"/> instead.
         /// </summary>
         public string Start()
         {
@@ -275,6 +275,27 @@ namespace GeneKerman.Web
         // ── Response helpers ────────────────────────────────────────────────
 
         /// <summary>Applied to every response, including errors.</summary>
+        /// <summary>
+        /// Whether a response of this content type could execute script in our own
+        /// origin, and therefore needs the CSP. Deliberately broad and
+        /// case-insensitive: this is served from the origin that holds the bridge
+        /// session cookie, so the cost of being wrong is asymmetric.
+        /// </summary>
+        /// <summary>Internal rather than private so <see cref="StaticFiles"/> shares the
+        /// one answer. It had its own `StartsWith("text/html")` test, which is the
+        /// pre-LB4 rule — and StaticFiles is the ONLY path that can serve
+        /// `image/svg+xml`, the content type this function was widened for.</summary>
+        internal static bool NeedsCsp(string contentType)
+        {
+            if (string.IsNullOrEmpty(contentType)) return true;
+            string t = contentType.Trim().ToLowerInvariant();
+            return t.StartsWith("text/html")
+                || t.StartsWith("application/xhtml")
+                || t.StartsWith("image/svg")
+                || t.StartsWith("text/xml")
+                || t.StartsWith("application/xml");
+        }
+
         public static void ApplySecurityHeaders(HttpListenerResponse res, bool isHtml)
         {
             res.Headers["X-Content-Type-Options"] = "nosniff";
@@ -319,7 +340,12 @@ namespace GeneKerman.Web
                 byte[] buf = Encoding.UTF8.GetBytes(body ?? "");
                 res.StatusCode = status;
                 res.ContentType = contentType;
-                ApplySecurityHeaders(res, contentType != null && contentType.StartsWith("text/html"));
+                // Case-insensitively, and for anything that can carry script — not just
+                // the exact lowercase "text/html". A relayed upstream content type is
+                // echoed verbatim into THIS origin (the one holding the bridge session
+                // cookie), so `Text/HTML`, a leading space, or `image/svg+xml` would
+                // each have been served here with no CSP at all.
+                ApplySecurityHeaders(res, NeedsCsp(contentType));
                 res.ContentLength64 = buf.Length;
                 res.OutputStream.Write(buf, 0, buf.Length);
             }

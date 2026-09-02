@@ -376,10 +376,15 @@ namespace GeneKerman.UI.Gui
 
             tabStrip.ClearChildren();
 
-            // Wrap onto two rows past four panels. Six tabs across 368px leaves each
-            // caption about 60px, which truncates "Notifications" to noise; split in
-            // half they get 120px, which fits every title the mod has.
-            int perRow = shown.Count <= 4 ? shown.Count : (shown.Count + 1) / 2;
+            // Wrap past four panels. Six tabs across 368px leaves each caption about
+            // 60px, which truncates "Notifications" to noise; split in half they get
+            // 120px, which fits every title the mod has. A third row past eight for
+            // the same reason and at the same threshold — nine over two rows is five
+            // in the top one, which is back under 75px and truncating again. The
+            // rows cost 24px each and only the row count changes, so this stays a
+            // property of how many tabs there are rather than of which they are.
+            int rows = shown.Count <= 4 ? 1 : shown.Count <= 8 ? 2 : 3;
+            int perRow = (shown.Count + rows - 1) / rows;
             El row = null;
 
             for (int i = 0; i < shown.Count; i++)

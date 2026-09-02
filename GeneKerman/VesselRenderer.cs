@@ -26,7 +26,12 @@ namespace GeneKerman
         // ── Image Layout ────────────────────────────────────────────────────
         // SCALE multiplies every pixel dimension so the blueprint renders at higher
         // resolution while keeping the layout proportions identical. SCALE = 2 → 2x quality.
-        const int SCALE = 2;
+        //
+        // Public because the decode guard's byte ceiling is derived from it
+        // (ToolActions.MaxImageBytes), exactly as the server derives MAX_BLUEPRINT_BYTES
+        // from settings.BLUEPRINT_SCALE. Keep all three in step: a client that renders
+        // bigger than it will decode refuses its own output.
+        public const int SCALE = 2;
         const int IMG_W = 2048 * SCALE;
         const int IMG_H = 1100 * SCALE;
         const int CELL  = 440 * SCALE;          // Each view cell size

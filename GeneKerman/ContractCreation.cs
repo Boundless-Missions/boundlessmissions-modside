@@ -528,6 +528,10 @@ namespace GeneKerman
                     {
                         ok = success;
                         message = success ? "Auction posted. Bidding happens in Discord." : (err ?? "Failed to post the auction.");
+                        // Posting escrows the start value, so the balance on screen is
+                        // now wrong until something re-reads it. See the note in
+                        // ToolActions' listing callback: there is no periodic refresh.
+                        if (success) mod.State?.RequestProfileRefresh();
                     });
             }
             else
@@ -538,6 +542,8 @@ namespace GeneKerman
                     {
                         ok = success;
                         message = success ? $"Contract sent to {who}." : (err ?? "Failed to create the contract.");
+                        // Same as the auction above: the payment is escrowed on create.
+                        if (success) mod.State?.RequestProfileRefresh();
                     },
                     r.ContractType);
             }
@@ -554,6 +560,8 @@ namespace GeneKerman
             // switched ships, EVA'd, or left flight entirely.
             var ctx = ScanRescueContext();
             if (!ctx.Available) { onDone(false, "No crew aboard to rescue."); yield break; }
+            string sentRefusal = mod?.PendingRemovalRefusal(FlightGlobals.ActiveVessel);
+            if (sentRefusal != null) { onDone(false, sentRefusal); yield break; }
 
             bool bodyExists = false;
             bool isModded = false;
@@ -610,6 +618,17 @@ namespace GeneKerman
             string pid = vessel.id.ToString();
             string vesselName = LocalizedVesselName(vessel);
 
+            // What the rescuer will be asked to fly to. This client is the only machine
+            // that has the wreck — in a few seconds it is queued for removal from this
+            // save and exists nowhere but as bytes on the server — so a picture of it and
+            // a reading of where it is can only be taken here, now.
+            //
+            // Both are best-effort throughout. A rescue with no schematic is still a
+            // rescue, and neither of these is allowed to be the reason a ship is handed
+            // over and no contract results.
+            byte[] blueprint = CaptureWreckBlueprint(vessel);
+            string wreckTelemetry = CaptureWreckTelemetry(vessel);
+
             string myName = mod.LinkedUsername ?? "";
             var taggedKerbals = new List<object>();
             foreach (var k in ctx.Crew) taggedKerbals.Add(VesselTransfer.TagName(myName, k));
@@ -636,7 +655,8 @@ namespace GeneKerman
                     message = success
                         ? $"Rescue sent to {who}. Your vessel will be removed."
                         : (err ?? "Failed to create the rescue contract.");
-                });
+                },
+                blueprint, wreckTelemetry);
 
             // Only once the server has it: the vessel is gone for the issuer, so losing
             // it on a failed send would destroy the ship and produce no contract.
@@ -657,6 +677,59 @@ namespace GeneKerman
                           "time you visit the Space Center.";
 
             onDone(ok, message);
+        }
+
+        /// <summary>
+        /// The wreck's blueprint sheet as PNG bytes, or null.
+        ///
+        /// <see cref="VesselRenderer.CaptureVessel(Vessel)"/> falls back to
+        /// <c>VesselDataCollector.CaptureScreenshot()</c> when no view rasterizes any
+        /// vessel pixels. For a submission that is the right trade — a screenshot of the
+        /// craft beats a blank image. Here it is the wrong picture twice over: Unity
+        /// writes a screen capture *asynchronously*, so it is not on disk when this
+        /// returns, and what it would capture is the contract form the issuer is looking
+        /// at rather than the ship. A real blueprint is written synchronously into
+        /// PluginData/renders, so "under renders/ and on disk now" is exactly the test
+        /// that tells the two apart — and no blueprint is a supported answer.
+        /// </summary>
+        private static byte[] CaptureWreckBlueprint(Vessel vessel)
+        {
+            try
+            {
+                string path = VesselRenderer.CaptureVessel(vessel);
+                if (string.IsNullOrEmpty(path)) return null;
+
+                string dir = System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(path));
+                if (!string.Equals(dir, "renders", StringComparison.OrdinalIgnoreCase))
+                    return null;
+                if (!System.IO.File.Exists(path)) return null;
+
+                return System.IO.File.ReadAllBytes(path);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] Rescue blueprint capture failed: " + ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// The wreck's telemetry as JSON, or null. The server draws the orbit diagram
+        /// from this with the same renderer every submission's telemetry goes through —
+        /// which is why the numbers are sent rather than a picture drawn here.
+        /// </summary>
+        private static string CaptureWreckTelemetry(Vessel vessel)
+        {
+            try
+            {
+                var snap = VesselDataCollector.CaptureVessel(vessel);
+                return snap == null ? null : MiniJSON.Serialize(snap.ToDict());
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] Rescue telemetry capture failed: " + ex.Message);
+                return null;
+            }
         }
 
         /// <summary>

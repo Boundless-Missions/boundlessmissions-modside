@@ -25,6 +25,7 @@ namespace GeneKerman.UI.Gui
         private bool lastHadProfile;
         private int lastBalance;
         private int lastXp;
+        private int lastDebt;
         private bool requested;
         private bool logoutConfirm;
 
@@ -62,7 +63,7 @@ namespace GeneKerman.UI.Gui
             El body;
             UIF.ScrollView(col, out body, "profile").Flex(1f, 1f);
 
-            // Identity + the four stats the site shows, in the site's order.
+            // Identity + the stats the site shows, in the site's order.
             var card = UIF.Card(body, "Account").Column(Theme.Space2).Pad(Theme.Space3);
             UIF.Label(card, MiniJSON.GetString(profile, "username"), Theme.FontLg).Bold();
 
@@ -71,7 +72,24 @@ namespace GeneKerman.UI.Gui
             Stat(stats, currency, MiniJSON.GetInt(profile, "balance"));
             Stat(stats, "Level", MiniJSON.GetInt(profile, "level"));
             Stat(stats, "XP", MiniJSON.GetInt(profile, "xp"));
-            Stat(stats, "Messages", MiniJSON.GetInt(profile, "messages"));
+            // No message count: XP is no longer earned by talking, so nothing
+            // increments it. The server still sends the field so an older client
+            // keeps showing its own historical number rather than a sudden zero.
+
+            // Unpaid contract fines. Drawn only when there are any — but when there
+            // are, it has to be said here: a share of every payout is going to them,
+            // and rewards that arrive smaller with nothing explaining why read as the
+            // mod being broken and arrive as a bug report rather than as an appeal.
+            int debt = MiniJSON.GetInt(profile, "debt");
+            if (debt > 0)
+            {
+                int pct = MiniJSON.GetInt(profile, "debt_garnish_percent");
+                UIF.Notice(body, "Unpaid fines: " + debt + " " + currency,
+                       pct > 0
+                           ? pct + "% of what you earn goes towards them until they are "
+                             + "paid off. Nothing else is restricted."
+                           : "Repaid out of a share of what you earn.");
+            }
 
             // Unlocked KSP achievement levels, as pips rather than the IMGUI's
             // emoji run — a borrowed font is no place to bet on emoji coverage.
@@ -166,6 +184,7 @@ namespace GeneKerman.UI.Gui
             lastHadProfile = profile != null;
             lastBalance = profile == null ? -1 : MiniJSON.GetInt(profile, "balance");
             lastXp = profile == null ? -1 : MiniJSON.GetInt(profile, "xp");
+            lastDebt = profile == null ? -1 : MiniJSON.GetInt(profile, "debt");
         }
 
         protected override void Poll()
@@ -190,7 +209,8 @@ namespace GeneKerman.UI.Gui
             if (main.ProfileLoading != lastLoading ||
                 (profile != null) != lastHadProfile ||
                 (profile != null && (MiniJSON.GetInt(profile, "balance") != lastBalance ||
-                                     MiniJSON.GetInt(profile, "xp") != lastXp)))
+                                     MiniJSON.GetInt(profile, "xp") != lastXp ||
+                                     MiniJSON.GetInt(profile, "debt") != lastDebt)))
             {
                 MarkDirty();
             }

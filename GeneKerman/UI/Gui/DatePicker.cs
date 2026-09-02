@@ -77,6 +77,22 @@ namespace GeneKerman.UI.Gui
         internal void Close() => open = false;
 
         /// <summary>
+        /// Start expanded, on the month <paramref name="on"/> falls in. For a caller
+        /// whose whole screen *is* the date — MoreTimePanel's window — where making
+        /// the player press "Pick" to reveal the thing they just opened is furniture,
+        /// not a disclosure. The month is taken here rather than derived in Build so
+        /// that a later panel rebuild cannot snap the view back out from under
+        /// somebody who has paged forward: after this, the month is the widget's own
+        /// state like any other.
+        /// </summary>
+        internal void Expand(DateTime on)
+        {
+            open = true;
+            view = FirstOfMonth(on.Date);
+            Refresh();
+        }
+
+        /// <summary>
         /// A date out of whatever the caller is holding, falling back rather than
         /// failing: the contract form's box is free text, so it can legitimately be
         /// half-typed at the moment the calendar is opened.

@@ -195,6 +195,12 @@ export function CreateContract({
         fine: Math.max(0, Number.parseInt(fine, 10) || 0),
         due_date: dueDate,
         contract_type: type,
+        // The permanence acknowledgement, which used to live only in this component's
+        // state. Issuing a rescue removes the flying vessel and its crew from the save
+        // for good, and the route accepted that on the page's word alone — so the
+        // switch the player actually toggles now reaches the server that acts on it.
+        // The route REQUIRES this for kind === "rescue"; the two changed together.
+        confirm_permanent: isRescue ? confirmRescue : undefined,
         // Rescue always carries the issuer's own mod list, and a flag has no build step
         // to restrict — in both cases the mod ignores whatever is sent here.
         modlist_mode: isRescue || type === "flag_design" ? "none" : modlistMode,
@@ -515,13 +521,13 @@ function RescuePanel({
           <Field label="Latitude (°)">
             <NumberInput value={lat} onChange={setLat} />
             <p className="mt-1.5 text-xs text-muted-foreground">
-              0° is the equator; +90° the north pole, −90° the south.
+              0° is the equator; +90° the north pole, -90° the south.
             </p>
           </Field>
           <Field label="Longitude (°)">
             <NumberInput value={lon} onChange={setLon} />
             <p className="mt-1.5 text-xs text-muted-foreground">
-              −180° to 180° around the body's prime meridian; east is positive.
+              -180° to 180° around the body's prime meridian; east is positive.
             </p>
           </Field>
           <Field label={`Margin (°, min ${ctx.minMarginSurfaceDeg})`}>

@@ -20,6 +20,10 @@ namespace GeneKerman.UI
         // Discord login approval: set once /auth/link returns "approval_required".
         // The user presses a Log-in button in their Discord DM; we poll until then.
         private bool awaitingApproval;
+        // Set when the server answers `totp_required`: this account has an
+        // authenticator, so there is nothing to wait for — a code is typed here.
+        private bool awaitingTotp;
+        private string totpCode = "";
         private string approvalChallengeId = "";
         private string serverUrlInput = "";
         private bool showSettings;
@@ -110,11 +114,43 @@ namespace GeneKerman.UI
             GUILayout.Label("🎮 Boundless Missions · Link KSP", titleStyle);
             GUILayout.Space(10);
 
-            if (!awaitingApproval)
+            if (awaitingTotp)
+            {
+                GUILayout.Label(
+                    "This account uses an authenticator app.\n" +
+                    "Enter the 6-digit code it shows\n(or one of your recovery codes).",
+                    labelStyle
+                );
+                GUILayout.Space(15);
+
+                GUI.SetNextControlName("TotpField");
+                totpCode = GUILayout.TextField(totpCode, 12, codeFieldStyle);
+
+                GUILayout.Space(10);
+                GUI.enabled = !isLinking && totpCode.Trim().Length >= 6;
+                if (GUILayout.Button(isLinking ? "Checking..." : "Confirm", buttonStyle))
+                    DoLinkTotp();
+                GUI.enabled = true;
+
+                if (GUILayout.Button("← Cancel", GUI.skin.label))
+                {
+                    awaitingTotp = false;
+                    approvalChallengeId = "";
+                    totpCode = "";
+                    statusMessage = "";
+                }
+            }
+            else if (!awaitingApproval)
             {
                 // Instructions
+                // Both routes, website first: a code from the account page works
+                // for everyone, including players who never joined the Discord.
+                // /linkcode is still there for those who are already in it.
                 GUILayout.Label(
-                    "1. In Discord, type /b linkcode\n2. Enter the 6-digit code below\n3. Click Link Account",
+                    "1. Get a code at boundlessmissions.com/account\n" +
+                    "   (or type /b linkcode in Discord)\n" +
+                    "2. Enter the 6-digit code below\n" +
+                    "3. Click Link Account, then approve it",
                     labelStyle
                 );
                 GUILayout.Space(15);
@@ -127,7 +163,7 @@ namespace GeneKerman.UI
 
                 // Link button
                 GUI.enabled = !isLinking && linkCode.Length == 6;
-                if (GUILayout.Button(isLinking ? "Linking..." : "[Link] Link Account", buttonStyle))
+                if (GUILayout.Button(isLinking ? "Linking..." : "Link Account", buttonStyle))
                 {
                     DoLink();
                 }
@@ -225,6 +261,39 @@ namespace GeneKerman.UI
             GUI.DragWindow();
         }
 
+        /// <summary>
+        /// Second half of a link the server gated on an authenticator.
+        ///
+        /// A wrong code deliberately keeps the window on this step rather than
+        /// dropping back to the code field: the link code has already been spent,
+        /// so starting over would mean fetching a whole new one for a typo.
+        /// </summary>
+        private void DoLinkTotp()
+        {
+            isLinking = true;
+            statusMessage = "Checking...";
+
+            GeneKermanMod.Instance.RunCoroutine(
+                GeneKermanMod.Instance.Api.SubmitLinkTotp(
+                    approvalChallengeId, totpCode.Trim(), (ok, data, err) =>
+                {
+                    isLinking = false;
+                    if (ok && data != null)
+                    {
+                        awaitingTotp = false;
+                        totpCode = "";
+                        approvalChallengeId = "";
+                        statusMessage = "(Ok) Linked as " + MiniJSON.GetString(data, "username") + "!";
+                        GeneKermanMod.Instance.OnAccountLinked(data);
+                    }
+                    else
+                    {
+                        totpCode = "";
+                        statusMessage = "(No) " + (err ?? "That code wasn't right. Try again.");
+                    }
+                }));
+        }
+
         private void DoLink()
         {
             isLinking = true;
@@ -234,7 +303,16 @@ namespace GeneKerman.UI
                 GeneKermanMod.Instance.Api.LinkAccount(linkCode, (ok, data, err) =>
                 {
                     isLinking = false;
-                    if (ok && MiniJSON.GetString(data, "status") == "approval_required")
+                    if (ok && MiniJSON.GetString(data, "status") == "totp_required")
+                    {
+                        // The account has an authenticator, which supersedes the DM
+                        // and the panel: nothing to wait for, just a code to type.
+                        approvalChallengeId = MiniJSON.GetString(data, "challenge_id");
+                        awaitingTotp = true;
+                        totpCode = "";
+                        statusMessage = "(Ok) Enter the code from your authenticator app.";
+                    }
+                    else if (ok && MiniJSON.GetString(data, "status") == "approval_required")
                     {
                         // Server DM'd a Log-in button — wait for the user to press it.
                         approvalChallengeId = MiniJSON.GetString(data, "challenge_id");

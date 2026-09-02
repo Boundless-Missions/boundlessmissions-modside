@@ -945,6 +945,21 @@ namespace GeneKerman
             return idx;
         }
 
+        /// <summary>Most MOD entries a carried GKMODS block may declare.
+        ///
+        /// Every count in this side channel is chosen by the SENDER, and the block is
+        /// bounded only by the decompression cap — roughly half a million entries.
+        /// Each one costs an O(N) parse, a `depends` row in a `.ckan` written to disk
+        /// under the KSP root (outside the mod's own folder), and a name in a
+        /// comma-joined notification body that is re-rendered on every open of the
+        /// feed for the rest of the session. That is reachable from a BLUEPRINT — a
+        /// marketplace listing or a gifted `.craft` — with no live vessel and no
+        /// acceptance of a hull, which makes it the cheapest of these to aim.
+        ///
+        /// A bound on the honest producer: `BuildModList` emits one entry per distinct
+        /// GameData folder a craft's parts touch, which is tens even on FAK1.</summary>
+        internal const int MaxCarriedMods = 512;
+
         private static List<ModEntry> ParseModsFromText(string block)
         {
             var mods = new List<ModEntry>();
@@ -966,6 +981,12 @@ namespace GeneKerman
                         if (string.IsNullOrEmpty(cur.name)) cur.name = cur.folder;
                         mods.Add(cur);
                         cur = null;
+                        if (mods.Count >= MaxCarriedMods)
+                        {
+                            Debug.LogWarning($"[GeneKerman] GKMODS declares more than " +
+                                             $"{MaxCarriedMods} mods; ignoring the rest.");
+                            return mods;
+                        }
                     }
                     continue;
                 }
@@ -984,6 +1005,12 @@ namespace GeneKerman
             var mods = new List<ModEntry>();
             foreach (ConfigNode e in mn.GetNodes("MOD"))
             {
+                if (mods.Count >= MaxCarriedMods)
+                {
+                    Debug.LogWarning($"[GeneKerman] GKMODS declares more than " +
+                                     $"{MaxCarriedMods} mods; ignoring the rest.");
+                    break;
+                }
                 string folder = e.GetValue("folder");
                 if (string.IsNullOrEmpty(folder)) continue;
                 mods.Add(new ModEntry

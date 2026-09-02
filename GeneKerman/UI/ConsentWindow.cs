@@ -117,8 +117,8 @@ namespace GeneKerman.UI
                 "reported device's log\n\n" +
                 "No data is sent until you accept below, and you can turn all data sharing " +
                 "off again at any time from the toolbar (Settings ▸ Data sharing).\n\n" +
-                "Crafts you share — the file, the blueprint and thumbnail renders made from " +
-                "it, and the screenshots sent with it — may also be shown, credited to your " +
+                "Crafts you share (the file, the blueprint and thumbnail renders made from " +
+                "it, and the screenshots sent with it) may also be shown, credited to your " +
                 "display name, in material promoting Boundless Missions (Terms, section 7).",
                 bodyStyle);
 

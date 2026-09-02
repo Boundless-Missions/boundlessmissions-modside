@@ -213,6 +213,17 @@ export interface Profile {
   messages: number;
   unlocked_levels: number[];
   currency_name: string;
+  /** Unpaid contract fines. 0 for almost everyone. */
+  debt: number;
+  /** Share of earnings currently going to those fines; 0 when nothing is owed. */
+  debt_garnish_percent: number;
+  /**
+   * Whether the bot @-mentions this account when it posts to their corp channel.
+   * An account preference rather than a mod setting — the mention is written by
+   * the server, so settings.cfg cannot turn it off. Written via
+   * POST /api/v1/user/preferences.
+   */
+  corp_pings: boolean;
 }
 
 export interface Notification {
@@ -262,6 +273,11 @@ export interface ContractSummary {
   mission: string;
   issuer_name: string;
   contractor_name: string;
+  /** The two parties' immutable account ids. Names are display-only — deciding crew
+   *  ownership on them let anyone take a victim's display name and have the victim's
+   *  own kerbals adopted onto an arriving vessel. Empty from an older server. */
+  issuer_id?: string;
+  contractor_id?: string;
   payment: number;
   fine: number;
   due_date: string;
@@ -307,6 +323,40 @@ export interface Corp {
   // Discord's cache, and level is 0 for anyone with no economy record yet.
   avatar_url?: string | null;
   level?: number;
+}
+
+/**
+ * `/api/v1/friends` — who this player may quicksend to.
+ *
+ * A friendship is mutual, explicit and guild-independent, and it is keyed on the
+ * ACCOUNT id: a Discord snowflake for most players, "a_…" for a website-only
+ * Boundless account. Nothing here distinguishes the two, and nothing may — the
+ * whole point of the friend list is that both kinds of player are reachable.
+ */
+export interface Friend {
+  user_id: string;
+  name: string;
+  /** The permanent Boundless username — what someone else types to add them. */
+  username?: string;
+  avatar_url?: string | null;
+  level?: number;
+  /** Epoch seconds: when the friendship began, or when the request was sent. */
+  at?: number;
+  /** Presentation only. A friendship never depends on this. */
+  discord?: boolean;
+}
+
+export interface FriendList {
+  friends: Friend[];
+  incoming: Friend[];
+  outgoing: Friend[];
+  max_friends?: number;
+}
+
+export interface FriendActionResult {
+  success: boolean;
+  message: string;
+  state?: string;
 }
 
 /** `/gk/contract/context` — what the create form needs from the running game. */

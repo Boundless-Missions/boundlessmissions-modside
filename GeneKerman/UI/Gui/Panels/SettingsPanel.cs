@@ -55,6 +55,12 @@ namespace GeneKerman.UI.Gui
         private bool lastStreamerMode;
         private string lastDetectedApp = "";
         private string lastServer = "";
+        // The corp-ping switch is drawn from the profile blob, which arrives (and is
+        // re-fetched) on ClientState's schedule rather than this panel's — so it is
+        // watched the same way a link completing is.
+        private bool lastProfileLoaded;
+        private bool lastProfileLoading;
+        private bool lastCorpPings;
 
         protected override void Rebuild()
         {
@@ -82,6 +88,7 @@ namespace GeneKerman.UI.Gui
             BuildInterfaceCard(body, mod, api);
             BuildPrivacyCard(body, api);
             BuildBehaviourCard(body, mod, api);
+            BuildDiscordCard(body, mod, api);
             BuildAboutCard(body);
         }
 
@@ -306,6 +313,74 @@ namespace GeneKerman.UI.Gui
                        BtnStyle.Ghost, 28).E.Flex(1f);
         }
 
+        // ── Discord ─────────────────────────────────────────────────────────
+        //
+        // The one card on this screen that is not a local setting. Everything above
+        // is written to settings.cfg and takes effect here; this is stored on the
+        // account, because the thing it controls — the @-mention the bot puts on a
+        // corp-channel post — is written by the server, and a file on this PC has no
+        // say in it. Hence the round trip, the Busy gate and the status line, none of
+        // which the local switches need.
+
+        private void BuildDiscordCard(El parent, GeneKermanMod mod, ApiClient api)
+        {
+            // Nothing to draw before there is an account to draw it for: unlinked,
+            // and under the version gate where the profile fetch comes back 426,
+            // this would be a switch over a value nobody has read.
+            var state = mod != null ? mod.State : null;
+            if (!api.IsLinked || state == null) return;
+
+            var card = UIF.Card(parent, "Discord").Column(Theme.Space1).Pad(Theme.Space3);
+            UIF.Label(card, "Discord", Theme.FontSm).Bold();
+
+            if (state.ProfileData == null)
+            {
+                // Deliberately a line rather than a switch left at its default: a
+                // switch drawn before the value arrives shows the *default*, and a
+                // player who had turned this off would watch it flip under them.
+                UIF.Muted(card, state.ProfileLoading
+                          ? "Loading your account settings…"
+                          : "Account settings are not loaded yet.").Body();
+                if (!state.ProfileLoading)
+                    UIF.Button(card, "Retry", () => state.RequestProfileRefresh(), BtnStyle.Ghost, 28);
+                DrawStatus(card);
+                return;
+            }
+
+            bool on = state.CorpPings;
+            UIF.Switch(card, "Mention me in my corporation channel",
+                       "Contract offers, disputes and hand-offs are posted to your corp channel " +
+                       "with a ping so you see them. Off, the same posts still arrive and still " +
+                       "say who they are for. Discord just will not notify you, so you would be " +
+                       "reading the channel yourself. The in-game notifications are unaffected.",
+                       on,
+                       v => ApplyCorpPings(state, api, v));
+
+            DrawStatus(card);
+        }
+
+        private void ApplyCorpPings(ClientState state, ApiClient api, bool enabled)
+        {
+            if (Busy) return;
+            var done = BeginAction();
+
+            // Optimistic, then corrected: the switch moves now and the server's answer
+            // is what it settles on. `SetCorpPings` echoes the stored value back on
+            // success and the *previous* one on failure, so both paths end with the
+            // panel showing what is actually saved rather than what was asked for.
+            state.NoteCorpPings(enabled);
+            MarkDirty();
+
+            GeneKermanMod.Instance.RunCoroutine(api.SetCorpPings(enabled, (ok, stored, err) =>
+            {
+                state.NoteCorpPings(stored);
+                done(ok, ok
+                     ? (stored ? "You will be mentioned in your corp channel."
+                               : "Corp channel posts will no longer mention you.")
+                     : (err ?? "Could not save the setting."));
+            }));
+        }
+
         // ── About ───────────────────────────────────────────────────────────
 
         private static void BuildAboutCard(El parent)
@@ -333,6 +408,17 @@ namespace GeneKerman.UI.Gui
             return Uri.TryCreate(url, UriKind.Absolute, out uri) ? uri.Authority : url;
         }
 
+        /// <summary>Whether the account preferences this panel draws have moved since
+        /// the last Rebuild — the profile landing, being re-fetched, or another front
+        /// end flipping the same switch.</summary>
+        private bool ProfileChanged()
+        {
+            var state = GeneKermanMod.Instance != null ? GeneKermanMod.Instance.State : null;
+            return (state != null && state.ProfileData != null) != lastProfileLoaded
+                || (state != null && state.ProfileLoading) != lastProfileLoading
+                || (state == null || state.CorpPings) != lastCorpPings;
+        }
+
         private void Snapshot(ApiClient api)
         {
             lastOfficial = api.UseOfficialServer;
@@ -344,6 +430,11 @@ namespace GeneKerman.UI.Gui
             lastStreamerMode = api.StreamerModeEnabled;
             lastDetectedApp = StreamerMode.DetectedApp ?? "";
             lastServer = api.ServerUrl ?? "";
+
+            var state = GeneKermanMod.Instance != null ? GeneKermanMod.Instance.State : null;
+            lastProfileLoaded = state != null && state.ProfileData != null;
+            lastProfileLoading = state != null && state.ProfileLoading;
+            lastCorpPings = state == null || state.CorpPings;
         }
 
         protected override void Poll()
@@ -365,7 +456,8 @@ namespace GeneKerman.UI.Gui
                 // change this panel has to notice from the outside, same as a link
                 // completing.
                 (StreamerMode.DetectedApp ?? "") != lastDetectedApp ||
-                (api.ServerUrl ?? "") != lastServer)
+                (api.ServerUrl ?? "") != lastServer ||
+                ProfileChanged())
             {
                 MarkDirty();
             }

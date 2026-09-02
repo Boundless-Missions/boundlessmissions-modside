@@ -95,12 +95,40 @@ namespace GeneKerman
             public double FirstUt;              // when the first reason landed
             public readonly List<string> Reasons = new List<string>();
             public readonly HashSet<string> Keys = new HashSet<string>();
+
+            /// <summary>This record holds at least one reason THIS game observed —
+            /// the watchdog, a CheatOptions read, a debug-menu click, or a spread from
+            /// a vessel that had one. Only a local record may spread (see
+            /// <see cref="Spread"/>), and only a local record is a verdict.</summary>
+            public bool Local;
+
+            /// <summary>This record holds at least one reason that arrived written into
+            /// an imported node, i.e. an accusation the sender typed. Kept separate from
+            /// <see cref="Local"/> rather than folded into a key prefix, because the
+            /// distinction has to survive a save/load and has to be readable by the
+            /// report without re-parsing reason strings.</summary>
+            public bool Carried;
         }
 
         private static readonly Dictionary<uint, TaintRecord> taints =
             new Dictionary<uint, TaintRecord>();
 
         private const int MaxReasonsPerVessel = 6;
+
+        // `Keys` is the dedup set, not the report, so it was left uncapped while
+        // `Reasons` was capped — which made it the unbounded half: every distinct
+        // `key` is written into GKContractScenario on every save and read back on
+        // every load, and a carried block chooses its own key strings ("carried:" +
+        // whatever the sender wrote). Cap it at the same number, with a little
+        // headroom for the local key vocabulary (which is small and fixed) so a
+        // carried payload cannot crowd a real detection out of the dedup set.
+        private const int MaxKeysPerVessel = MaxReasonsPerVessel * 4;
+
+        // A carried block is one sender's claim about one hull. One block, a handful of
+        // reasons, each a short sentence — anything past that is padding, and padding
+        // here is persisted into the save forever.
+        private const int MaxCarriedBlocks = 1;
+        private const int MaxCarriedReasonLength = 200;
 
         public static bool IsTainted(Vessel v)
             => v != null && taints.ContainsKey(v.persistentId);
@@ -125,14 +153,26 @@ namespace GeneKerman
 
         internal static void TaintPid(uint pid, string name, string key, string reason)
         {
+            TaintPid(pid, name, key, reason, false);
+        }
+
+        /// <summary><paramref name="carried"/> marks a reason that arrived in an
+        /// imported node instead of being observed here. See <see cref="TaintRecord.Local"/>.</summary>
+        internal static void TaintPid(uint pid, string name, string key, string reason, bool carried)
+        {
             if (!taints.TryGetValue(pid, out var rec))
             {
                 rec = new TaintRecord { Name = name ?? "?", FirstUt = Planetarium.GetUniversalTime() };
                 taints[pid] = rec;
             }
             if (!string.IsNullOrEmpty(name)) rec.Name = name;
+            // Full dedup set: stop adding keys rather than stop deduping, or a cheat
+            // toggle left on would grow a reason per physics tick again. A record that
+            // has already reached the cap is as flagged as it is ever going to get.
+            if (rec.Keys.Count >= MaxKeysPerVessel && !rec.Keys.Contains(key)) return;
             if (!rec.Keys.Add(key)) return;
             if (rec.Reasons.Count < MaxReasonsPerVessel) rec.Reasons.Add(reason);
+            if (carried) rec.Carried = true; else rec.Local = true;
             Debug.Log($"[GeneKerman] Cheat detection: vessel '{rec.Name}' ({pid}): {reason}");
         }
 
@@ -142,7 +182,157 @@ namespace GeneKerman
         {
             if (fromPid == toPid) return;
             if (!taints.TryGetValue(fromPid, out var src)) return;
+
+            // A carried-only mark does not spread. The reasons in it were written by
+            // the sender, about their own game — the one direction in which a peer's
+            // claim is worth anything, because it accuses nobody but the sender. The
+            // moment it propagates it stops being that and becomes a claim about a
+            // hull this save built: dock a gifted tug to your station and the station
+            // is flagged, with no way to clear it and reasons a stranger chose. That is
+            // ApplyIncomingOwnershipTag's rule ("this is a claim, not a fact") applied
+            // to the other carried side-channel, and the anti-laundering property does
+            // not need it: the mark still rides the transferred hull itself, which is
+            // the vessel a round trip was trying to wash.
+            if (!src.Local) return;
+
             TaintPid(toPid, toName, "spread:" + fromPid, $"{how} '{src.Name}', which was flagged for: {string.Join("; ", src.Reasons.ToArray())}");
+        }
+
+        // ── Carrying the mark across a transfer ─────────────────────────────
+        //
+        // Taint is keyed on persistentId, and every import mints a fresh one — so
+        // without this, a copy of a cheated vessel is clean. That is not a theoretical
+        // hole: a live-vessel quicksend to a friend and back returns the same ship, in
+        // the same cheated orbit, with no mark on it, and a rescue wreck or a debug
+        // clone launders it the same way. Measured before this existed: source
+        // tainted=True, clone tainted=False, two reasons to none.
+        //
+        // The block rides the VESSEL node exactly as GKFLAG/GKTU/GKRF do, written at the
+        // one choke point every live-vessel export goes through and read at the one
+        // place a new pid is minted. Nothing else has to know about it.
+        //
+        // This is nuisance control and is not claimed to be more. A .craft is plain
+        // text, so anyone willing to open one in an editor can delete this node — the
+        // same limit `data/craft_bans.py` states about hashing a craft. It closes the
+        // accidental and the casual route, and nothing downstream may read "no block"
+        // as "honest".
+
+        internal const string TaintNodeName = "GKTAINT";
+
+        /// <summary>Write this vessel's taint into its export node, if it has any.
+        /// Called from VesselTransfer.ExportVesselNode alongside the other carriers.</summary>
+        public static void EmbedInNode(ConfigNode vesselNode, Vessel vessel)
+        {
+            if (vesselNode == null || vessel == null) return;
+            try
+            {
+                if (!taints.TryGetValue(vessel.persistentId, out var rec)) return;
+                var n = vesselNode.AddNode(TaintNodeName);
+                n.AddValue("name", rec.Name ?? vessel.vesselName ?? "?");
+                foreach (var reason in rec.Reasons) n.AddValue("reason", reason);
+                Debug.Log($"[GeneKerman] Carrying cheat taint on '{rec.Name}' " +
+                          $"({rec.Reasons.Count} reason(s)) across a transfer.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] CheatDetection.EmbedInNode failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>Read + strip a carried taint and apply it to the freshly minted pid.
+        /// Called from VesselTransfer.PrepareInnerNode, which is where the new
+        /// persistentId is assigned — the exact point the mark used to be lost.</summary>
+        public static void ExtractAndApply(ConfigNode innerNode, uint newPid)
+        {
+            if (innerNode == null) return;
+            try
+            {
+                var carried = innerNode.GetNodes(TaintNodeName);
+                if (carried == null || carried.Length == 0) return;
+
+                // Everything below is peer-written. The node is stripped whatever
+                // happens (the RemoveNodes past the loop), so a payload that is refused
+                // for being oversized is refused rather than left in the ProtoVessel.
+                int blocks = 0;
+                int applied = 0;
+                foreach (var n in carried)
+                {
+                    // One hull, one accusation. A second block says nothing the first
+                    // did not and is the cheapest way to multiply the persisted rows.
+                    if (++blocks > MaxCarriedBlocks)
+                    {
+                        Debug.LogWarning($"[GeneKerman] Carried cheat taint: ignoring " +
+                                         $"{carried.Length - MaxCarriedBlocks} extra {TaintNodeName} " +
+                                         "block(s) — one vessel gets one.");
+                        break;
+                    }
+
+                    string name = SafeCarriedText(n.GetValue("name"), 64) ?? "?";
+                    var reasons = n.GetValues("reason") ?? new string[0];
+                    if (reasons.Length == 0)
+                    {
+                        // A block with no reasons still means "this was flagged". Dropping
+                        // it because the detail is missing would let a truncated node
+                        // launder the vessel, which is the failure this exists to stop.
+                        TaintPid(newPid, name, "carried:none",
+                                 "Arrived carrying a cheat flag from the sender's game.", true);
+                        applied++;
+                        continue;
+                    }
+                    // Keyed per reason so a craft that changes hands repeatedly does not
+                    // grow a duplicate entry per hop, and prefixed so the report says the
+                    // cheating happened before this save ever saw the vessel.
+                    //
+                    // Capped at the same number the local store keeps, because every one
+                    // of these becomes a `key` line in persistent.sfs for the life of the
+                    // save and the sender chooses both how many there are and how long
+                    // each one is. Past the cap the mark is unchanged — the vessel is
+                    // flagged either way — only the detail is dropped.
+                    foreach (var raw in reasons)
+                    {
+                        if (applied >= MaxReasonsPerVessel)
+                        {
+                            Debug.LogWarning("[GeneKerman] Carried cheat taint: reason list past " +
+                                             $"{MaxReasonsPerVessel}; the rest were dropped. " +
+                                             "The vessel is still flagged.");
+                            break;
+                        }
+                        string reason = SafeCarriedText(raw, MaxCarriedReasonLength);
+                        if (reason == null) continue;
+                        TaintPid(newPid, name, "carried:" + reason,
+                                 "Before it was transferred, this vessel was flagged: " + reason, true);
+                        applied++;
+                    }
+                    if (applied == 0)
+                    {
+                        // Every reason was empty or unusable, but the block was there.
+                        TaintPid(newPid, name, "carried:none",
+                                 "Arrived carrying a cheat flag from the sender's game.", true);
+                        applied++;
+                    }
+                }
+                innerNode.RemoveNodes(TaintNodeName);
+                Debug.Log($"[GeneKerman] Applied carried cheat taint to imported vessel ({newPid}); " +
+                          $"{applied} reason(s) kept. It marks this hull only — a carried mark " +
+                          "does not spread to anything it docks with.");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] CheatDetection.ExtractAndApply failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>Bound one peer-written string: trimmed, length-clamped, and null
+        /// when there is nothing left. The value ends up in a ConfigNode line in the
+        /// player's persistent.sfs and in a moderation report, so its length is the
+        /// sender's choice and must not be.</summary>
+        private static string SafeCarriedText(string raw, int max)
+        {
+            if (string.IsNullOrEmpty(raw)) return null;
+            string s = raw.Trim();
+            if (s.Length == 0) return null;
+            if (s.Length > max) s = s.Substring(0, max) + "…";
+            return s;
         }
 
         // ── Persistence (called by GKContractScenario) ──────────────────────
@@ -158,8 +348,15 @@ namespace GeneKerman
                     rec.AddValue("pid", kvp.Key);
                     rec.AddValue("name", kvp.Value.Name ?? "?");
                     rec.AddValue("ut", kvp.Value.FirstUt);
+                    rec.AddValue("local", kvp.Value.Local);
+                    rec.AddValue("carried", kvp.Value.Carried);
                     foreach (var r in kvp.Value.Reasons) rec.AddValue("reason", r);
-                    foreach (var k in kvp.Value.Keys) rec.AddValue("key", k);
+                    int written = 0;
+                    foreach (var k in kvp.Value.Keys)
+                    {
+                        if (written++ >= MaxKeysPerVessel) break;
+                        rec.AddValue("key", k);
+                    }
                 }
             }
             catch (Exception ex)
@@ -188,8 +385,26 @@ namespace GeneKerman
                     foreach (var r in rec.GetValues("reason"))
                         if (!string.IsNullOrEmpty(r) && t.Reasons.Count < MaxReasonsPerVessel)
                             t.Reasons.Add(r);
+                    // Cap on the way in as well as on the way out: a save written by a
+                    // build from before the cap (or edited by hand) must not re-seed an
+                    // unbounded set that then gets written straight back.
                     foreach (var k in rec.GetValues("key"))
-                        if (!string.IsNullOrEmpty(k)) t.Keys.Add(k);
+                        if (!string.IsNullOrEmpty(k) && t.Keys.Count < MaxKeysPerVessel) t.Keys.Add(k);
+
+                    // Records written before these flags existed carry neither. Read
+                    // that as local: they were minted by this game's own watchdog in a
+                    // build where a carried mark spread anyway, so treating them as
+                    // carried would silently un-flag them.
+                    string localVal = rec.GetValue("local"), carriedVal = rec.GetValue("carried");
+                    if (localVal == null && carriedVal == null) t.Local = true;
+                    else
+                    {
+                        bool b;
+                        if (bool.TryParse(localVal, out b)) t.Local = b;
+                        if (bool.TryParse(carriedVal, out b)) t.Carried = b;
+                        // Neither parsed → a hand-edited save. Fail closed the same way.
+                        if (!t.Local && !t.Carried) t.Local = true;
+                    }
                     if (t.Reasons.Count > 0) taints[pid] = t;
                 }
             }
@@ -272,6 +487,14 @@ namespace GeneKerman
                         { "name", rec.Name ?? v.vesselName },
                         { "reasons", new List<object>(rec.Reasons.ToArray()) },
                         { "first_ut", rec.FirstUt },
+                        // Whether this game watched it happen, or the mark rode in on an
+                        // imported node. The server's gate reads `tainted` and is
+                        // unchanged by these; they exist so a moderator reading the
+                        // reasons knows whether the sentences in front of them were
+                        // written by this player's game or by their counterparty's —
+                        // the same "context, not verdict" role `tools_installed` has.
+                        { "local", rec.Local },
+                        { "carried", rec.Carried },
                     });
                 }
             }

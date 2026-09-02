@@ -41,6 +41,12 @@ namespace GeneKerman.Web
         {
             // ── Phase 1: Profile + notifications ────────────────────────────
             Allow(@"^/api/v1/user/profile$", "GET"),
+            // Account preferences — the settings the server acts on rather than the
+            // client (today: the @-mention on corp-channel posts). Opted in by its
+            // own rule, not as part of a `/user/*` span: a preference block is the
+            // obvious place for a future setting that a page should not be able to
+            // flip, and this list grows on purpose or not at all.
+            Allow(@"^/api/v1/user/preferences$", "POST"),
             Allow(@"^/api/v1/user/notifications$", "GET"),
             Allow(@"^/api/v1/user/notifications/mark_read$", "POST"),
             Allow(@"^/api/v1/user/notifications/[A-Za-z0-9_-]{1,64}/mark_read$", "POST"),
@@ -68,6 +74,18 @@ namespace GeneKerman.Web
             Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/cancel$", "POST"),
             Allow(@"^/api/v1/contracts/[A-Za-z0-9_-]{1,64}/give_up$", "POST"),
             Allow(@"^/api/v1/corps/list$", "GET"),
+
+            // ── Friends ─────────────────────────────────────────────────────
+            // The list quicksend picks from. Read plus the three mutations, each
+            // spelled out rather than a trailing wildcard, for the reason the
+            // contract verbs above are: a prefix rule would enrol every verb this
+            // endpoint family grows later. The account id in the path is the same
+            // shape as everywhere else here — a snowflake, or "a_" + a Firebase uid.
+            Allow(@"^/api/v1/friends$", "GET"),
+            Allow(@"^/api/v1/friends/request$", "POST"),
+            Allow(@"^/api/v1/friends/[A-Za-z0-9_-]{1,64}/accept$", "POST"),
+            Allow(@"^/api/v1/friends/[A-Za-z0-9_-]{1,64}/decline$", "POST"),
+            Allow(@"^/api/v1/friends/[A-Za-z0-9_-]{1,64}/remove$", "POST"),
 
             // ── Phase 6a: the issuer's side of a dispute ────────────────────
             // Settle and more-time are requests the contractor makes and the issuer
@@ -160,7 +178,13 @@ namespace GeneKerman.Web
         /// The request is sent with NO auth headers — the session token must never
         /// reach a third-party host.
         /// </summary>
-        private const int MaxImageBytes = 5 * 1024 * 1024;
+        // The same ceiling ToolActions uses, which is the server's MAX_BLUEPRINT_BYTES.
+        // It used to be 5 MB with a comment saying that was fine "because the API caps
+        // server-side (MAX_BLUEPRINT_BYTES)" — which is the larger number, so the
+        // comment refuted itself: a blueprint the server accepted, and the sidebar
+        // displays, was 413'd here and the browser UI showed a blank image. A 4K
+        // checkpoint screenshot (~7.8 MB) hit it too.
+        private static readonly int MaxImageBytes = ToolActions.MaxImageBytes;
 
         private static readonly HashSet<string> ImageHostAllowList =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -220,7 +244,16 @@ namespace GeneKerman.Web
             byte[] data = null;
             bool ok = false;
             // DownloadFile deliberately sends no Authorization header.
-            yield return mod.Api.DownloadFile(url, (success, bytes) => { ok = success; data = bytes; });
+            //
+            // The rule travels with the request, exactly as it does for
+            // ToolActions.ImportFlag: IsImageUrlAllowed validates the SUBMITTED url, and
+            // without this third argument the LB1 redirect re-check (ApiClient re-runs
+            // the caller's rule against req.url after every hop) does not apply — so an
+            // allow-listed host that ever gained an open redirect would carry this fetch
+            // anywhere. None of the three currently does; passing it is what stops the
+            // next host added to the list inheriting the un-fixed shape.
+            yield return mod.Api.DownloadFile(url, (success, bytes) => { ok = success; data = bytes; },
+                                              u => IsImageUrlAllowed(u.AbsoluteUri));
 
             if (!ok || data == null)
             {

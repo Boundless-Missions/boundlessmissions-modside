@@ -82,6 +82,22 @@ export function ProfileCard({
               <Stat label="Messages" value={profile.messages.toLocaleString()} />
             </div>
 
+            {profile.debt > 0 && (
+              // Drawn wherever the balance is: a share of every payout goes to these,
+              // and a reward that arrives smaller with nothing explaining why reads as
+              // the mod being broken.
+              <div className="rounded-lg border border-amber-500/40 px-3 py-2 text-sm">
+                <p className="font-medium">
+                  Unpaid fines: {profile.debt.toLocaleString()} {profile.currency_name}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {profile.debt_garnish_percent > 0
+                    ? `${profile.debt_garnish_percent}% of what you earn goes towards them until they are paid off. Nothing else is restricted.`
+                    : "Repaid out of a share of what you earn."}
+                </p>
+              </div>
+            )}
+
             <Separator className="my-2" />
 
             <div className="flex flex-wrap items-center gap-2 pt-3">

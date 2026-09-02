@@ -9,8 +9,10 @@
  *
  * No hardware property is read here at all — not the MAC address, not a serial.
  * The only other thing this file touches is KSP.log, and only for a report the
- * player or the account owner files: a device report (GetKspLog) or a bug report
- * the player writes themselves (GetKspLogCapped). Neither is collected in the
+ * player confirms: a device report or a bug report, both through GetKspLogCapped.
+ * The uncapped whole-file reader this used to expose is gone — the device-report
+ * path called it with no user action behind it, which is exactly what the last
+ * sentence of this comment says never happens. Neither is collected in the
  * background, and nothing here runs without a user action behind it.
  */
 
@@ -67,33 +69,6 @@ namespace GeneKerman
                 Path.Combine(KSPUtil.ApplicationRootPath, "KSP.log"),
                 Path.Combine(KSPUtil.ApplicationRootPath, "Player.log"),
             };
-        }
-
-        /// <summary>Read KSP.log bytes for a moderation report. Returns null if absent.
-        /// KSP holds the log open for writing, so we copy via a shared read stream
-        /// (a plain File.ReadAllBytes can fail with a sharing violation).</summary>
-        public static byte[] GetKspLog()
-        {
-            foreach (string path in LogCandidates())
-            {
-                try
-                {
-                    if (!File.Exists(path)) continue;
-                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                    using (var ms = new MemoryStream())
-                    {
-                        fs.CopyTo(ms);
-                        Debug.Log($"[GeneKerman] Read {ms.Length} bytes from {path} for device report.");
-                        return ms.ToArray();
-                    }
-                }
-                catch (Exception e)
-                {
-                    Debug.LogWarning($"[GeneKerman] Could not read {path}: {e.Message}");
-                }
-            }
-            Debug.LogWarning("[GeneKerman] No KSP.log/Player.log found for device report.");
-            return null;
         }
 
         /// <summary>

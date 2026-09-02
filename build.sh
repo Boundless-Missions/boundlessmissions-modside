@@ -38,10 +38,29 @@ fi
 # testing) — was deleted on 2026-08-22 and removed from this list. Note the deploy loop
 # below only tests `-d "$KSP_PATH"`, so a leftover empty directory would still be
 # deployed into rather than skipped.
+#
+# FAK1 (added 2026-08-30) carries the "Far All Kerbalkind" modpack — RP-1 / Realism
+# Overhaul / RSS with Kerbalism, FAR, KCT, FMRS, RealAntennas, Kerbal Konstructs — and
+# is the heaviest compatibility testbed of the four (Kerbalism + RO + FAR at once).
+#
+# Stock-1 / Stock-2 (added 2026-09-01) are two *unmodded* installs kept as a matched
+# pair, for the two-player cases the T0–T7 plan needs: a rescue round trip and the
+# impersonation case both require two accounts acting on two saves, and every earlier
+# attempt at them was blocked on having only one instance available.
+#
+# Stock on purpose, and it is not only about load time. Every previous in-game finding
+# had to be argued against a heavily modded install — a NaN orbit, an exception storm
+# and a vanishing toolbar button each cost a round of ruling third-party mods out. A
+# clean pair makes "this is ours" the default reading rather than the conclusion of an
+# investigation. They are also light enough to run simultaneously, which the modded
+# instances are not.
 KSP_PATHS=(
     "/home/ayd/Documents/KSP DEV Instances/KR-KSP"
     "/home/ayd/Documents/KSP DEV Instances/KR2-KSP"
     "/home/ayd/Documents/KSP DEV Instances/RSS-RO"
+    "/home/ayd/Documents/KSP DEV Instances/FAK1"
+    "/home/ayd/Documents/KSP DEV Instances/Stock-1"
+    "/home/ayd/Documents/KSP DEV Instances/Stock-2"
 )
 GAMEDATA_SRC="$SCRIPT_DIR/GameData/BoundlessMissions"
 
@@ -75,11 +94,59 @@ fi
 
 echo "✅ Build successful."
 
-# Print the DLL's SHA256 — this is the hash to register with /admin publishversion
-# in Discord (or paste into its `sha256` field) so the update gate recognises this build.
+# A production DLL must contain no trace of the dev-only test bridge (Web/DebugBridge.cs,
+# Web/DebugRoutes.cs) — a command channel that spawns vessels and edits rosters. It is
+# held out by #if GK_DEBUG_PANEL, which is exactly the sort of gate that fails silently:
+# delete one #if and everything still compiles and still passes every test.
+#
+# --no-build so this costs a `strings` pass rather than two more compiles. That skips the
+# script's second half (proving a dev build DOES contain the markers, without which the
+# absence proves nothing), so run `tools/assert_production_clean.sh` with no arguments
+# before publishing.
+# GK_FULL_VERIFY=1 runs BOTH halves — the second one builds a dev DLL and proves it
+# DOES carry every marker, which is what makes the absence in the production DLL mean
+# anything. Without it a renamed marker makes this check pass vacuously, which the
+# script's own header calls "a green light that proves nothing". Default stays
+# --no-build so an ordinary build is a `strings` pass rather than two more compiles;
+# set GK_FULL_VERIFY=1 before publishing.
+if [ "$CHANNEL" = "production" ]; then
+    if [ -x "$SCRIPT_DIR/tools/assert_production_clean.sh" ]; then
+        VERIFY_ARGS="--no-build"
+        if [ "${GK_FULL_VERIFY:-0}" = "1" ]; then
+            VERIFY_ARGS=""
+            echo "🔎 GK_FULL_VERIFY=1 — running both halves of the debug-marker check."
+        fi
+        if ! "$SCRIPT_DIR/tools/assert_production_clean.sh" $VERIFY_ARGS; then
+            echo "❌ Refusing to continue: the production DLL carries debug-bridge code."
+            exit 1
+        fi
+        if [ "${GK_FULL_VERIFY:-0}" != "1" ]; then
+            echo "ℹ️  Marker check ran in --no-build mode: it proved the markers are ABSENT"
+            echo "   here, not that they would be PRESENT in a dev build. Before publishing:"
+            echo "   GK_FULL_VERIFY=1 ./build.sh"
+        fi
+    else
+        echo "❌ tools/assert_production_clean.sh is missing or not executable —"
+        echo "   the production DLL cannot be verified, so this build is not publishable."
+        echo "   (It is the ONE automated gate on the shipped artifact; a warning here"
+        echo "    meant \`chmod -x\` silently disabled it, including for --release.)"
+        exit 1
+    fi
+fi
+
+# Print the DLL's SHA256 — on a production build this is the hash to register with
+# /admin publishversion in Discord (or paste into its `sha256` field) so the update gate
+# recognises this build. On any other channel the hash belongs to a DLL carrying the
+# debug bridge, so it is printed with the refusal attached rather than silently: an
+# unqualified hash under a banner that says "register this" is how a dev build gets
+# blessed by the version gate and the DLL-attestation challenge.
 if command -v sha256sum >/dev/null 2>&1; then
     DLL_HASH="$(sha256sum "$PROJECT_DIR/bin/GeneKerman.dll" | cut -d' ' -f1)"
-    echo "   GeneKerman.dll SHA256: $DLL_HASH"
+    if [ "$CHANNEL" = "production" ]; then
+        echo "   GeneKerman.dll SHA256: $DLL_HASH"
+    else
+        echo "   DEV — do not publish — GeneKerman.dll SHA256 ('$CHANNEL' build): $DLL_HASH"
+    fi
 fi
 
 # ── Step 2: Prepare GameData ─────────────────────────────
@@ -167,7 +234,7 @@ cat > "$GAMEDATA_SRC/GeneKerman.version" << EOF
 {
     "NAME": "Boundless Missions",
     "URL": "https://boundlessmissions.com/GeneKerman.version",
-    "DOWNLOAD": "https://github.com/gk-ksp/GeneKerman/releases/latest",
+    "DOWNLOAD": "https://github.com/Boundless-Missions/boundlessmissions-modside/releases/latest",
     "VERSION": {
         "MAJOR": $V_MAJOR,
         "MINOR": $V_MINOR,
@@ -191,6 +258,23 @@ cat > "$GAMEDATA_SRC/GeneKerman.version" << EOF
 }
 EOF
 echo "  → Stamped GeneKerman.version ($MOD_VERSION)"
+
+# The AVC `URL` above points at boundlessmissions.com/GeneKerman.version — the copy
+# KSP-AVC fetches to learn what the latest version IS. It was never served (404), which
+# does not fail loudly: it silently disables the in-game update check, which is why the
+# DOWNLOAD field being wrong went unnoticed for so long. Publish the same bytes to the
+# website's static root from the same source of truth, for the reason the block above
+# generates rather than hand-maintains this file — two copies that are written together
+# cannot drift, and two that are written separately always do.
+WEBSITE_PUBLIC="$SCRIPT_DIR/../Website/public"
+if [ -d "$WEBSITE_PUBLIC" ]; then
+    cp "$GAMEDATA_SRC/GeneKerman.version" "$WEBSITE_PUBLIC/GeneKerman.version"
+    echo "  → Published GeneKerman.version to Website/public (deploys with the site)"
+else
+    # A standalone modside checkout has no website next to it; that is fine, but say so,
+    # because a release built here ships an AVC URL nothing is serving.
+    echo "  ⚠️  Website/public not found — GeneKerman.version not published for AVC."
+fi
 
 # ── Step 2b: Build the browser UI ────────────────────────
 # Vite writes straight into GameData/BoundlessMissions/WebUI/ and emits a

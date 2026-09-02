@@ -182,7 +182,11 @@ namespace GeneKerman.Web
             {
                 res.StatusCode = status;
                 res.ContentType = contentType;
-                LocalServer.ApplySecurityHeaders(res, contentType.StartsWith("text/html"));
+                // Through LocalServer.NeedsCsp, not a local `text/html` test: SVG is in
+                // this file's own MIME allow-list, an SVG can carry script, and this is
+                // the only handler that can ever serve one — so the narrow test left
+                // exactly the case the LB4 fix was written for uncovered.
+                LocalServer.ApplySecurityHeaders(res, LocalServer.NeedsCsp(contentType));
                 if (etag != null)
                 {
                     res.Headers["ETag"] = etag;

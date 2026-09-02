@@ -436,11 +436,32 @@ function Actions({
     }
   }
 
+  /**
+   * Every contract transition, and every way one can be refused.
+   *
+   * The bot answers a *transport* failure — not your contract, no such contract — as
+   * a 403/404 whose sentence the bridge preserves, and a *business rule* as a 200
+   * with `success:false` and the reason in `message` ("Contract is not pending.",
+   * "Use Give Up instead; it costs the agreed fine."). Only the first throws, so the
+   * second has to be read off the body: treating any 200 as success reloaded the list
+   * as though the action had gone through and left the player with no reason at all.
+   */
   async function act(key: string, path: string, body?: unknown) {
     setBusy(key);
     setError(null);
     try {
-      await api.post(`/api/v1/contracts/${id}/${path}`, body);
+      const r = await api.post<{ success?: boolean; message?: string }>(
+        `/api/v1/contracts/${id}/${path}`,
+        body
+      );
+      if (r && r.success === false) {
+        setError(r.message || "The server refused that action.");
+        setBusy(null);
+        setConfirming(null);
+        // Deliberately not onActed(): it closes the detail, and this component owns the
+        // error — unmounting it here would throw away the sentence we came for.
+        return;
+      }
       onActed();
     } catch (e) {
       setError(e instanceof BridgeError ? e.message : "That action failed.");
@@ -656,6 +677,16 @@ function Actions({
             You get one extension request per dispute, so pick carefully.{" "}
             {c.issuer_name} still has to agree to it.
           </p>
+          {/* The current deadline, next to the proposed one. Without it the picker
+              asks for a date in isolation, and "how much extra time am I actually
+              asking for" is a sum the player has to do in their head. Mirrors the
+              sidebar's more-time window. */}
+          {c.due_date && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              Current deadline <span className="font-medium">{formatDate(c.due_date)}</span>
+              {dueDelta(c.due_date, newDate)}
+            </p>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <input
               id="more-time-date"
@@ -741,7 +772,7 @@ function Actions({
               <p className="mt-1 text-xs text-muted-foreground">
                 This opens a private ticket in Discord with a moderator pinged. The
                 contract and both accounts are attached to it. A late delivery or a
-                disagreement about the work is not a report — the dispute buttons are
+                disagreement about the work is not a report; the dispute buttons are
                 for those.
               </p>
               <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -791,6 +822,23 @@ function Waiting({ children }: { children: React.ReactNode }) {
 }
 
 /** Earliest date the server will accept for an extension — it must be in the future. */
+/**
+ * How much later than the current deadline the picked date is, as a sentence
+ * fragment for the more-time form. Returns "" when either date is missing or
+ * unparseable, so a malformed due_date degrades to showing no delta rather than
+ * to "NaN days later".
+ */
+function dueDelta(due: string, picked: string): string {
+  if (!picked) return "";
+  const a = new Date(due);
+  const b = new Date(picked);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return "";
+  const days = Math.round((b.getTime() - a.getTime()) / 86_400_000);
+  if (days > 0) return `, ${days} day${days === 1 ? "" : "s"} later`;
+  if (days === 0) return ", same day, so this asks for no extra time";
+  return `, ${-days} day${days === -1 ? "" : "s"} earlier than the current deadline`;
+}
+
 function tomorrow(): string {
   const d = new Date();
   d.setDate(d.getDate() + 1);
@@ -840,7 +888,10 @@ function InstallCraft({ contract }: { contract: ContractSummary }) {
     try {
       const job = await runJob("/gk/actions/install-craft", {
         contract_id: contract.contract_id,
+        // Name for the tag text, id for the ownership decision — the sidebar's
+        // equivalent button does the same. Empty id degrades to the name compare.
         owner_name: contract.contractor_name,
+        owner_id: contract.contractor_id ?? "",
       });
       setResult({ ok: job.state === "done", message: job.message });
     } catch (e) {

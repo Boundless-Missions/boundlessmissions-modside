@@ -419,7 +419,7 @@ namespace GeneKerman
                 string phrase = null;
                 if (r.Max == 0) phrase = $"no {kvp.Key}";
                 else if (r.Min > 0 && r.Max > 0 && r.Min == r.Max) phrase = $"exactly {r.Min}× {kvp.Key}";
-                else if (r.Min > 0 && r.Max > 0) phrase = $"{r.Min}–{r.Max}× {kvp.Key}";
+                else if (r.Min > 0 && r.Max > 0) phrase = $"{r.Min}-{r.Max}× {kvp.Key}";
                 else if (r.Max > 0) phrase = $"≤{r.Max}× {kvp.Key}";
                 else if (r.Min > 0) phrase = $"{r.Min}× {kvp.Key}";
                 if (phrase != null) bits.Add(phrase + MissingTraitSuffix(kvp.Key, r));

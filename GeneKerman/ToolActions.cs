@@ -47,7 +47,12 @@ namespace GeneKerman
 
             byte[] data = null;
             bool ok = false;
-            yield return mod.Api.DownloadFile(url, (o, bytes) => { ok = o; data = bytes; });
+            // The rule travels with the request: `IsPubliclyRoutableHttpUrl` is re-run
+            // against wherever the chain actually lands, so a public host cannot 302
+            // the fetch onto 127.0.0.1 or the LAN — which is what made this a
+            // port scanner with the three outcomes below as its oracle.
+            yield return mod.Api.DownloadFile(url, (o, bytes) => { ok = o; data = bytes; },
+                                              u => IsPubliclyRoutableHttpUrl(u.AbsoluteUri));
 
             if (!ok || data == null || data.Length == 0)
             {
@@ -62,6 +67,16 @@ namespace GeneKerman
             if (SniffImage(data) == null)
             {
                 onDone(false, "That file is not a PNG or JPEG image.");
+                yield break;
+            }
+            // FlagTransfer refuses this too — it now judges every image before writing
+            // it into GameData, where KSP's own loader decodes it on every launch. Asked
+            // here as well so the refusal has a sentence: the installer's "no" is
+            // indistinguishable from "you already have this flag".
+            string sizeRefusal;
+            if (!ImageIsSafeToDecode(data, out sizeRefusal))
+            {
+                onDone(false, "That image cannot be used as a flag (" + sizeRefusal + ").");
                 yield break;
             }
 
@@ -147,6 +162,22 @@ namespace GeneKerman
 
             if (kind == "vessel")
             {
+                string sentRefusal = mod.PendingRemovalRefusal(FlightGlobals.ActiveVessel);
+                if (sentRefusal != null) { onDone(false, sentRefusal); yield break; }
+
+                // Before the snapshot is read, let alone uploaded: a hand-over we cannot
+                // complete now is one that may never complete at all (see
+                // GeneKermanMod.LiveHandoverRefusal), and the failure mode is the server
+                // offering a ship the sender still has. Refusing here costs the player a
+                // sentence; refusing after the upload would cost them a duplicate.
+                //
+                // Vessel branch only, and that is the point: a "craft" send is a
+                // blueprint, removes nothing from this save, and is sendable in any
+                // flight state — gating it would break sending from the editor, which
+                // was never at risk.
+                string handoverRefusal = GeneKermanMod.LiveHandoverRefusal();
+                if (handoverRefusal != null) { onDone(false, handoverRefusal); yield break; }
+
                 string node = VesselTransfer.ExportActiveVessel(embedRoster: true);
                 if (string.IsNullOrEmpty(node)) { onDone(false, "Could not read the active vessel."); yield break; }
 
@@ -235,9 +266,20 @@ namespace GeneKerman
             // them home so the removal runs now, not at some later visit a decline
             // could race.
             if (ok && kind == "vessel" && returnable && !string.IsNullOrEmpty(vesselPid))
+            {
+                // Write the hand-over down BEFORE queueing the removal, and outside the
+                // save. The scenario's queue is rolled back by a quickload — which is
+                // exactly the case the server's later "craft_gift_accepted" echo exists
+                // to repair — so the echo needs a record that a quickload cannot erase,
+                // and one that says this client really did hand this pid over, to this
+                // server, out of this save. Without it the handler acted on any pid a
+                // server named, destroying the vessel and striking its crew off the
+                // roster for good. See QuicksendLedger and MaybeHandleGiftAccepted.
+                QuicksendLedger.Record(vesselPid, craftName, mod.Api.ServerUrl);
                 mod.QueueRescueVesselRemoval(vesselPid, craftName,
                     VesselTransfer.CrewFate.LeavesWithCraft, vesselCrew,
                     returnToSpaceCenter: true);
+            }
 
             onDone(ok, message ?? "Failed to send.");
         }
@@ -261,6 +303,13 @@ namespace GeneKerman
             public string EditorPath;
             public string ActiveVessel;
 
+            /// <summary>Why the active vessel cannot be handed over right now, or empty
+            /// when it can — <see cref="GeneKermanMod.LiveHandoverRefusal"/>, read here
+            /// so the front ends can disable Send and say why instead of letting the
+            /// press fail. Only ever set while a vessel is being flown: a blueprint
+            /// takes nothing out of the save and is sendable in any flight state.</summary>
+            public string VesselSendBlock;
+
             public bool EditorSaved => !string.IsNullOrEmpty(EditorPath);
 
             /// <summary>
@@ -272,6 +321,15 @@ namespace GeneKerman
                 !string.IsNullOrEmpty(ActiveVessel) ? "vessel"
                 : (!string.IsNullOrEmpty(EditorCraft) && EditorSaved) ? "craft"
                 : null;
+
+            /// <summary>Whether Send may be offered at all. Deliberately separate from
+            /// <see cref="SendKind"/>, which still answers *what* would be sent: a
+            /// blocked live vessel is a vessel send that cannot run right now, not a
+            /// craft send, and collapsing the two would silently offer the blueprint of
+            /// a ship the player asked to hand over.</summary>
+            public bool CanSend =>
+                SendKind == "craft" ||
+                (SendKind == "vessel" && string.IsNullOrEmpty(VesselSendBlock));
         }
 
         public static CraftState ReadCraftState()
@@ -282,6 +340,7 @@ namespace GeneKerman
                 EditorType = "",
                 EditorPath = "",
                 ActiveVessel = "",
+                VesselSendBlock = "",
             };
 
             try
@@ -299,8 +358,15 @@ namespace GeneKerman
 
             try
             {
-                state.ActiveVessel = FlightGlobals.ActiveVessel != null
-                    ? FlightGlobals.ActiveVessel.vesselName : "";
+                var active = FlightGlobals.ActiveVessel;
+                state.ActiveVessel = active != null ? active.vesselName : "";
+                // Only while something is being flown, and on the silent overload: this
+                // is polled roughly once a second per open Tools screen, and KSP's
+                // logging overload writes a "Cannot save" line on every call — which
+                // would bury the one that actually matters, at the moment of a send, in
+                // the KSP.log a bug report ships.
+                if (active != null)
+                    state.VesselSendBlock = GeneKermanMod.LiveHandoverRefusal() ?? "";
             }
             catch (Exception) { }
 
@@ -725,6 +791,14 @@ namespace GeneKerman
                             ? $"{state.EditorCraft} is listed for {price:N0} KCoins."
                               + (string.IsNullOrEmpty(note) ? "" : " " + note)
                             : MiniJSON.GetString(data, "message", "Failed to list.");
+
+                        // The complexity bonus just moved this player's balance, and
+                        // nothing else would notice: the profile is fetched on link,
+                        // on opening the panel and from the Profile tab's own refresh
+                        // button — there is no timer. Without this the toast says
+                        // "+300 KCoins" while every balance on screen keeps the old
+                        // number until the panel is reopened.
+                        if (ok) GeneKermanMod.Instance?.State?.RequestProfileRefresh();
                     }
                     else message = "Failed to list craft.";
                 });
@@ -759,6 +833,13 @@ namespace GeneKerman
         {
             if (IPAddress.IsLoopback(ip)) return true;
             byte[] b = ip.GetAddressBytes();
+            // An IPv4-mapped IPv6 literal (::ffff:127.0.0.1) parses as IPv6 and would
+            // otherwise skip the whole v4 table below.
+            if (ip.IsIPv4MappedToIPv6)
+            {
+                try { ip = ip.MapToIPv4(); b = ip.GetAddressBytes(); }
+                catch { return true; }   // unreadable: refuse rather than allow
+            }
             if (b.Length == 4)
             {
                 if (b[0] == 10) return true;                                  // 10/8
@@ -767,6 +848,7 @@ namespace GeneKerman
                 if (b[0] == 169 && b[1] == 254) return true;                  // link-local
                 if (b[0] == 127) return true;
                 if (b[0] == 0) return true;
+                if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return true;    // 100.64/10 CGNAT
             }
             return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal;
         }
@@ -787,11 +869,154 @@ namespace GeneKerman
             return s.Length > 64 ? s.Substring(0, 64) : s;
         }
 
-        private static string SniffImage(byte[] d)
+        public static string SniffImage(byte[] d)
         {
+            if (d == null) return null;
             if (d.Length >= 4 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G') return "image/png";
             if (d.Length >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) return "image/jpeg";
             return null;
+        }
+
+        // ── Image decode guard (every LoadImage site) ────────────────────────
+        //
+        // Texture2D.LoadImage allocates from the *declared* dimensions, so a few
+        // kilobytes of PNG whose IHDR says 60000×60000 asks Unity for ~14 GB and takes
+        // the game down before anything can catch it. Every image that reaches a
+        // LoadImage here came off the wire — a peer's flag, a peer's blueprint, an
+        // avatar, a submission screenshot — so the header is read and judged first.
+        // The byte cap alone cannot do this job: compression is exactly what makes a
+        // decompression bomb small.
+
+        // The first cut of these caps was set from what an image "ought" to weigh rather
+        // than from what this mod actually produces, and landed under its own output:
+        // 8 MB / 16 MP against a blueprint sheet that is 4096×2200 = 9.01 MP and up to
+        // 3.28 MB, and a checkpoint screenshot that is ScreenCapture.CaptureScreenshot at
+        // native resolution with no downscale — about 7.8 MB from a 4K submitter. Worse,
+        // they sat *below the server's*, which accepts MAX_BLUEPRINT_BYTES (~13.4 MB) and
+        // 30 MP: an image could upload cleanly and then be undecodable at the other end,
+        // so a reviewer judged a submission blind and NotificationsPanel drew a blank
+        // panel with nothing said. And 16 MP was only 1.8× the blueprint's own 9.01 MP,
+        // so raising BLUEPRINT_SCALE to 3 would have made the mod refuse its own render.
+        //
+        // So both ceilings are now the server's, expressed the same way it expresses
+        // them. The point of the guard is unchanged and is carried by the *pixel* cap,
+        // not the byte one: 30 MP × 4 B is 120 MB, which a machine running KSP survives,
+        // where the 60000×60000 PNG this exists to stop asks for ~14 GB.
+
+        /// <summary>Hard ceiling on the compressed bytes of any image we decode. Mirrors
+        /// api_server.MAX_BLUEPRINT_BYTES — 512 KB of headers plus a 1.5 B/px budget over
+        /// the blueprint sheet's own pixels — and is derived from the same expression, so
+        /// raising VesselRenderer.SCALE moves the mod's ceiling and the server's together
+        /// (settings.BLUEPRINT_SCALE is the other half of that pair).</summary>
+        public const int MaxImageBytes =
+            512 * 1024 + (int)(2048 * 1100 * VesselRenderer.SCALE * VesselRenderer.SCALE * 1.5);
+        /// <summary>Per-side ceiling. Generous on purpose — the pixel cap below is what
+        /// bounds the allocation, and this only catches a degenerate strip that slips
+        /// under it.</summary>
+        public const int MaxImageDimension = 16384;
+        /// <summary>Total pixels, matching settings.MAX_IMAGE_PIXELS on the server: an
+        /// image the server accepted is one this client can decode. 30 MP is 120 MB as
+        /// RGBA32, against 9 MP for the largest blueprint and 8 MP for a 4K screenshot.</summary>
+        public const int MaxImagePixels = 30000000;
+
+        /// <summary>
+        /// True when these bytes are a PNG/JPEG this machine can afford to decode.
+        /// Unparseable dimensions are refused rather than waved through: LoadImage
+        /// would fail on them anyway, and "I could not tell how big it is" is not a
+        /// reason to hand it to the decoder.
+        /// </summary>
+        public static bool ImageIsSafeToDecode(byte[] d, out string reason)
+        {
+            reason = null;
+            if (d == null || d.Length == 0) { reason = "empty"; return false; }
+            if (d.Length > MaxImageBytes)
+            {
+                reason = $"{d.Length} bytes, over the {MaxImageBytes / (1024 * 1024)} MB cap";
+                return false;
+            }
+
+            string mime = SniffImage(d);
+            if (mime == null) { reason = "not a PNG or JPEG"; return false; }
+
+            int w, h;
+            if (!TryReadImageSize(d, mime, out w, out h))
+            {
+                reason = "dimensions could not be read";
+                return false;
+            }
+            if (w <= 0 || h <= 0 || w > MaxImageDimension || h > MaxImageDimension ||
+                (long)w * h > MaxImagePixels)
+            {
+                reason = $"declares {w}x{h}";
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>Convenience wrapper: log the refusal and answer yes/no.</summary>
+        public static bool ImageIsSafeToDecode(byte[] d, string what)
+        {
+            string why;
+            if (ImageIsSafeToDecode(d, out why)) return true;
+            Debug.LogWarning($"[GeneKerman] Refused to decode {what}: {why}.");
+            return false;
+        }
+
+        /// <summary>Read width/height out of a PNG IHDR or a JPEG SOF segment without
+        /// decoding anything. Both walks are bounded by the buffer length.</summary>
+        private static bool TryReadImageSize(byte[] d, string mime, out int w, out int h)
+        {
+            w = h = 0;
+            try
+            {
+                if (mime == "image/png")
+                {
+                    // 8-byte signature, then the IHDR chunk: length, "IHDR", w, h — all
+                    // big-endian, so width sits at 16 and height at 20.
+                    if (d.Length < 24) return false;
+                    if (d[12] != 'I' || d[13] != 'H' || d[14] != 'D' || d[15] != 'R') return false;
+                    w = BeInt32(d, 16);
+                    h = BeInt32(d, 20);
+                    return true;
+                }
+
+                // JPEG: walk the marker segments to the first SOFn, which carries
+                // precision, height, width after its 2-byte length.
+                int i = 2;
+                while (i + 3 < d.Length)
+                {
+                    if (d[i] != 0xFF) { i++; continue; }        // fill byte / resync
+                    byte marker = d[i + 1];
+                    if (marker == 0xFF) { i++; continue; }       // padding run
+                    if (marker == 0xD8 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7))
+                    { i += 2; continue; }                        // standalone, no payload
+                    if (marker == 0xD9 || marker == 0xDA) return false;  // EOI / scan: no SOF
+                    int len = (d[i + 2] << 8) | d[i + 3];
+                    if (len < 2) return false;
+                    bool isSof = (marker >= 0xC0 && marker <= 0xC3) ||
+                                 (marker >= 0xC5 && marker <= 0xC7) ||
+                                 (marker >= 0xC9 && marker <= 0xCB) ||
+                                 (marker >= 0xCD && marker <= 0xCF);
+                    if (isSof)
+                    {
+                        if (i + 9 >= d.Length) return false;
+                        h = (d[i + 5] << 8) | d[i + 6];
+                        w = (d[i + 7] << 8) | d[i + 8];
+                        return true;
+                    }
+                    i += 2 + len;
+                }
+                return false;
+            }
+            catch { return false; }
+        }
+
+        private static int BeInt32(byte[] d, int o)
+        {
+            // Clamp rather than wrap: a chunk length with the high bit set is not a
+            // negative size, it is a number we must refuse.
+            long v = ((long)d[o] << 24) | ((long)d[o + 1] << 16) | ((long)d[o + 2] << 8) | d[o + 3];
+            return v > int.MaxValue ? int.MaxValue : (int)v;
         }
     }
 }

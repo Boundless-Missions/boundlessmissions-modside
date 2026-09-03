@@ -75,6 +75,35 @@ to say it plainly here: a release whose DLL hash is not registered is rejected b
 version gate on every gated request, so publishing the download first means every player
 who installs it is broken until you catch up. Build, register, *then* upload.
 
+### The grace window
+
+Registering a new build does **not** lock out everyone still on the previous one. A build
+that was the published latest until recently is still accepted — told it is out of date,
+never refused — for `settings.MOD_VERSION_GRACE_DAYS` (7 by default), counted from the
+moment it *stopped* being latest, not from when it was published.
+
+This exists because we recommend CKAN as the update route, and CKAN updates on its own
+schedule: NetKAN indexes a release when it polls, and the player still has to open CKAN.
+Without a window, that lag — which we neither control nor observe — is a lockout, and a
+tool we do not run becomes a hard dependency of every login.
+
+Three things worth knowing when cutting a release:
+
+- **It does not soften step 2.** Grace is only ever extended to a hash we have already
+  published. A brand-new build whose hash is not registered is *unknown*, which is exactly
+  what a modified DLL looks like, so it is refused. The order above is unchanged.
+- **It chains correctly.** Publish A, then B, then C: A ages out on B's clock, not C's, so
+  a release today cannot revive a build that went stale a month ago.
+- **It is adjustable without a restart.** The owner console's Controls tab carries
+  `mod_version_grace_days`, read fresh on every decision — because the moment it needs
+  widening (a release CKAN has not indexed, a bad build pulled back) is an incident, and
+  "edit `.env` and restart" is the worst answer to have during one. `0` restores the
+  strict latest-hash-only gate.
+
+A graced client is told: the mod raises a non-blocking notification naming the new version
+and how long it has left, using the sentence the *server* sent, so the wording can change
+without shipping a client.
+
 ### GitHub Release
 
 The source of record, because `BoundlessMissions.netkan` names it in `$kref`. Three things
@@ -117,14 +146,36 @@ indexed — the path 404s, so the first submission is still ahead). Check their 
 at the time you submit rather than trusting this paragraph; the one thing that does not
 change is that the metadata must already be true when the PR lands.
 
-Two conflicts to resolve first, both currently live in the file:
+**KSP compatibility has one source of truth: the AVC file.** `ksp_version_min` /
+`ksp_version_max` were declared in the netkan as well (1.12.0 / 1.12.5) and disagreed with
+what `$vref` pulls from `GeneKerman.version` (1.12.0 / 1.12.99). They have been removed from
+the netkan rather than corrected, so that one generated file drives both the version and the
+compatibility range — the same handling the version itself already had, and one fewer place
+for a bump to be forgotten. Nothing but `ModVersion.cs` and `build.sh` decides either now.
 
-- `ksp_version_min` / `ksp_version_max` (1.12.0 / 1.12.5) disagree with what `$vref` pulls
-  from the AVC file (1.12.0 / 1.12.99). Keep ONE source of truth. Preferring the AVC file
-  matches how the version itself is already handled, and means one generated file drives
-  both.
-- The `filter` list and what `--release` packages must stay in step, which is why
-  "Cutting a release" says to change both together.
+Still to keep in step: the `filter` list and what `--release` packages, which is why
+"Cutting a release" says to change both together.
+
+**Every release currently on GitHub is a prerelease**, including `v0.8.1`, so the indexer
+would find nothing eligible and publish nothing — a PR submitted in that state merges and
+appears to work while producing no module. Two of those releases are worse than merely
+ineligible: the AVC file inside `v0.8.1` reports version **0.5.1** and names the dead
+`gk-ksp` org, so indexing it would publish the wrong version under a URL that 404s. Do not
+retroactively un-prerelease them; start clean at the first non-prerelease build.
+
+Check before submitting, all four:
+
+```
+repo public and reachable                              github.com/Boundless-Missions/boundlessmissions-modside
+at least one NON-prerelease release, with the zip asset
+that release's GameData/BoundlessMissions/GeneKerman.version
+  says the release version, and names Boundless-Missions
+https://boundlessmissions.com/GeneKerman.version       must be 200, not 404
+```
+
+The last one is the quiet failure: `build.sh` writes that file into `Website/public/`, so it
+goes live on the next *site* deploy, not on the mod release — and while it 404s the in-game
+KSP-AVC check is silently disabled, which is the failure this file opens by warning about.
 
 ## Why `settings.cfg` is filtered out of the CKAN install
 
@@ -183,15 +234,43 @@ against upstream or notice it changing.
 | | |
 |---|---|
 | Upstream | `sta/websocket-sharp` (the canonical implementation) |
+| Upstream commit | **not recorded** (see below) |
 | Assembly version | `2.0.0.0`, targeting .NET Framework 2.0 |
 | Size | 250368 bytes |
 | sha256 | `fb06ffceb4f8789c893d2f292e5810927dd7266d3bad68df2cedb8775500e8be` |
 
-Two things to know about it. It is **effectively unmaintained** upstream, and it parses
-attacker-influenced frames from the notification socket — so it is worth re-checking its
-advisory state before each release rather than assuming. And it is carried because KSP's
-Mono has no usable `ClientWebSocket`; that is worth re-testing against 1.12.5 occasionally,
-because dropping the dependency is better than auditing it.
+**It is not abandoned; it simply never ships.** An earlier version of this note called it
+"effectively unmaintained", which is wrong and was checked on 2026-09-03: the repo is not
+archived, its last commit was 2026-08-03, and it has 6,075 stars against 559 open issues.
+What it has is **zero releases and zero tags**, and a NuGet feed whose newest publish is the
+prerelease `1.0.3-rc11` from 2016-07-03. Actively developed, never released.
+
+That distinction changes the reasoning and not the conclusion. There is no "upgrade to the
+fixed version" available, because there are no versions: a fix would arrive as a commit on
+master that we would have to build ourselves. So the reaction to an advisory is still a
+fork, for a different reason than the old note gave.
+
+**Which is why the missing commit sha above matters more than the advisory state.** Our
+binary identifies as `websocket-sharp/1.0` targeting `v2.0.50727`, which matches neither
+NuGet's `1.0.3-rc*` scheme nor anything upstream tags, so it was built from source and its
+version number cannot say from which commit. If an advisory ever does land, "is our copy
+before or after the fix" has no answer today, and the only way to get one is to rebuild
+candidates and compare hashes. Record the sha the next time this DLL is rebuilt.
+
+**Advisory state as of 2026-09-03: clean.** OSV (NuGet ecosystem) returns nothing, and the
+GitHub Advisory Database returns nothing for either `websocket-sharp` or `websocketsharp`.
+Re-run those two before each release rather than assuming; it takes a minute. Note that
+absence of advisories is weaker evidence here than it looks, since a package with no version
+numbers is a package nobody can file a version-scoped advisory against.
+
+**Do not swap to a fork.** There are ~1,772 of them; the recently-pushed ones are 0-star
+automated mirrors. `PingmanTools/websocket-sharp`, the fork KSP mods commonly use, was last
+pushed 2020-10-16, so moving to it trades a 2026 codebase for a 2020 one.
+
+It is carried because KSP's Mono has no usable `ClientWebSocket`. That is worth re-testing
+against 1.12.5 occasionally, because dropping the dependency is better than auditing it, and
+the notification socket is an accelerant rather than a channel we depend on: every path it
+serves falls back to HTTP polling when it is down.
 
 ## What the browser UI adds to a release
 

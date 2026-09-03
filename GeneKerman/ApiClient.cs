@@ -164,7 +164,7 @@ namespace GeneKerman
         /// <summary>Whether a craft's RealFuels/RO fuel-and-engine configuration is carried
         /// (and reconciled away for a recipient without RealFuels).</summary>
         public bool FuelConfigTransferEnabled => fuelConfigTransferEnabled;
-        /// <summary>The player's own "hide avatars and corp names" preference. This is
+        /// <summary>The player's own "hide avatars and usernames" preference. This is
         /// the stored switch, for the settings screens to draw and write. Anything
         /// *drawing* a player list must read <see cref="StreamerMode.HideDetails"/>
         /// instead, which is this OR a live streamer-mode detection.</summary>
@@ -538,7 +538,7 @@ namespace GeneKerman
             SaveSettings();
         }
 
-        /// <summary>Hide (or show) other players' avatars and corp names in the player
+        /// <summary>Hide (or show) other players' avatars and usernames in the player
         /// lists, and persist the choice.</summary>
         public void SetHidePlayerDetails(bool hidden)
         {

@@ -302,11 +302,19 @@ namespace GeneKerman.UI.Gui
         /// <summary>
         /// One response, whichever endpoint it came from.
         ///
-        /// The second line of a row is "the detail": a corp name on the roster, the
-        /// player's Boundless username among friends. Both are the same kind of
-        /// thing to everything downstream — searchable while shown, hidden together
-        /// under streamer mode — so they share one field rather than teaching the
-        /// row about its source.
+        /// The second line of a row is "the detail", and both endpoints now put the
+        /// same thing there: the player's Boundless username. The roster used to
+        /// show the corp name, which was decoration — a corp is auto-named "{display
+        /// name} Space Agency", so the line under the name was the name again, while
+        /// the one handle that actually identifies a player across every server was
+        /// nowhere in the picker. Kept as one field rather than teaching the row
+        /// about its source, because everything downstream treats it the same way:
+        /// searchable while shown, hidden under streamer mode.
+        ///
+        /// A player who has not claimed a username yet gets no second line at all
+        /// rather than falling back to the corp name — a fallback would make the
+        /// column mean two different things on two adjacent rows, which is worse
+        /// than a row that is simply one line tall.
         /// </summary>
         private static List<Player> Parse(Dictionary<string, object> data)
         {
@@ -339,11 +347,15 @@ namespace GeneKerman.UI.Gui
             {
                 var d = entry as Dictionary<string, object>;
                 if (d == null) continue;
+                // Same shape as the friends branch above, deliberately: an older
+                // server that does not send `username` yields "" and the row draws
+                // its name alone, which is the graceful half of the change.
+                string corpUname = MiniJSON.GetString(d, "username");
                 list.Add(new Player
                 {
                     Id = MiniJSON.GetString(d, "owner_id"),
                     Name = MiniJSON.GetString(d, "owner_name"),
-                    Detail = MiniJSON.GetString(d, "corp_name"),
+                    Detail = string.IsNullOrEmpty(corpUname) ? "" : "@" + corpUname,
                     Level = MiniJSON.GetInt(d, "level"),
                     AvatarUrl = MiniJSON.GetString(d, "avatar_url"),
                 });

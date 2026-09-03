@@ -672,6 +672,21 @@ namespace GeneKerman.UI.Gui
         public static Lbl Muted(El parent, string text, int size = Theme.FontXs)
             => Label(parent, text, size, Theme.MutedForeground);
 
+        /// <summary>
+        /// A captioned button.
+        ///
+        /// In a Column this needs no width: the group force-expands its children. In
+        /// a **Row it does** — the caption is a child stretched over the button's
+        /// rect rather than a layout child, so the button reports no preferred width
+        /// of its own, collapses to nothing, and the caption (which overflows by
+        /// design, so the hit area stays the rect) spills sideways over whatever is
+        /// beside it. Follow a row-placed button with <c>.E.PrefW(n)</c>, or
+        /// <c>.E.Flex(1f)</c> where it should take a share of the row.
+        ///
+        /// Deliberately not defaulted to the caption's measured width: the tab strip
+        /// and the date grid want equal shares regardless of how long each label is,
+        /// and a measured default would quietly make those columns ragged.
+        /// </summary>
         /// <param name="hPad">
         /// Horizontal breathing room around the caption. Lower it for a tab strip,
         /// where the buttons share a fixed width and the padding is what decides

@@ -20,9 +20,9 @@ From `3108_security_audit.md`, Part 3:
 
 Four rounds of fixes landed on the crew-transfer path. Each compiled. Each passed its
 tests. Three of them corrupted saves. The existing `DebugTestPanel` rows cover string
-and set logic against a *stubbed* roster — and one of them says so in as many words:
+and set logic against a *stubbed* roster, and one of them says so in as many words:
 
-> What it CANNOT check is the set itself — whether `CrewedNames` actually sees a
+> What it CANNOT check is the set itself: whether `CrewedNames` actually sees a
 > deferred-removal wreck's crew in a real save is a live test, not this one.
 
 This is that live test.
@@ -63,7 +63,7 @@ deletes it on shutdown:
 ```
 
 The port is ephemeral and the token rotates every launch, so this file is the only
-stable address — and because it lives inside each install's own GameData, two
+stable address, and because it lives inside each install's own GameData, two
 instances running side by side are unambiguous. Written whole then moved into place,
 so a driver polling for it never parses a truncated token.
 
@@ -75,14 +75,14 @@ different service on that port.
 
 ## Security shape
 
-The bridge is a command channel that spawns vessels, removes them and edits rosters —
+The bridge is a command channel that spawns vessels, removes them and edits rosters,
 exactly the boundary `Web/ApiProxy.cs` says the browser bridge's allow-list exists to
 hold. So:
 
 | | |
 |---|---|
 | **Compiled out of production** | `#if GK_DEBUG_PANEL`, asserted by `assert_production_clean.sh` |
-| **Separate listener** | its own port, never the browser bridge's — no path from a page session to any of this |
+| **Separate listener** | its own port, never the browser bridge's, so there is no path from a page session to any of this |
 | **Bearer token in a header** | never a cookie. Audit finding **LB2** (the `gk` cookie is host- not port-scoped, so another loopback service can replay cookie-only routes) is still open, and the brief forbids adding a cookie-only route |
 | **Loopback only** | `http://127.0.0.1:PORT/`, never `+`, `*` or `localhost` |
 | **Exact Host match** | Mono's prefix matcher lets `127.0.0.1` (no port) and `127.0.0.1:PORT.evil.com` through; this is what stops them |
@@ -90,8 +90,8 @@ hold. So:
 
 **What this is not.** The token sits in a file readable by the account running KSP, and
 so does `PluginData/session.token`. A hostile process on that account has already won.
-This is a boundary against everything *else* on loopback — another mod, a stray page, a
-service on a neighbouring port — not against a local attacker.
+This is a boundary against everything *else* on loopback (another mod, a stray page, a
+service on a neighbouring port), not against a local attacker.
 
 ---
 
@@ -102,13 +102,13 @@ still the wrong host for this, for three reasons in order of weight:
 
 1. It **refuses to start** without a version-matched WebUI bundle, and only runs when
    the player has switched `enableWebUi` on. Both are right for the browser UI, and
-   both would make the harness unavailable in the ordinary case — testing a *sidebar*
+   both would make the harness unavailable in the ordinary case, which is testing a *sidebar*
    build with no bundle installed.
 2. Keeping the command channel off the production listener means the shipped surface is
    not touched at all.
 3. LB2, above.
 
-What *is* reused verbatim: `MainThreadQueue` (the hard part — KSP state is main-thread
+What *is* reused verbatim: `MainThreadQueue` (the hard part, since KSP state is main-thread
 only), `JobRegistry`, `EventStream`, `JobResult` and `LocalServer`'s static response
 helpers. None of those are coupled to the browser listener.
 
@@ -134,24 +134,24 @@ separate requests can straddle a frame in which a removal ran.
 
 It carries:
 
-- **identity** — including `accountId`, the field the whole crew-ownership fix rests
+- **identity**: including `accountId`, the field the whole crew-ownership fix rests
   on. The impersonation test is precisely "same `username`, different `accountId`".
-- **vessels** — `pid` (the GUID every removal and scenario record keys on) *and*
+- **vessels**: `pid` (the GUID every removal and scenario record keys on) *and*
   `persistentId` (KSP's separate uint), because the two are routinely confused and a
   test that cannot tell them apart cannot prove a removal hit the right hull. Crew read
-  through `VesselTransfer.CrewOf`, so unloaded vessels resolve — a rescue wreck is
+  through `VesselTransfer.CrewOf`, so unloaded vessels resolve, and a rescue wreck is
   almost never loaded.
-- **roster** — `status`, `traitResolves` (the null `experienceTrait` that NullRefs the
+- **roster**: `status`, `traitResolves` (the null `experienceTrait` that NullRefs the
   Astronaut Complex mid-draw, reported as its own field), `borrowed`, `baseName`, and
   `aboard` computed from the *vessel list* rather than from `rosterStatus`. The two
   disagree in exactly the states worth testing: the freeze parks crew at `Dead` while
   they are still in a seat.
-- **crew** — `crewedNow` from the real `CrewedNames()`, `ghostCandidates`,
+- **crew**: `crewedNow` from the real `CrewedNames()`, `ghostCandidates`,
   `brokenTraits`.
-- **scenario** — all four persisted queues: pending removals (with
+- **scenario**: all four persisted queues: pending removals (with
   `vesselStillPresent`), freeze records, spawned wrecks with their `crewRenames`, the
   import dedup set, outstanding submissions.
-- **client** — the contract list as `ClientState` holds it, plus `contractsLoaded`.
+- **client**: the contract list as `ClientState` holds it, plus `contractsLoaded`.
   That flag is not decoration: `HomeboundCrewFor` draws a hard line between "nothing is
   attested" and "the list has not been fetched yet", and conflating them re-tags the
   issuer's own kerbals under the rescuer.
@@ -161,14 +161,14 @@ It carries:
 | Route | Notes |
 |---|---|
 | `POST /actions/save` | the driver's sync primitive; refuses in flight |
-| `POST /actions/remove-vessel` | `{pid, crew_fate}` — **`crew_fate` is required**, never defaulted. `RemoveVesselFromSave` defaults to `LeavesWithCraft`, which kills everyone aboard |
+| `POST /actions/remove-vessel` | `{pid, crew_fate}`. **`crew_fate` is required**, never defaulted. `RemoveVesselFromSave` defaults to `LeavesWithCraft`, which kills everyone aboard |
 | `POST /actions/purge-ghosts` | runs the sweep; returns the count |
-| `POST /actions/crew` | `{action: rename\|add\|remove\|status, …}`. `status` (Available/Dead/Missing) is a **fixture writer**: a ghost is the residue of a hand-over that went wrong and nothing in production creates one on request, so T5 has to place it. It writes an input; the selection rule under test is still the real `PurgeBorrowedGhostCrew`. `Assigned` is refused — it is a claim about a vessel as well as the roster |
+| `POST /actions/crew` | `{action: rename\|add\|remove\|status, …}`. `status` (Available/Dead/Missing) is a **fixture writer**: a ghost is the residue of a hand-over that went wrong and nothing in production creates one on request, so T5 has to place it. It writes an input; the selection rule under test is still the real `PurgeBorrowedGhostCrew`. `Assigned` is refused, being a claim about a vessel as well as the roster |
 | `POST /actions/poll-imports` · `/actions/refresh` | kick the mod's own timers |
 | `POST /actions/scene` | `SPACECENTER`/`TRACKSTATION` only → 202 + job id |
 | `POST /actions/spawn-wreck` | `{contract_id}` → 202 + job id |
 | `POST /actions/quicksend` | `{recipient_id, recipient_name, kind}` → 202 + job id |
-| `POST /actions/issue-rescue` | `{contractor_id, …}` → 202 + job id. Drives `ContractCreation.Create` — the sidebar form's own path, not a post to the server, so the snapshot, the dedup and the orbit-epoch freeze all happen as in play. **Destroys the vessel being flown**, exactly as issuing does; back the save up first |
+| `POST /actions/issue-rescue` | `{contractor_id, …}` → 202 + job id. Drives `ContractCreation.Create`, the sidebar form's own path, not a post to the server, so the snapshot, the dedup and the orbit-epoch freeze all happen as in play. **Destroys the vessel being flown**, exactly as issuing does; back the save up first |
 | `POST /actions/accept-contract` | `{contract_id, issuer_name}` → 202 + job id, through `ClientState.RequestAcceptContract` |
 
 Two conventions worth knowing:
@@ -193,16 +193,16 @@ from what it says is unverified. Each names the finding it settles.
 
 | | Scenario | Settles |
 |---|---|---|
-| **T0** | Bring-up: bridges live, throwaway save, two *distinct* linked accounts | baseline — a save that already has ghosts makes T5 pass for the wrong reason |
+| **T0** | Bring-up: bridges live, throwaway save, two *distinct* linked accounts | baseline, since a save that already has ghosts makes T5 pass for the wrong reason |
 | **T1** | Rescue round trip: tag applied on the way out, stripped on the way home | the full crew path; three of four repair rounds broke here |
 | **T2** | Deferred removal: defers in flight, persists, fires at the Space Center | the queue that makes a hand-over survive quitting mid-flight |
-| **T3** | Quickload rollback: no residue, and the accept echo re-asserts | `MaybeHandleGiftAccepted` — a quicksend has no contract to re-derive intent from |
-| **T4** | **Impersonation** — same display name, different account | **RM1**, the case the whole account-id change exists for |
+| **T3** | Quickload rollback: no residue, and the accept echo re-asserts | `MaybeHandleGiftAccepted`, since a quicksend has no contract to re-derive intent from |
+| **T4** | **Impersonation**: same display name, different account | **RM1**, the case the whole account-id change exists for |
 | **T5** | Ghost sweep removes exactly what it predicts, never a frozen kerbal | `PurgeBorrowedGhostCrew` vs. the freeze parking crew at `Dead` |
 | **T6** | Busy-crew refusal: `CrewedNames` over a real save, unloaded vessels included | **RM3**, and the exact gap `DebugTestPanel` says it cannot cover |
 | **T7** | Trait downgrade: nothing unresolvable is ever written to the roster | `ApplyTrait` / `TraitRepair` |
 
-Run order is `T0, T2, T5, T6, T7, T1, T3, T4` — cheapest and least destructive first,
+Run order is `T0, T2, T5, T6, T7, T1, T3, T4`: cheapest and least destructive first,
 and T4 last because it requires renaming a Discord account, which is a nuisance to undo.
 
 ### T4 is the one that matters
@@ -210,11 +210,11 @@ and T4 last because it requires renaming a Discord account, which is a nuisance 
 An attacker sets their Discord display name to the victim's and re-links. Under the old
 model the victim's client computed `comingHome` from a name compare, took the branch
 that skips the roster-collision check, and adopted the victim's own kerbals onto the
-arriving vessel — the next hand-over then deleted them permanently. It also fires with
+arriving vessel, and the next hand-over then deleted them permanently. It also fires with
 **no attacker at all**: two players who share a nickname corrupt each other's rosters on
 any craft exchange.
 
-The assertion is **not** "the send was refused" — a send from a stranger is perfectly
+The assertion is **not** "the send was refused", because a send from a stranger is perfectly
 legal. It is that the arrivals are renamed *aside*, that the victim's own kerbals are
 untouched and still aboard whatever they were aboard, and that the two instances really
 are different accounts (a two-player test against one account proves nothing, which T0
@@ -240,7 +240,7 @@ processes, and prompts you to move the install between them.
 
 `--single` refuses to start without `--save-a` and `--save-b`, and refuses if they are
 the same. If both roles share a save, the victim's kerbals and the arriving kerbals are
-*the same roster entries* — and no observation distinguishes "the arrival was renamed
+*the same roster entries*, and no observation distinguishes "the arrival was renamed
 aside" from "the originals were simply still there". T4 would pass without testing
 anything.
 
@@ -256,7 +256,7 @@ each account trusts this machine on its own first link.
 
 ### The check that makes it sound
 
-With two installs, nothing can make role A and role B the same account — different
+With two installs, nothing can make role A and role B the same account, because different
 processes, different tokens. With one install nothing *structurally* prevents sending
 to yourself, and a self-send succeeds, changes nothing, and passes every later
 assertion. So:
@@ -264,7 +264,7 @@ assertion. So:
 - every role activation verifies the live `accountId` **and** `save` against what the
   role expects, and refuses rather than proceeding;
 - a role whose identity is not yet known will **not** adopt an account already claimed
-  by the other role — that is exactly the shape of "I confirmed the swap but forgot to
+  by the other role. That is exactly the shape of "I confirmed the swap but forgot to
   do it";
 - T0 asserts the two roles are different accounts and (in single mode) different saves;
   T1 and T4 re-assert distinctness before acting.
@@ -275,12 +275,12 @@ Confirming a swap you did not perform therefore produces a loud `FAIL`, not a gr
 
 Only one thing: you cannot observe both sides at the same instant. In practice that
 costs nothing here, because every assertion in T0–T7 is about *persisted* state on one
-side — a roster, a vessel list, a queue — and each is read while that side is live.
+side (a roster, a vessel list, a queue) and each is read while that side is live.
 There is no invariant in this set that requires a simultaneous two-sided snapshot.
 
 ## Manual steps, and why SKIP ≠ PASS
 
-KSP cannot be flown over HTTP. Typing a link code, flying a rendezvous, pressing F9 —
+KSP cannot be flown over HTTP. Typing a link code, flying a rendezvous, pressing F9:
 these are `manual` steps: the driver prints what to do and waits for Enter.
 
 **A scenario with an unperformed manual step reports `SKIP`, and the run exits `3`.** It
@@ -300,7 +300,7 @@ ones (T0, T5, T6's first half, T7's first half); useless for the rest.
    refuses if the loaded save is anything else. Override with `--save` if you must; the
    default is never the permissive one.
 2. **`persistent.sfs` is copied aside** per scenario before anything destructive.
-3. The mod's own precondition checks refuse rather than half-act — you get a sentence,
+3. The mod's own precondition checks refuse rather than half-act, so you get a sentence,
    not a `NullReferenceException` in `KSP.log` that the driver reads as a timeout.
 
 ---
@@ -329,7 +329,7 @@ default 3 s). A tight polling loop is the one thing here that gets genuinely exp
 
 The `#if`-gated accessors exist so assertions call the **real** private helpers. A
 harness that reimplements the logic it is checking passes exactly when the real code
-fails — which is the one failure mode a harness must not have. The single deliberate
+fails, which is the one failure mode a harness must not have. The single deliberate
 exception is `GhostCandidates`, which mirrors the sweep's selection because asking the
 sweep what it *would* do is asking it to do it; T5 covers that drift by asserting the
 prediction and the sweep agree.

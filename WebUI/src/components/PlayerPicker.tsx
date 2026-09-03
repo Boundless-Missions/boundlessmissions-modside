@@ -19,8 +19,15 @@ import { cn } from "@/lib/utils";
  * work and anyone may be offered it. Quicksend lists FRIENDS, because a send is a
  * hand-over: a live vessel leaves the sender's save. This is only the drawing of that
  * rule; /api/v1/craft/send enforces it, so a picker showing the wrong set cannot turn
- * into a send to a stranger. Friends are mapped into the same row shape as corps —
- * the handle stands in for the corp name — so everything below stays source-agnostic.
+ * into a send to a stranger. Friends are mapped into the same row shape as corps, so
+ * everything below stays source-agnostic.
+ *
+ * The second line of a row is the player's Boundless username, from both sources.
+ * The roster used to show the corp name, which was decoration: a corp is auto-named
+ * "{display name} Space Agency", so the line under the name was the name again. The
+ * username is the handle that finds this player on any server and never changes,
+ * which is what makes it worth the row — and, for the same reason, what streamer
+ * mode hides along with the faces.
  */
 export function PlayerPicker({
   value,
@@ -41,7 +48,7 @@ export function PlayerPicker({
   const [favorites, setFavorites] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
-  // "Hide profile pictures and corp names" — either switched on by hand or turned on
+  // "Hide profile pictures and usernames" — either switched on by hand or turned on
   // by streamer mode spotting OBS. The mod folds the two into one answer so this list
   // and the in-game one cannot disagree about it.
   const [hideDetails, setHideDetails] = useState(false);
@@ -55,7 +62,10 @@ export function PlayerPicker({
             (r.friends ?? []).map((f) => ({
               owner_id: f.user_id,
               owner_name: f.name,
-              corp_name: f.username ? `@${f.username}` : "",
+              // A friend row has no corp behind it and does not pretend to: the
+              // detail line comes from `username`, exactly as the roster's does.
+              corp_name: "",
+              username: f.username ?? "",
               avatar_url: f.avatar_url ?? null,
               level: f.level ?? 0,
             }))
@@ -134,13 +144,13 @@ export function PlayerPicker({
     return corps
       .filter((c) => c.owner_id && c.owner_id !== me)
       .filter((c) => !favoritesOnly || favorites.has(c.owner_id))
-      // The corp name is searchable only while it is shown: matching on a hidden
+      // The username is searchable only while it is shown: matching on a hidden
       // field answers a query with rows that look like they do not match it.
       .filter(
         (c) =>
           !q ||
           c.owner_name.toLowerCase().includes(q) ||
-          (!hideDetails && (c.corp_name ?? "").toLowerCase().includes(q))
+          (!hideDetails && (c.username ?? "").toLowerCase().includes(q))
       )
       .sort((a, b) => {
         const fa = favorites.has(a.owner_id) ? 0 : 1;
@@ -239,8 +249,8 @@ function PlayerRow({
         <Avatar corp={corp} hideDetails={hideDetails} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium">{corp.owner_name}</span>
-          {!hideDetails && corp.corp_name && (
-            <span className="block truncate text-xs text-muted-foreground">{corp.corp_name}</span>
+          {!hideDetails && corp.username && (
+            <span className="block truncate text-xs text-muted-foreground">@{corp.username}</span>
           )}
         </span>
       </button>

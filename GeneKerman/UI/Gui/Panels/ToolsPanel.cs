@@ -157,7 +157,7 @@ namespace GeneKerman.UI.Gui
                 UIF.Muted(card, "Fly a vessel, or open a saved craft in the editor, to send it.").Body();
             }
 
-            picker.Build(card, "No friends yet. Add one in the Friends panel: "
+            picker.Build(card, "No friends yet. Add one on the Profile panel: "
                                + "by Boundless username, or from your Discord server.");
 
             bool ready = craft.CanSend && picker.HasSelection && !Busy;

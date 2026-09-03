@@ -174,6 +174,21 @@ namespace GeneKerman
         public string LatestVersion { get; private set; } = "";
         public string UpdateDownloadUrl { get; private set; } = "";
 
+        /// <summary>A newer build exists, but the server is still accepting this one —
+        /// it is inside its grace window. Advisory only: nothing is suppressed, because
+        /// the server has explicitly decided not to refuse us. Distinct from
+        /// <see cref="UpdateRequired"/>, which is the gate.</summary>
+        public bool UpdateAvailable { get; private set; }
+
+        /// <summary>ISO8601 instant this build stops being accepted, or empty when there
+        /// is nothing to count down to (up to date, or already gated).</summary>
+        public string GraceUntil { get; private set; } = "";
+
+        // The advisory notice is once per session. RecheckVersion() runs on every server
+        // switch and from the gate window's own button, and a toast that reappears on
+        // each of those reads as a fault rather than as a reminder.
+        private bool graceNoticeShown;
+
         /// <summary>
         /// The update gate's "Download latest" button hands this straight to
         /// Application.OpenURL, which shells out through xdg-open / ShellExecute — so a
@@ -315,10 +330,8 @@ namespace GeneKerman
             sidebar.AddPanel(new UI.Gui.NotificationsPanel());
             sidebar.AddPanel(new UI.Gui.MarketPanel());
             sidebar.AddPanel(new UI.Gui.FinancePanel());
-            // Next to Tools, which is where quicksend lives: the two are read
-            // together — the send picks from this list, and a send that finds
-            // nobody to pick sends the player straight here.
-            sidebar.AddPanel(new UI.Gui.FriendsPanel());
+            // No Friends tab: the friend list lives on Profile, since a friendship
+            // is an account-level fact rather than a tool.
             sidebar.AddPanel(new UI.Gui.ToolsPanel());
             sidebar.AddPanel(new UI.Gui.SettingsPanel());
 
@@ -1716,6 +1729,16 @@ namespace GeneKerman
                 bool enabled = MiniJSON.GetBool(data, "enabled", true);
                 bool upToDate = MiniJSON.GetBool(data, "up_to_date", true);
 
+                // `up_to_date` answers "may I proceed", NOT "am I on the newest build":
+                // the server returns it true for a build inside its grace window, on
+                // purpose, because every client already shipped treats false as "raise
+                // the blocking window" and knows nothing about grace — so the field every
+                // client obeys has to carry the gate's decision. The advisory half is
+                // therefore read separately, and an old server that sends neither field
+                // simply reports nothing to update. See data/mod_version.check().
+                UpdateAvailable = enabled && MiniJSON.GetBool(data, "update_available", false);
+                GraceUntil = MiniJSON.GetString(data, "grace_until") ?? "";
+
                 if (!enabled || upToDate)
                 {
                     if (UpdateRequired)
@@ -1740,6 +1763,15 @@ namespace GeneKerman
                             else ShowLinkWindow = true;   // this server accepts us — offer linking
                         }
                     }
+
+                    // Accepted, but behind. Tell the player once, without taking the
+                    // game away from them.
+                    if (UpdateAvailable)
+                    {
+                        LatestVersion = MiniJSON.GetString(data, "latest_version") ?? "";
+                        UpdateDownloadUrl = SafeDownloadUrl(MiniJSON.GetString(data, "download_url"));
+                        NoticeUpdateAvailable(MiniJSON.GetString(data, "message"));
+                    }
                     return;
                 }
 
@@ -1756,6 +1788,56 @@ namespace GeneKerman
                 updateWindow.Show(ModVersion.Current, LatestVersion, UpdateDownloadUrl);
                 Debug.Log($"[GeneKerman] Update required: {ModVersion.Current} → {LatestVersion}");
             });
+        }
+
+        /// <summary>
+        /// Non-blocking "you are behind" notice for a client the server is still
+        /// accepting — its build is inside the grace window.
+        ///
+        /// Deliberately not the update gate. The window exists because we recommend
+        /// CKAN as the update route and CKAN indexes and upgrades on its own schedule,
+        /// so being a few days behind is the expected state rather than an error; a
+        /// modal here would undo the whole point of the server having let this build
+        /// through. It goes to the notification feed as well as the toast, so the one
+        /// thing the player might want to act on later survives the toast fading.
+        ///
+        /// The sentence is the SERVER's when it sent one. It is the side that knows
+        /// what the update route is, and wording that lives there can be corrected
+        /// without shipping a client — which is the same reason a contract refusal
+        /// carries its reason rather than a code the client renders.
+        /// </summary>
+        private void NoticeUpdateAvailable(string serverMessage)
+        {
+            if (graceNoticeShown) return;
+            graceNoticeShown = true;
+
+            string body = (serverMessage ?? "").Trim();
+            if (body.Length == 0)
+                body = string.IsNullOrEmpty(LatestVersion)
+                    ? "A newer version is available. Update through CKAN."
+                    : $"Version {LatestVersion} is available. Update through CKAN.";
+
+            // Only ever append a deadline we could actually read. A raw ISO string or a
+            // misparsed date is worse than no date: this one tells the player when the
+            // mod stops working, so a wrong one is a wrong promise.
+            DateTime until;
+            if (!string.IsNullOrEmpty(GraceUntil) &&
+                DateTime.TryParse(GraceUntil, System.Globalization.CultureInfo.InvariantCulture,
+                                  System.Globalization.DateTimeStyles.RoundtripKind |
+                                  System.Globalization.DateTimeStyles.AdjustToUniversal, out until))
+            {
+                int days = (int)Math.Ceiling((until - DateTime.UtcNow).TotalDays);
+                if (days >= 1)
+                    body += $" This build stops working in about {days} day{(days == 1 ? "" : "s")}.";
+                else if (days >= 0)
+                    body += " This build stops working today.";
+            }
+
+            RaiseLocalNotification($"Update available ({ModVersion.Current} \u2192 " +
+                                   (string.IsNullOrEmpty(LatestVersion) ? "newer" : LatestVersion) + ")",
+                                   body);
+            Debug.Log($"[GeneKerman] Update available (still accepted): {ModVersion.Current} " +
+                      $"\u2192 {LatestVersion}; grace_until={GraceUntil}");
         }
 
         /// Re-run the version check (e.g. after the player updated and the window's

@@ -213,7 +213,7 @@ function ServerCard({
 }
 
 /**
- * Hiding other players' faces and corp names, by hand or by noticing OBS.
+ * Hiding other players' faces and usernames, by hand or by noticing OBS.
  *
  * The mirror of the in-game sidebar's Privacy card, and deliberately a separate card
  * from "In-game behaviour": these two are about what someone watching your screen can
@@ -254,7 +254,7 @@ function PrivacyCard({
       <CardContent className="space-y-1">
         <Toggle
           icon={EyeOff}
-          label="Hide profile pictures and corp names"
+          label="Hide profile pictures and usernames"
           hint="Player lists show display names only. Pictures are not just hidden but never downloaded, so nothing on this PC asks Discord for them."
           checked={settings.hidePlayerDetails === true}
           busy={busy === "hidePlayerDetails"}
@@ -274,7 +274,7 @@ function PrivacyCard({
               ? `${app} is running. ${
                   settings.hidePlayerDetails
                     ? "Details are hidden by the switch above anyway."
-                    : "Profile pictures and corp names are hidden while it is."
+                    : "Profile pictures and usernames are hidden while it is."
                 }`
               : "No broadcasting software running."}
           </p>

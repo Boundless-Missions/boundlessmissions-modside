@@ -1,15 +1,15 @@
-# Boundless Missions — KSP Mod Side
+# Boundless Missions: KSP Mod Side
 
 > A KSP 1.12.x plugin that connects a player's game to the Boundless Missions
 > backend: player-issued contracts, reverse auctions, rescue missions, craft and
 > vessel transfers between players, real-time notifications, cinematic milestone
-> captures, and automated mod-dependency management — all from inside the stock
+> captures, and automated mod-dependency management, all from inside the stock
 > game.
 >
 > The hard part is not the networking. It is that two players never have the same
 > install: different mods, different part sets, different life-support rules,
 > different rendering stacks. Most of this codebase exists so a craft built on one
-> machine arrives intact — or degrades honestly — on another.
+> machine arrives intact, or degrades honestly, on another.
 
 ---
 
@@ -19,52 +19,62 @@
 2. [Directory Layout](#directory-layout)
 3. [Source File Map](#source-file-map)
 4. [Core Systems](#core-systems)
-   - [Lifecycle & State Machine — `GeneKermanMod`](#lifecycle--state-machine--genekermanmod)
-   - [Client State — `ClientState`](#client-state--clientstate)
-   - [Networking — `ApiClient`](#networking--apiclient)
-   - [Real-Time Push — `NotificationSocket`](#real-time-push--notificationsocket)
+   - [Lifecycle & State Machine: `GeneKermanMod`](#lifecycle--state-machine-genekermanmod)
+   - [Client State: `ClientState`](#client-state-clientstate)
+   - [Networking: `ApiClient`](#networking-apiclient)
+   - [Real-Time Push: `NotificationSocket`](#real-time-push-notificationsocket)
 5. [Vessel & Craft Transfer Pipeline](#vessel--craft-transfer-pipeline)
-   - [Serialization — `VesselTransfer`](#serialization--vesseltransfer)
-   - [Data Collection — `VesselDataCollector`](#data-collection--vesseldatacollector)
-   - [Craft Installation — `CraftInstaller`](#craft-installation--craftinstaller)
+   - [Serialization: `VesselTransfer`](#serialization-vesseltransfer)
+   - [Data Collection: `VesselDataCollector`](#data-collection-vesseldatacollector)
+   - [Craft Installation: `CraftInstaller`](#craft-installation-craftinstaller)
 6. [Side-Channel Data Blocks](#side-channel-data-blocks)
-   - [Custom Flags — `FlagTransfer`](#custom-flags--flagtransfer)
-   - [TweakScale Bridge — `ScaleBridge` / `GeneKermanScale` / `TweakScaleGuard`](#tweakscale-bridge--scalebridge--genekermanscale--tweakscaleguard)
-   - [Textures Unlimited — `TextureTransfer`](#textures-unlimited--texturetransfer)
-   - [RealFuels / Realism Overhaul — `RealFuelsTransfer`](#realfuels--realism-overhaul--realfuelstransfer)
-   - [CKAN Mod Dependency — `CkanGenerator`](#ckan-mod-dependency--ckangenerator)
-   - [Part Substitution — `PartAliases`](#part-substitution--partaliases)
-   - [Craft Thumbnails — `CraftThumb`](#craft-thumbnails--craftthumb)
+   - [Custom Flags: `FlagTransfer`](#custom-flags-flagtransfer)
+   - [TweakScale Bridge: `ScaleBridge` / `GeneKermanScale` / `TweakScaleGuard`](#tweakscale-bridge-scalebridge--genekermanscale--tweakscaleguard)
+   - [Textures Unlimited: `TextureTransfer`](#textures-unlimited-texturetransfer)
+   - [RealFuels / Realism Overhaul: `RealFuelsTransfer`](#realfuels--realism-overhaul-realfuelstransfer)
+   - [CKAN Mod Dependency: `CkanGenerator`](#ckan-mod-dependency-ckangenerator)
+   - [Part Substitution: `PartAliases`](#part-substitution-partaliases)
+   - [Craft Thumbnails: `CraftThumb`](#craft-thumbnails-craftthumb)
 7. [Visual Rendering](#visual-rendering)
-   - [Blueprint Renderer — `VesselRenderer`](#blueprint-renderer--vesselrenderer)
+   - [Blueprint Renderer: `VesselRenderer`](#blueprint-renderer-vesselrenderer)
    - [Deferred Rendering Support](#deferred-rendering-support)
-   - [ConformalDecals Capture — `DecalCapture`](#conformaldecals-capture--decalcapture)
-   - [Cinematic Capture — `CinematicCapture`](#cinematic-capture--cinematiccapture)
+   - [ConformalDecals Capture: `DecalCapture`](#conformaldecals-capture-decalcapture)
+   - [Cinematic Capture: `CinematicCapture`](#cinematic-capture-cinematiccapture)
 8. [Mission Contract System](#mission-contract-system)
-   - [Contract Integration — `ContractIntegration`](#contract-integration--contractintegration)
-   - [Contract Constraints — `ContractConstraints` / `PartClassifier`](#contract-constraints--contractconstraints--partclassifier)
-   - [Editor Enforcement — `EditorPartEnforcer`](#editor-enforcement--editorpartenforcer)
-   - [Delta-V Validation — `CraftDeltaV`](#delta-v-validation--craftdeltav)
-   - [Orbit Constraints — `OrbitConstraint`](#orbit-constraints--orbitconstraint)
-   - [Submission — `SubmissionSession`](#submission--submissionsession)
+   - [Contract Integration: `ContractIntegration`](#contract-integration-contractintegration)
+   - [Contract Constraints: `ContractConstraints` / `PartClassifier`](#contract-constraints-contractconstraints--partclassifier)
+   - [Editor Enforcement: `EditorPartEnforcer`](#editor-enforcement-editorpartenforcer)
+   - [Delta-V Validation: `CraftDeltaV`](#delta-v-validation-craftdeltav)
+   - [Orbit Constraints: `OrbitConstraint`](#orbit-constraints-orbitconstraint)
+   - [Submission: `SubmissionSession`](#submission-submissionsession)
 9. [Life Support, Rescue & Save Repair](#life-support-rescue--save-repair)
-   - [Life Support Adapters — `LifeSupport/`](#life-support-adapters--lifesupport)
-   - [Emergency Freeze — `RescueImmunityGuardian`](#emergency-freeze--rescueimmunityguardian)
-   - [Trait Repair — `TraitRepair`](#trait-repair--traitrepair)
-10. [Checkpoint & Milestone Detection](#checkpoint--milestone-detection)
-    - [Checkpoint Detector — `CheckpointDetector`](#checkpoint-detector--checkpointdetector)
-11. [Identity & Security](#identity--security)
-    - [Consent Gate — `Consent`](#consent-gate--consent)
-    - [Device Identity — `DeviceId`](#device-identity--deviceid)
-    - [Version Integrity — `ModVersion`](#version-integrity--modversion)
+   - [Life Support Adapters: `LifeSupport/`](#life-support-adapters-lifesupport)
+   - [Emergency Freeze: `RescueImmunityGuardian`](#emergency-freeze-rescueimmunityguardian)
+   - [Trait Repair: `TraitRepair`](#trait-repair-traitrepair)
+10. [Landing a Transferred Craft: `SurfacePlacement`](#landing-a-transferred-craft-surfaceplacement)
+11. [Rescue Waypoints: `RescueWaypoints`](#rescue-waypoints-rescuewaypoints)
+12. [Friends, Quicksend and the Crew Ledger](#friends-quicksend-and-the-crew-ledger)
+13. [The Finance Panel](#the-finance-panel)
+14. [Anti-Cheat & Simulation Detection](#anti-cheat--simulation-detection)
+    - [`CheatDetection`](#cheatdetection)
+    - [`SimulationDetection`](#simulationdetection)
+15. [Privacy: `StreamerMode`](#privacy-streamermode)
+16. [Checkpoint & Milestone Detection](#checkpoint--milestone-detection)
+    - [Checkpoint Detector: `CheckpointDetector`](#checkpoint-detector-checkpointdetector)
+17. [Identity & Security](#identity--security)
+    - [Consent Gate: `Consent`](#consent-gate-consent)
+    - [Device Identity: `DeviceId`](#device-identity-deviceid)
+    - [Version Integrity: `ModVersion`](#version-integrity-modversion)
+    - [The Update Gate and its Grace Window](#the-update-gate-and-its-grace-window)
+    - [Craft Hash Bans](#craft-hash-bans)
     - [Service Suspensions](#service-suspensions)
-    - [Part Catalog Upload — `PartCatalogUploader`](#part-catalog-upload--partcataloguploader)
-12. [Third-Party Mod Compatibility](#third-party-mod-compatibility)
-13. [UI System](#ui-system)
-14. [Browser UI Bridge — `Web/`](#browser-ui-bridge--web)
-15. [Build & Deployment](#build--deployment)
-16. [Dependencies](#dependencies)
-17. [Configuration](#configuration)
+    - [Part Catalog Upload: `PartCatalogUploader`](#part-catalog-upload-partcataloguploader)
+18. [Third-Party Mod Compatibility](#third-party-mod-compatibility)
+19. [UI System](#ui-system)
+20. [Browser UI Bridge: `Web/`](#browser-ui-bridge-web)
+21. [Build & Deployment](#build--deployment)
+22. [Dependencies](#dependencies)
+23. [Configuration](#configuration)
 
 ---
 
@@ -150,7 +160,7 @@ KSP Mod Side/
 │   ├── lib/                          # Pre-built dependency (websocket-sharp.dll)
 │   ├── LifeSupport/                  # Reflection-only adapters, one per LS mod
 │   ├── Web/                          # Loopback HTTP bridge for the browser UI
-│   ├── UI/                           # IMGUI windows (gates only — see UI System)
+│   ├── UI/                           # IMGUI windows (gates only (see UI System))
 │   │   └── Gui/                      # uGUI sidebar: theme, builder, panels, windows
 │   │       └── Panels/               # The screens (missions, contracts, tools, …)
 │   ├── *.cs                          # Core systems (see Source File Map)
@@ -178,7 +188,7 @@ A second GameData folder, `GameData/GeneKerman/Flags/`, is created at runtime by
 `FlagTransfer` to hold content-addressed flag images that arrive with crafts.
 
 > The source project is named `GeneKerman`; the deployed GameData folder is
-> `BoundlessMissions`. This is intentional — do not "fix" one to match the other.
+> `BoundlessMissions`. This is intentional: do not "fix" one to match the other.
 
 ---
 
@@ -192,7 +202,7 @@ relative weight, not as a contract.
 | File | Lines | Role |
 |------|------:|------|
 | `GeneKermanMod.cs` | 2,047 | **Entry point.** MonoBehaviour singleton, lifecycle, state machine, toolbar, coroutine host, notification dispatch, local notifications |
-| `ClientState.cs` | 936 | **The account, headless.** Profile, missions, contracts and the notification feed — fetch, cache, local-notification merge, de-dup, unread count, every action coroutine. Exposed *by reference* via `GeneKermanMod.State` |
+| `ClientState.cs` | 936 | **The account, headless.** Profile, missions, contracts and the notification feed: fetch, cache, local-notification merge, de-dup, unread count, every action coroutine. Exposed *by reference* via `GeneKermanMod.State` |
 | `ApiClient.cs` | 1,831 | **HTTP networking.** All REST calls, settings/session persistence, version gating (426), device binding (403), suspension (403 `suspended`) |
 | `NotificationSocket.cs` | 451 | **WebSocket push.** Real-time notifications, ticket auth, keepalive, exponential backoff reconnect |
 | `Consent.cs` | 163 | **Privacy gate.** First-run opt-in record, server-driven policy version, live re-read on file change |
@@ -209,12 +219,15 @@ relative weight, not as a contract.
 | `FlagTransfer.cs` | 674 | **`GKFLAG`.** Embed/extract custom flag images, content-addressed SHA-256 naming, runtime `GameDatabase` injection, dangling-reference reset |
 | `ScaleBridge.cs` | 466 | **TweakScale bake.** Copies computed scale/mass/module stats off live parts, strips TweakScale, re-anchors `pos`, writes the layout pin |
 | `GeneKermanScale.cs` | 379 | **Scale applicator.** Dormant PartModule on every prefab; re-applies absolute values without TweakScale's exponent math |
-| `TweakScaleGuard.cs` | 283 | **`GKTSVER`.** Version warning — fires only when a part is *actually rescaled*, never on the mere presence of a TweakScale module |
+| `TweakScaleGuard.cs` | 283 | **`GKTSVER`.** Version warning: fires only when a part is *actually rescaled*, never on the mere presence of a TweakScale module |
 | `ScaleEditorReapply.cs` | 68 | **Editor undo/redo fix.** Re-asserts scaled geometry after the editor rebuilds the part tree |
 | `TextureTransfer.cs` | 884 | **`GKTU`.** Carries a Textures Unlimited paint job: resolves texture sets → defining GameData folder, reconciles recolour modules per prefab on import |
 | `RealFuelsTransfer.cs` | 1,135 | **`GKRF`.** Carries RealFuels/RO tank types and engine configs; checks on an RF install, reconciles to local fuels on one without |
+| `ReforgedTransfer.cs` | 591 | **Reforged Materials Redux.** The other recolour mod. No side-channel block: its paint already rides in the craft's own MODULE nodes, so this is a strict "is it actually painted" test plus an import-side reconcile |
+| `SurfacePlacement.cs` | 576 | **`GKLAND`.** Puts a transferred *landed* craft on the recipient's ground, correcting altitude relative to the sender's terrain and forcing KSP's own ground reseat |
+| `QuicksendLedger.cs` | 255 | Local record of what this client sent to whom, so a returning hand-over can be recognised |
 | `CkanGenerator.cs` | 1,078 | **`GKMODS`.** Maps parts → mods via CKAN's install paths, reports missing mods, writes a `.ckan` metapackage |
-| `PartAliases.cs` | 410 | **Part substitution.** Swaps a missing part for the equivalent this install has (source of truth for `data/part_aliases.py`) |
+| `PartAliases.cs` | 410 | **Part substitution.** Swaps a missing part for the equivalent this install has (source of truth for the server repo's `data/part_aliases.py`) |
 | `CraftThumb.cs` | 209 | **`GKTHUMB`.** Embeds/extracts the NW-view thumbnail PNG for KSP's craft browser |
 | `VesselDataCollector.cs` | 394 | **Telemetry.** Vessel snapshots (orbit, mass, cost, crew), craft file lookup, screenshots |
 
@@ -224,7 +237,7 @@ relative weight, not as a contract.
 |------|------:|------|
 | `SubmissionSession.cs` | 1,285 | **Submission rules + upload.** Mission-type classification rules, scene/vessel validation, render capture and freshness, the packing coroutine. No UI |
 | `SubmissionPreview.cs` | 168 | **Review images.** Fetches the blueprints/telemetry a contractor submitted, one completion callback |
-| `ContractCreation.cs` | 606 | **Issuing work.** Direct contract, reverse auction, or rescue — shared by the sidebar form and the web bridge |
+| `ContractCreation.cs` | 606 | **Issuing work.** Direct contract, reverse auction, or rescue: shared by the sidebar form and the web bridge |
 | `ContractInbox.cs` | 115 | **Local inbox state.** The client-side trash bin and week grouping (never sent to the server) |
 | `ContractIntegration.cs` | 508 | **Stock contract bridge.** Injects API missions as stock contracts in Mission Control |
 | `ContractConstraints.cs` | 454 | **Mission limits.** Forbidden/required parts, propellants, categories, Δv, crew count, crew professions (`TraitMods`) |
@@ -266,16 +279,25 @@ relative weight, not as a contract.
 | `PartCatalogUploader.cs` | 92 | Uploads the installed part list, FNV-1a hash gate |
 | `PhysicsRangeManager.cs` | 216 | Temporarily disables Physics Range Extender during submissions |
 | `ClickThroughHelper.cs` | 114 | Routes IMGUI windows through Click Through Blocker when available |
-| `ToolActions.cs` | 690 | Tools-tab operations: flag import, craft export, quicksend, bug report — shared by the sidebar and the web bridge |
-| `Favorites.cs` | 108 | Starred players for the quicksend picker (PluginData, not localStorage — the bridge origin changes every launch) |
+| `ToolActions.cs` | 690 | Tools-tab operations: flag import, craft export, quicksend, bug report, shared by the sidebar and the web bridge |
+| `Favorites.cs` | 108 | Starred players for the quicksend picker (PluginData, not localStorage: the bridge origin changes every launch) |
+| `CheatDetection.cs` | 980 | **Cheat watchdog.** Taints a vessel whose state breaks physics continuity, catching teleports *by effect* rather than by tool |
+| `DebugMenuCheatWarning.cs` | 311 | Writes the disqualification warning into KSP's own F12 cheat screens, and hooks their three teleport buttons as a second channel |
+| `SimulationDetection.cs` | 179 | Probes RP-1/KCT and KRASH "simulation active" flags by reflection, so a simulated flight cannot be submitted as a real one |
+| `StreamerMode.cs` | 332 | Hides other players' avatars and usernames when broadcasting software is detected or the player asks. Scans nothing while switched off |
+| `SecureFile.cs` | 105 | Restrictive-permission writes for the files under `PluginData` that hold credentials |
+| `TextSanitizer.cs` | 94 | Strips characters the game fonts render as tofu from server and local notification text |
+| `ControlDiag.cs` | 264 | Diagnostics for stuck input locks and control-lock leaks |
 | `DebugTestPanel.cs` | 378 | In-game security self-test panel. **Compiled out** of production builds (`#if GK_DEBUG_PANEL`) |
+| `Web/DebugBridge.cs`, `Web/DebugRoutes.cs` | 1,000+ | The agent test bridge. **Compiled out** of production builds (`#if GK_DEBUG_PANEL`); see [`tools/README-bridge.md`](tools/README-bridge.md) |
+| `Web/BodyReader.cs` | 79 | Request-body reader for the bridge listeners |
 
 ### Browser UI bridge (`Web/`)
 
 | File | Lines | Role |
 |------|------:|------|
 | `Web/LocalServer.cs` | 363 | Loopback HTTP listener: static bundle, `/gk/*` game bridge, `/api/*` proxy, `/gk/events` SSE |
-| `Web/BridgeAuth.cs` | 158 | Launch nonce, session cookie + CSRF token — layers 3 and 4 of the five-layer gate |
+| `Web/BridgeAuth.cs` | 158 | Launch nonce, session cookie + CSRF token: layers 3 and 4 of the five-layer gate |
 | `Web/ApiProxy.cs` | 315 | Forwards `/api/*` upstream with the token attached in C#. **The allow-list is the security boundary** |
 | `Web/GkRoutes.cs` | 828 | Everything only this process can do: game state, craft actions, contract creation |
 | `Web/EventStream.cs` | 152 | SSE push, tee'd from the notification socket |
@@ -291,20 +313,22 @@ relative weight, not as a contract.
 | `UI/Gui/UIF.cs` | 1,207 | Fluent widget builder; font/material re-assertion (`RefreshFont`, `RefreshText`) |
 | `UI/Gui/Theme.cs` | 380 | Design tokens ported from the website's `globals.css`; the normalized font material |
 | `UI/Gui/Sprites.cs` | 749 | Procedural 9-slice rounded-rect sprites (there is no Unity Editor on this machine) |
-| `UI/Gui/SidebarPanel.cs` | 201 | Panel base — `WorksOffline`, show/hide, refresh contract |
+| `UI/Gui/SidebarPanel.cs` | 201 | Panel base: `WorksOffline`, show/hide, refresh contract |
 | `UI/Gui/FloatWindow.cs` | 284 | Draggable, clamped window shell (used by the submission screen) |
 | `UI/Gui/Panels/ContractsPanel.cs` | 1,637 | Contract inbox + active contract actions (incl. rescue wreck spawn) |
-| `UI/Gui/Panels/SubmitPanel.cs` | 397 | The submission screen — a pure read of `SubmissionSession` |
+| `UI/Gui/Panels/SubmitPanel.cs` | 397 | The submission screen: a pure read of `SubmissionSession` |
 | `UI/Gui/Panels/ToolsPanel.cs` | 441 | Export, flag import, quicksend, bug report, roster repair card |
 | `UI/Gui/Panels/NotificationsPanel.cs` | 451 | The feed, with local-notification action buttons |
 | `UI/Gui/Panels/SettingsPanel.cs` | 323 | Server choice, feature toggles, interface switch |
 | `UI/Gui/Panels/MissionsPanel.cs`<br>`ProfilePanel.cs`<br>`MarketPanel.cs` | 172 / 209 / 194 | Weekly missions, profile, marketplace *selling* half |
-| `UI/Gui/ContractForm.cs` | 610 | Contract creation — rewards, constraints, mod-list mode, auctions, rescues |
+| `UI/Gui/Panels/FinancePanel.cs` | 846 | The wallet's history: summary, a 14-day diverging graph, the transaction list, lifetime per-category totals and Send coins |
+| `UI/Gui/Panels/MoreTimePanel.cs` | 286 | The "ask for more time" form, mounted as a window because it is read against the deadline it moves |
+| `UI/Gui/ContractForm.cs` | 610 | Contract creation: rewards, constraints, mod-list mode, auctions, rescues |
 | `UI/Gui/PlayerPicker.cs`<br>`BodyPicker.cs`<br>`DatePicker.cs` | 469 / 175 / 285 | Shared search/favourites, celestial body, and inline month-grid pickers |
 | `UI/Gui/ImageViewer.cs` | 409 | Full-screen zoom/pan lightbox for submission images |
 | `UI/Gui/ToastHost.cs` | 253 | Toast notifications on the canvas |
 | `UI/Gui/ScrollForwarder.cs`<br>`ScrollMemory.cs`<br>`Fmt.cs` | 58 / 158 / 105 | Nested-scroll forwarding, scroll position memory, formatting helpers |
-| `UI/ConsentWindow.cs` | 169 | First-run privacy/terms opt-in (IMGUI — it gates the canvas) |
+| `UI/ConsentWindow.cs` | 169 | First-run privacy/terms opt-in (IMGUI: it gates the canvas) |
 | `UI/LinkWindow.cs` | 283 | Discord account linking flow |
 | `UI/SuspendedWindow.cs` | 197 | Service-suspension notice: reason, live countdown, "check again" |
 | `UI/UpdateRequiredWindow.cs` | 128 | Mandatory update gate |
@@ -318,7 +342,7 @@ relative weight, not as a contract.
 
 ## Core Systems
 
-### Lifecycle & State Machine — `GeneKermanMod`
+### Lifecycle & State Machine: `GeneKermanMod`
 
 `GeneKermanMod` is the mod's entry point. It is a Unity `MonoBehaviour` marked
 with `[KSPAddon(KSPAddon.Startup.MainMenu, true)]` and `DontDestroyOnLoad`,
@@ -348,7 +372,7 @@ State machine: `Unlinked → Linking → Linked`.
 - **Local notifications**: `RaiseLocalNotification()` raises a client-side
   notice about something *this install* found (a broken roster trait, a missing
   mod, a substituted part). A local notification may carry an action key in its
-  `data` dict — see `LocalNotifActions`.
+  `data` dict (see `LocalNotifActions`).
 - **Gate rendering**: `OnGUI` draws whichever IMGUI gate applies (consent,
   update required, suspension, data paused, device verification, link) and
   suppresses the canvas beneath it.
@@ -358,16 +382,16 @@ State machine: `Unlinked → Linking → Linked`.
 ```
 Instance       : static singleton reference
 Api            : the networking client
-State          : ClientState — the account, by reference
+State          : ClientState, the account, by reference
 Socket         : the WebSocket handler
 Detector       : the checkpoint detector
 PluginDataPath : GameData/BoundlessMissions/PluginData (runtime storage root)
 ```
 
-### Client State — `ClientState`
+### Client State: `ClientState`
 
 `ClientState` is the account as the client knows it: profile, weekly missions,
-contracts (incoming and active), and the notification feed — plus the fetch
+contracts (incoming and active), and the notification feed, plus the fetch
 coroutines, the merge of server notifications with local ones, the de-dup, the
 unread count, and every action (`RequestMarkRead`, `RequestDismiss`, accept,
 cancel, dispute, …).
@@ -377,10 +401,10 @@ sidebar, the browser bridge (`Web/GkRoutes`) and the notification socket all
 read the same object. A second copy drifts the moment either side gains a
 mutation, and the unread badge is the first thing to show it.
 
-### Networking — `ApiClient`
+### Networking: `ApiClient`
 
 `ApiClient` encapsulates all HTTP communication with the server. Every API call
-is a Unity coroutine using `UnityWebRequest` — the only HTTP client available in
+is a Unity coroutine using `UnityWebRequest`, the only HTTP client available in
 KSP's Mono runtime.
 
 **Request flow:**
@@ -395,10 +419,10 @@ KSP's Mono runtime.
    client shows `UpdateRequiredWindow` and blocks further API calls until the
    player updates. The `NotificationSocket` also triggers a re-check when it
    receives a `"version"` frame. Acknowledging the gate drops the client into
-   **limited mode** — only panels declaring `WorksOffline` (Tools, Settings)
+   **limited mode**, only panels declaring `WorksOffline` (Tools, Settings)
    render, behind a banner offering Re-check / Download latest.
 4. **Device binding (HTTP 403 `device_verify`)**: The player's device hasn't
-   been approved yet — `DeviceVerifyWindow` is shown with instructions to
+   been approved yet: `DeviceVerifyWindow` is shown with instructions to
    approve from Discord.
 5. **Suspension (HTTP 403 `suspended`)**: routed to
    `GeneKermanMod.OnSuspended` → `SuspendedWindow`. The session token is
@@ -407,9 +431,9 @@ KSP's Mono runtime.
 
 **Persistence** (all under `PluginData/`):
 
-- `session.token` — the current 30-day signed session token
-- `sessions.cfg` — known sessions
-- `settings.cfg` — user configuration (see [Configuration](#configuration))
+- `session.token`: the current 30-day signed session token
+- `sessions.cfg`: known sessions
+- `settings.cfg`: user configuration (see [Configuration](#configuration))
 
 Note that `settings.cfg` stores the server as separate `serverProtocol` /
 `serverHost` / `serverPort` values, never as a URL: `//` is a comment delimiter
@@ -418,11 +442,11 @@ same way.
 
 **Key methods:**
 
-- `Get(path, callback)` / `Post(path, json, callback)` — generic REST calls
-- `UploadVessel(...)` — multipart form upload (vessel node + blueprint PNG +
+- `Get(path, callback)` / `Post(path, json, callback)`: generic REST calls
+- `UploadVessel(...)`: multipart form upload (vessel node + blueprint PNG +
   craft file + screenshot + metadata JSON)
-- `DownloadCraft(url, callback)` — downloads a `.craft` file
-- `GetWsTicket(callback)` — obtains a single-use WebSocket auth ticket
+- `DownloadCraft(url, callback)`: downloads a `.craft` file
+- `GetWsTicket(callback)`: obtains a single-use WebSocket auth ticket
 
 **Challenge-response attestation:**
 
@@ -430,7 +454,7 @@ The server can send a challenge (nonce + offset + length). `ModVersion.AttestDig
 hashes `SHA256(nonce || dll_bytes[offset..offset+length])` and returns the
 digest, proving the player is running an unmodified official DLL.
 
-### Real-Time Push — `NotificationSocket`
+### Real-Time Push: `NotificationSocket`
 
 `NotificationSocket` maintains a persistent WebSocket connection for
 server-pushed events (contract updates, vessel deliveries, version pokes).
@@ -469,11 +493,11 @@ server-pushed events (contract updates, vessel deliveries, version pokes).
 ## Vessel & Craft Transfer Pipeline
 
 Vessel transfer is the mod's most complex subsystem. There are two transfer
-paths — **live vessel** (in-flight `ProtoVessel` serialization) and **craft
-file** (`.craft` blueprint from the editor or on disk) — each with its own
+paths: **live vessel** (in-flight `ProtoVessel` serialization) and **craft
+file** (`.craft` blueprint from the editor or on disk), each with its own
 export/import chain.
 
-### Serialization — `VesselTransfer`
+### Serialization: `VesselTransfer`
 
 `VesselTransfer` handles the core serialization of vessels and crafts using
 KSP's `ConfigNode` system.
@@ -499,7 +523,7 @@ KSP's `ConfigNode` system.
    `GKFLAG` nodes.
 3. `CkanGenerator.ExtractCheckAndStripMods()` strips and processes `GKMODS`.
 4. `PartAliases.ApplyToVesselNode()` substitutes missing parts for the local
-   equivalents — **before** the two reconcile passes, because a substituted part
+   equivalents, **before** the two reconcile passes, because a substituted part
    is a different prefab with different modules.
 5. `TextureTransfer.ExtractCheckAndStripFromNode()` checks or reconciles the
    paint job.
@@ -513,9 +537,9 @@ KSP's `ConfigNode` system.
 9. The vessel is injected into the current game via
    `FlightGlobals.Vessels.Add()` / `ProtoVessel.Load()`.
 
-**Export (sending a `.craft` file):** every export path — contract submission
-(×2), quicksend (×2), marketplace listing, export-to-file (×2), and the
-blueprint attached to a vessel transfer — runs the **same** chain, in this
+**Export (sending a `.craft` file):** every export path (contract submission
+×2, quicksend ×2, marketplace listing, export-to-file ×2, and the
+blueprint attached to a vessel transfer) runs the **same** chain, in this
 order:
 
 ```
@@ -534,22 +558,22 @@ and never re-serialize the craft body via `ConfigNode.ToString()`, which would
 wrap it in a spurious `root {}` node that KSP's craft loader rejects.
 
 **Import (receiving a `.craft` file):** handled by `CraftInstaller.Install()` in
-strict reverse-append order — see below.
+strict reverse-append order (see below).
 
 **Ownership and removal:** transferred kerbals are tagged `"{owner}'s {name}"`
 while they live in someone else's save (`ApplyOwnershipTag`, reversible), which
 makes an *untagged* roster name the test for "this one is mine".
 `RemoveVesselFromSave` leans on that: giving a craft up calls `Vessel.Die()`,
-which kills whoever is aboard, so every removal also decides a `CrewFate` —
+which kills whoever is aboard, so every removal also decides a `CrewFate`:
 `LeavesWithCraft` for the issuer of a rescue, `BorrowedOnly` for its rescuer.
 The fate is chosen where the removal is *queued* (only that caller knows which
 side this is) and rides the persisted queue, because the removal itself can run
 sessions later. `PurgeBorrowedGhostCrew` sweeps borrowed kerbals left dead or
-missing by a craft that vanished before its removal ran — not cosmetic, since
+missing by a craft that vanished before its removal ran, not cosmetic, since
 KSP counts them against the astronaut-complex hire limit and refuses any new
 applicant name that is a substring of an existing roster name.
 
-### Data Collection — `VesselDataCollector`
+### Data Collection: `VesselDataCollector`
 
 `VesselDataCollector` captures vessel telemetry for submission metadata:
 
@@ -563,7 +587,7 @@ applicant name that is a substring of an existing roster name.
   craft by name
 - **`CaptureScreenshot()`**: saves a PNG via `ScreenCapture.CaptureScreenshot()`
 
-### Craft Installation — `CraftInstaller`
+### Craft Installation: `CraftInstaller`
 
 `CraftInstaller.Install()` is the single entry point for writing a received
 craft to disk:
@@ -571,10 +595,10 @@ craft to disk:
 1. Decompresses gzip-compressed craft data (magic bytes `0x1F 0x8B`)
 2. Strips side-channel blocks in **exact reverse** of the export order:
    `GKTHUMB → GKMODS → GKRF → GKTU → GKTSVER → GKFLAG`
-3. `PartAliases.ApplyToCraft()` — substitute missing parts
-4. `TextureTransfer.ReconcileCraftBody()` — keep the recolour modules the local
+3. `PartAliases.ApplyToCraft()`: substitute missing parts
+4. `TextureTransfer.ReconcileCraftBody()`: keep the recolour modules the local
    prefabs accept, drop the ones they can't
-5. `RealFuelsTransfer.ReconcileCraftBody()` — check on an RF install, reconcile
+5. `RealFuelsTransfer.ReconcileCraftBody()`: check on an RF install, reconcile
    to local fuels on one without
 6. Parses the craft type header (`type = VAB|SPH`)
 7. Writes to `saves/<save>/Ships/<type>/` with collision-avoidance numbering
@@ -592,7 +616,7 @@ craft to disk:
 ## Side-Channel Data Blocks
 
 The mod carries auxiliary data alongside vessel/craft transfers using a system
-of **side-channel blocks** — structured text nodes appended to or embedded
+of **side-channel blocks**, structured text nodes appended to or embedded
 within KSP's `ConfigNode` serialization format.
 
 For `.craft` files (raw text), blocks are **appended at the end** and
@@ -611,18 +635,18 @@ GKTHUMB  { ... }           ← appended last,   stripped first
 Order is load-bearing in both directions. Each stripper cuts from its own marker
 to end of file, so stripping out of order takes later blocks with it. One useful
 consequence: an **older client** receiving a craft that carries `GKRF` loses
-nothing — its `GKTU` strip cuts to end of file and removes `GKRF` along the way.
+nothing: its `GKTU` strip cuts to end of file and removes `GKRF` along the way.
 
 For vessel `ConfigNode`s, blocks are embedded as child nodes (`GKFLAG`,
 `GKCREW`, `GKMODS`, `GKTU`, `GKRF`) and removed after extraction.
 
 Three of these blocks exist for the same reason: **the mod adds no parts.**
 TweakScale, Textures Unlimited and RealFuels all configure *existing* parts, so
-every mod-detection path in this codebase — all of which resolve parts →
-GameData folder via `AvailablePart.partUrl` — is blind to them. The block is
+every mod-detection path in this codebase, all of which resolve parts →
+GameData folder via `AvailablePart.partUrl`, is blind to them. The block is
 what carries the fact a part name cannot express.
 
-### Custom Flags — `FlagTransfer`
+### Custom Flags: `FlagTransfer`
 
 **Problem:** KSP stores flags as GameData-relative paths (e.g.
 `MyFlags/eagle`). When a craft moves to another player who doesn't have that
@@ -639,7 +663,7 @@ image, KSP shows a missing decal.
    `.dds`, `.jpg`, `.jpeg`, `.truecolor`, `.mbm`, `.tga`).
 4. Compute `SHA-256(imageBytes)` → new URL = `GeneKerman/Flags/<hex>`.
 5. Rewrite all flag references in the node/craft to the content-addressed path.
-6. Encode image as URL-safe base64 (`+`→`-`, `/`→`_`, no padding) — standard
+6. Encode image as URL-safe base64 (`+`→`-`, `/`→`_`, no padding): standard
    base64's `/` would be parsed as a comment delimiter by `ConfigNode`.
 7. Append as `GKFLAG` nodes with `url`, `ext`, and `data` values.
 
@@ -656,13 +680,13 @@ image, KSP shows a missing decal.
 player-imported flags with short random ids (`Squad/Flags/UtB0nwS`), so two
 players' identically-named flags are different pictures. A hash can only be
 computed from the bytes, and a URL is only rewritten for a flag whose bytes were
-read — so a `GeneKerman/Flags/<hash>` URL in a craft is **proof the sender held
+read, so a `GeneKerman/Flags/<hash>` URL in a craft is **proof the sender held
 the image**. A reference that doesn't resolve on arrival was lost in transit,
 never missing at export.
 
-**Dangling references are reset at both ends** — `Unresolvable` on export,
+**Dangling references are reset at both ends**: `Unresolvable` on export, and
 `ResetDanglingFlagsInText` / `InNode` on import (always *after* the carried flags
-are installed) — back to `Squad/Flags/default`. Left alone the problem is
+are installed), both back to `Squad/Flags/default`. Left alone the problem is
 self-perpetuating rather than cosmetic: a re-export finds no file, embeds
 nothing, and ships the same dead URL onward, while every module resolving it
 errors. And not always in its own name: `ModuleConformalFlag` with
@@ -670,14 +694,14 @@ errors. And not always in its own name: `ModuleConformalFlag` with
 surfaces as a ConformalDecals exception mid-`OnLoad` (the stock flag decals only
 warn).
 
-A conformal decal carrying its own `flagUrl` transfers like any other reference —
+A conformal decal carrying its own `flagUrl` transfers like any other reference:
 `CollectFlagUrls` matches any flag-keyed value that looks like a path.
 
 > The URL-safe base64 is not a style choice. A raw `//` pair makes `ConfigNode`
 > treat the rest of the value as a comment and silently truncate the image, which
 > is the bug that minted the dangling references still sitting in the test saves.
 
-### TweakScale Bridge — `ScaleBridge` / `GeneKermanScale` / `TweakScaleGuard`
+### TweakScale Bridge: `ScaleBridge` / `GeneKermanScale` / `TweakScaleGuard`
 
 **The problem:** TweakScale rescales parts using a factor + exponent table.
 Different TweakScale versions/forks produce different final values from the same
@@ -734,7 +758,7 @@ ModuleRCSFX / ModuleRCS        : thrusterPower
 ModuleReactionWheel            : PitchTorque, YawTorque, RollTorque
 ```
 
-Resources are NOT handled — `maxAmount` is already persistent in KSP's
+Resources are NOT handled: `maxAmount` is already persistent in KSP's
 serialization and reconstructs correctly without intervention.
 
 #### `ScaleEditorReapply` (undo/redo fix)
@@ -748,29 +772,29 @@ re-projection) without re-running `OnStart`.
 
 The backstop for a bake that bailed or threw, and the version-mismatch warning.
 
-- **Export**: Appends a `GKTSVER { ver = <version> }` block — but only to crafts
+- **Export**: Appends a `GKTSVER { ver = <version> }` block, but only to crafts
   where something is **actually rescaled**.
 - **Import**: Compares the sender's version against the local install. Posts a
   screen warning if TweakScale is missing or the version differs.
 
 > The trigger is "is anything actually rescaled", never "does this craft mention
 > TweakScale". TweakScale attaches its module to every compatible part whether or
-> not you scale it, and `ScaleBridge` only strips the ones it snapshots — so a
+> not you scale it, and `ScaleBridge` only strips the ones it snapshots, so a
 > fully baked craft still carries TweakScale modules (roughly two thirds of them,
 > measured across real crafts). Matching the bare module name warned every
 > recipient of every baked craft about a mismatch that could not affect them.
 >
 > The check compares each module's `currentScale` against its `defaultScale`
-> using **the same epsilon as `ScaleBridge`** — the two must agree, or the guard
+> using **the same epsilon as `ScaleBridge`**, the two must agree, or the guard
 > would fire on exactly the parts `ScaleBridge` judged unscaled and left behind.
 > A module whose fields are absent or unparseable is treated as scaled: silence
 > has to be earned.
 - **Version detection**: Probes `AssemblyLoader.loadedAssemblies` for the
-  `Scale` assembly (exact name match — avoids companions like
+  `Scale` assembly (exact name match, avoids companions like
   `TweakScaleCompanion_*` or `Scale_Redist`). Falls back to whichever assembly
   defines `TweakScale.TweakScale`.
 
-### Textures Unlimited — `TextureTransfer`
+### Textures Unlimited: `TextureTransfer`
 
 Carries a craft's **Textures Unlimited** paint job across a transfer, and
 guarantees a TU-painted craft still loads for someone who hasn't got TU.
@@ -782,8 +806,8 @@ along. What it lacks is two things a part name cannot express.
 
 **Which mod.** TU adds zero parts, so the part walk cannot see it. The fix is to
 resolve each referenced texture set back to the GameData folder of the config
-that *defines* it (`GameDatabase`'s `KSP_TEXTURE_SET` entries) — knowable only
-on the sender's machine — and carry that in the `GKTU` block. That block also
+that *defines* it (`GameDatabase`'s `KSP_TEXTURE_SET` entries), knowable only
+on the sender's machine, and carry that in the `GKTU` block. That block also
 feeds `CkanGenerator.ResolveMods`, which turns a missing recolour pack into an
 installable CKAN modpack, and `ToolActions`, which unions
 `TexturePackFoldersForCraft` into the marketplace mod tags and sends
@@ -794,14 +818,14 @@ still on the craft.
 
 **A clean load without it.** On import, `ReconcileCraftBody` keeps every
 recolour module the local prefab accepts and drops the ones it can't, so the
-craft arrives either fully painted or in stock colours — never with orphan
+craft arrives either fully painted or in stock colours, never with orphan
 module nodes. The per-part prefab check is what catches the case a folder check
 cannot: TU installed, but not the pack that patches *this* part. It is
 deliberately **not** consulted when TU is absent entirely, since it answers
 "leave it alone" for a part it can't find and a craft can arrive with missing
 parts.
 
-The texture *files* are never embedded — a set is DDS art belonging to the pack
+The texture *files* are never embedded: a set is DDS art belonging to the pack
 author, far too big for a craft transfer and not ours to redistribute. This is a
 manifest plus a guard, not a copy.
 
@@ -812,14 +836,14 @@ variant degrades to "carried but not understood" instead of to a broken craft.
 > Not to be confused with **TUFX**, which is scene-wide post-processing and
 > carries nothing per-craft.
 
-### RealFuels / Realism Overhaul — `RealFuelsTransfer`
+### RealFuels / Realism Overhaul: `RealFuelsTransfer`
 
 Carries a craft's **RealFuels / Realism Overhaul** fuel-and-engine configuration,
 and guarantees an RF-configured craft still loads for someone without RealFuels.
 
-Like TU, RF adds zero parts — it configures existing ones via `ModuleFuelTanks`
+Like TU, RF adds zero parts: it configures existing ones via `ModuleFuelTanks`
 (tank type + `TANK` nodes), `ModuleEngineConfigs` (selected config) and its
-`ModuleEnginesRF` engine replacement — and the config state already rides in the
+`ModuleEnginesRF` engine replacement, and the config state already rides in the
 craft's MODULE/RESOURCE nodes, so two RSS-RO players exchange working crafts
 with no help at all.
 
@@ -830,7 +854,7 @@ What the `GKRF` block adds:
 - each tank **type** resolved to the GameData folder whose `TANK_DEFINITION`
   declares it (the same `GameDatabase` lookup `TextureTransfer` does for
   `KSP_TEXTURE_SET`)
-- the selected engine-config **names** — names only, because ModuleManager
+- the selected engine-config **names**: names only, because ModuleManager
   merges a `CONFIG` into the part config and its origin folder is unrecoverable.
   Those are checked recipient-side against the local post-patch `PART` config.
 
@@ -840,7 +864,7 @@ engine configs, and an RO ↔ non-RO environment mismatch are each reported once
 **On import without RF**: a reconcile. The RF module nodes and every part-level
 `RESOURCE` naming a locally-undefined propellant are dropped, so parts refill
 from their local prefabs and the craft arrives in local fuels instead of
-half-loaded — with the caveat stated that the design was balanced for other
+half-loaded, with the caveat stated that the design was balanced for other
 physics.
 
 The reverse hazard needs no manifest: a craft with propulsion but no RF state
@@ -848,15 +872,15 @@ arriving on an **RO** install is warned about locally, since RO's patches
 re-plumb it on load. Plain-RF installs stay quiet.
 
 The generated CKAN modpack lists RealFuels and any missing tank packs but
-**never RO** — RO is an environment, not a dependency, so like a DLC it is named
+**never RO**: RO is an environment, not a dependency, so like a DLC it is named
 in the warning and kept out of the `.ckan`. Marketplace listings get the RF
 folders (including `RealismOverhaul` as a visible tag) unioned into their mod
 tags, exactly as TU packs are.
 
 Gated by `enableFuelConfigTransfer` (default on); switched off it still scans
-and warns but writes nothing — the `PartAliases` contract.
+and warns but writes nothing: the `PartAliases` contract.
 
-### CKAN Mod Dependency — `CkanGenerator`
+### CKAN Mod Dependency: `CkanGenerator`
 
 **Problem:** A `.craft` stores only part *names*, never which mod each part
 came from. A recipient who's missing a mod just sees "this craft has missing
@@ -866,13 +890,13 @@ parts" with no way to know what to install.
 on import.
 
 **A GameData folder is not a mod.** The whole file is built around not confusing
-the two — see [A note on mod detection](#a-note-on-mod-detection). CKAN's
+the two (see [A note on mod detection](#a-note-on-mod-detection)). CKAN's
 `registry.json` is indexed by **install path**, and a part resolves through the
 longest path prefix exactly one module owns; a prefix two modules share is left
 out of the index so the walk drops past it rather than guessing.
 
 Getting this wrong broke both directions at once. On export the arbitrary winner
-was usually the *companion* module — which, having no parts, is the one useless
+was usually the *companion* module, which, having no parts, is the one useless
 thing to hand CKAN. On import, a recipient holding only the companion read as
 already having the mod, so no `.ckan` and no warning were produced at all.
 
@@ -884,8 +908,8 @@ already having the mod, so no `.ckan` and no warning were produced at all.
    sender **without** CKAN has nothing to resolve against and still reports the
    bare folder.
 3. Include inventory items (stock `ModuleInventoryPart` STOREDPART nodes, KIS
-   `ModuleKISInventory` ITEM nodes) — parts inside containers would otherwise
-   be missed.
+   `ModuleKISInventory` ITEM nodes), because parts inside containers would
+   otherwise be missed.
 4. Embed as a `GKMODS` block with `MOD { folder, path, ckan, name }` entries.
    `path` is what carries the answer and what the recipient-side check tests; it
    is absent from blocks written by older clients, so every read falls back to
@@ -897,7 +921,7 @@ already having the mod, so no `.ckan` and no warning were produced at all.
 2. Diff against `GameData/` directories to find missing mods.
 3. For missing mods, generate a `.ckan` metapackage file in
    `<KSP>/GeneKerman_MissingMods/<context>.ckan`.
-4. Show a persistent notification: "⚠ Missing N mod(s) — open the .ckan file
+4. Show a persistent notification: "⚠ Missing N mod(s): open the .ckan file
    in CKAN."
 5. Write a `<craft>.gkmods` sidecar alongside the installed craft so the editor
    can re-check later.
@@ -907,22 +931,22 @@ listens for `onEditorLoad`. When a craft with a `.gkmods` sidecar is loaded, it
 re-runs missing-mod detection and regenerates the CKAN metapackage if needed.
 
 **Also used for the marketplace.** The same resolution names a part's mod on a
-listing (`MarketplaceModName` → "DeepFreeze", not "REPOSoftTech") — but only when
+listing (`MarketplaceModName` → "DeepFreeze", not "REPOSoftTech"), but only when
 the resolved root actually contains the part, so a plugin-only sibling rooted at
 `SomeMod/Plugins` cannot lend its subfolder name to a part living under
 `SomeMod/Parts`. `ResolveMods` is also the hook `TextureTransfer` and
 `RealFuelsTransfer` use to add dependencies the part walk can never reach.
 
-### Part Substitution — `PartAliases`
+### Part Substitution: `PartAliases`
 
 `CkanGenerator` answers "which **mod** is missing?". `PartAliases` answers the
 narrower and more common question: "this exact **part** isn't here, but the same
 thing is, under another name." It runs on both the `.craft` and VESSEL-node
-import paths, and stays quiet when the recipient has the mod but not that part —
+import paths, and stays quiet when the recipient has the mod but not that part,
 the gap `CkanGenerator` cannot see.
 
 The motivating case is Making History's `InflatableAirlock` versus ReStock+'s
-`restock-airlock-1` — the same object under two names, since ReStock retextures
+`restock-airlock-1`, the same object under two names, since ReStock retextures
 the DLC part with the very asset ReStock+ builds its DLC-free stand-in from.
 
 That is also how the table was derived, **mechanically rather than by eye**: two
@@ -930,8 +954,8 @@ parts are listed as the same thing only when ReStock's DLC patch and the ReStock
 stand-in resolve to the same `ReStock/Assets/...` model, which proves identical
 geometry and attach nodes.
 
-Shared art does *not* prove shared balance — ReStock+ reuses the Wolfhound's and
-Skiff's bells for much smaller engines — so those live in a separate
+Shared art does *not* prove shared balance: ReStock+ reuses the Wolfhound's and
+Skiff's bells for much smaller engines, so those live in a separate
 **`LookAlikes`** list that is only ever reported, never substituted.
 
 Substitution runs in **both directions**, because ReStock+ *hides* its stand-ins
@@ -945,11 +969,11 @@ just as advice rather than as changes made. Every swap plus anything still
 missing is reported in one notification.
 
 > This file is the **source of truth** for the pairs. The bot's copy at
-> `data/part_aliases.py` is generated from it by
+> `data/part_aliases.py`, in the [server repo](https://github.com/Boundless-Missions/boundlessmissions-server), is generated from it by that repo's
 > `python tools/gen_part_aliases.py` and must be regenerated when the table
 > changes.
 
-### Craft Thumbnails — `CraftThumb`
+### Craft Thumbnails: `CraftThumb`
 
 **Problem:** A freshly-installed `.craft` has no entry in KSP's `thumbs/`
 folder, so the craft browser shows a green placeholder.
@@ -962,16 +986,16 @@ craft.
 then appends it as a `GKTHUMB { data = <base64> }` block.
 
 **Import:** `CraftInstaller` strips the block, decodes the PNG, and writes it
-to `thumbs/<save>_<VAB|SPH>_<craftname>.png` — the exact path KSP's craft
+to `thumbs/<save>_<VAB|SPH>_<craftname>.png`, the exact path KSP's craft
 browser looks up.
 
 ---
 
 ## Visual Rendering
 
-### Blueprint Renderer — `VesselRenderer`
+### Blueprint Renderer: `VesselRenderer`
 
-`VesselRenderer` produces clean blueprint images of vessels — the primary visual
+`VesselRenderer` produces clean blueprint images of vessels, the primary visual
 submitted with missions. It shoots **8 views** of the craft (6 orthographic + 2
 perspective) and composites them onto a blueprint sheet; the same machinery
 renders the NW craft-browser thumbnail embedded in shared `.craft` files. A
@@ -1010,7 +1034,7 @@ for the `CraftThumb` system.
 
 **Deferred** (blackrack) replaces every part and suit shader game-wide and
 prepares only its own cameras. A third-party camera rendering those shaders on
-the forward path therefore draws *nothing* in the flight scene — the clears run,
+the forward path therefore draws *nothing* in the flight scene: the clears run,
 zero fragments land. (The editor happens to survive, which is what made this look
 scene-specific rather than shader-specific.)
 
@@ -1025,13 +1049,13 @@ instead. That needs two workarounds, both handled inside `VesselRenderer`:
 
 Without Deferred, the stock forward + MSAA path is untouched.
 
-### ConformalDecals Capture — `DecalCapture`
+### ConformalDecals Capture: `DecalCapture`
 
 Layer isolation only moves things that *have* a `Renderer`, and a conformal
 decal has none. `ModuleConformalDecal` (and its `ModuleConformalFlag` /
 `ModuleConformalText` subclasses) hooks `Camera.onPreCull` and `Graphics.DrawMesh`es
 the **target part's** mesh with its projection material on a hardcoded **layer 0**.
-Every decal — image, flag and text alike — was therefore culled out of the
+Every decal (image, flag and text alike) was therefore culled out of the
 blueprint and out of the shared-craft thumbnail, while KSP's own thumbnail camera
 showed them.
 
@@ -1044,12 +1068,12 @@ It also generates the texture of any **text** decal that has never rendered: a
 text decal's lettering is a runtime-rendered texture, and the module's fields
 carry the string while nothing is drawn until `UpdateText` has run once.
 
-All reflection, like the LifeSupport adapters — no ConformalDecals reference in
+All reflection, like the LifeSupport adapters, no ConformalDecals reference in
 the build, and a no-op without the mod.
 
-### Cinematic Capture — `CinematicCapture`
+### Cinematic Capture: `CinematicCapture`
 
-`CinematicCapture` produces "hero shots" — real in-game screenshots at flight
+`CinematicCapture` produces "hero shots": real in-game screenshots at flight
 milestones with the vessel, skybox, and objects of interest in frame.
 
 **Camera pose computation (`ComputePose`):**
@@ -1083,7 +1107,7 @@ Three framing modes:
 
 ## Mission Contract System
 
-### Contract Integration — `ContractIntegration`
+### Contract Integration: `ContractIntegration`
 
 `GKContractScenario` is a `ScenarioModule` registered for Space Center, Flight,
 and Tracking Station. It bridges API contracts to KSP's stock contract system.
@@ -1102,7 +1126,7 @@ Persistence uses `OnLoad` / `OnSave` with `CONTRACT_MAPPINGS` and
 `IMPORTED_VESSELS` ConfigNodes, defensively guarded to never let an exception
 escape into KSP's `ScenarioRunner`.
 
-### Contract Constraints — `ContractConstraints` / `PartClassifier`
+### Contract Constraints: `ContractConstraints` / `PartClassifier`
 
 `ContractConstraints` parses the `constraints` object from the API and enforces
 part-usage rules:
@@ -1129,13 +1153,13 @@ part-usage rules:
 **Crew professions** are matched by the exact `ProtoCrewMember.trait` string on
 both ends, which is what lets a contract written on a modded install still mean
 something on one without it. Which *mod* defines a modded profession is the one
-thing that string cannot express and no part walk can recover — so it is written
+thing that string cannot express and no part walk can recover, so it is written
 down twice and kept in sync by comment: `ContractConstraints.TraitMods` here and
 `data/mission_constraints.py::_TRAIT_MODS` on the bot (the same convention as
 `PartClassifier.GetEngineCategories` ↔ `ENGINE_CATEGORIES`).
 
 Both tables are **closed**: an unlisted profession yields no mod name rather than
-a guessed one. And only a *floor* names its mod — a ceiling ("no Kolonists") is
+a guessed one. And only a *floor* names its mod: a ceiling ("no Kolonists") is
 satisfied by not having the mod, so naming it would read as advice to install
 something in order to obey a ban.
 
@@ -1149,7 +1173,7 @@ something in order to obey a ban.
   `ModuleParachute` → parachute)
 - Falls back to title keyword matching for categories like "ladder", "RTG"
 
-### Editor Enforcement — `EditorPartEnforcer`
+### Editor Enforcement: `EditorPartEnforcer`
 
 A `KSPAddon(EditorAny)` that registers an `EditorPartListFilter` to hide parts
 from the VAB/SPH palette during an active contract:
@@ -1160,7 +1184,7 @@ from the VAB/SPH palette during an active contract:
 - **Constraint filtering**: Parts that match `ContractConstraints.IsForbidden()`
   are hidden.
 
-### Delta-V Validation — `CraftDeltaV`
+### Delta-V Validation: `CraftDeltaV`
 
 `CraftDeltaV.TotalVacuum()` reads the stock `VesselDeltaV.TotalDeltaVVac`:
 - In the editor: the full-fuel design value
@@ -1168,7 +1192,7 @@ from the VAB/SPH palette during an active contract:
 - Returns `-1` when unavailable (Δv readout disabled, calc not ready), and
   callers skip the check rather than failing
 
-### Orbit Constraints — `OrbitConstraint`
+### Orbit Constraints: `OrbitConstraint`
 
 A contract's orbital-regime requirement, parsed from the `orbit` sub-object the
 bot attaches to `constraints` when the mission text names a specific orbit
@@ -1177,12 +1201,12 @@ bot attaches to `constraints` when the mission text names a specific orbit
 It drives the submit-button gate: a craft whose reported orbital elements don't
 match is blocked before upload, and the bot re-checks authoritatively on
 `/submit`. Schema and tolerances mirror `data/orbit_constraints.py` and the
-`ORBIT_*` values in `settings.py`.
+`ORBIT_*` values in `settings.py`, both in the [server repo](https://github.com/Boundless-Missions/boundlessmissions-server).
 
-Unlike part limits there is **no editor enforcement** — an orbit is a flight
+Unlike part limits there is **no editor enforcement**, an orbit is a flight
 state, not a part choice.
 
-### Submission — `SubmissionSession`
+### Submission: `SubmissionSession`
 
 `SubmissionSession` is the whole submission flow with the drawing taken out: the
 classification rules a mission is submitted under, the scene/vessel validation
@@ -1195,13 +1219,13 @@ the coroutine that packs and uploads everything.
 |------|------------------|-------|
 | `craft_build` | VAB / SPH | craft file + blueprint render / screenshot |
 | `active_vessel` | Flight | craft + `.loadmeta` + telemetry + renders |
-| `flag_design` | — | Discord only (there is no in-game flag upload) |
+| `flag_design` |: | Discord only (there is no in-game flag upload) |
 
 `CollectUsedModFolders` builds the dependency list that rides with the
 submission. It deliberately **omits TweakScale**: a baked craft does not need it.
 
 The screen itself is `UI/Gui/Panels/SubmitPanel.cs`, mounted in a draggable
-`FloatWindow` rather than as a sidebar tab — submitting is read *against* the
+`FloatWindow` rather than as a sidebar tab, submitting is read *against* the
 scene behind it (the craft on the build stage, the navball in flight), and a
 centred panel that owns the middle of the screen is the wrong shape for that.
 The window pauses Physics Range Extender while it is up, which is why
@@ -1212,9 +1236,9 @@ all close it behind the panel's back.
 
 ## Life Support, Rescue & Save Repair
 
-### Life Support Adapters — `LifeSupport/`
+### Life Support Adapters: `LifeSupport/`
 
-All of this is **reflection-only** — the build references no life-support mod,
+All of this is **reflection-only**: the build references no life-support mod,
 and every call is a safe no-op when the target isn't installed.
 
 | Piece | Role |
@@ -1223,7 +1247,7 @@ and every call is a safe no-op when the target isn't installed.
 | `UsiLsAdapter`, `TacLsAdapter`, `SnacksAdapter`, `KerbalismAdapter`, `DeepFreezeAdapter` | One adapter per optional mod |
 | `LsReflect` | Defensive reflection helpers shared by all of them |
 | `LifeSupportRegistry` | Which LS mods are installed here, and which one this install *runs* |
-| `LifeSupportScan` | Which mod a craft is provisioned for and for how long — the flag shown on marketplace listings and contract embeds |
+| `LifeSupportScan` | Which mod a craft is provisioned for and for how long: the flag shown on marketplace listings and contract embeds |
 
 "Provisioned for" means which installed consumption mod's resources the craft
 actually carries (`Supplies` → USI, `Food`/`Water`/`Oxygen` → TAC or Kerbalism,
@@ -1235,13 +1259,13 @@ Rates are declared once per adapter (`DailyNeedPerKerbal`) and feed both the
 endurance display and the ration kit. Kerbalism's are read from its live
 `Profile.rules` rather than guessed.
 
-### Emergency Freeze — `RescueImmunityGuardian`
+### Emergency Freeze: `RescueImmunityGuardian`
 
 This is what makes a rescue work between two players on **different** life-support
 mods. It is three things, and all three have to hold:
 
 1. **`RescueImmunityGuardian`** lifts the stranded crew out of the simulation
-   entirely — each kerbal is removed from the wreck (remembering their part and
+   entirely, each kerbal is removed from the wreck (remembering their part and
    seat) and parked at `rosterStatus = Dead` so KSP's respawn timer cannot revive
    them behind our back. Nothing consumes a kerbal that isn't aboard a vessel,
    so this holds uniformly across USI-LS, TAC-LS, Snacks and Kerbalism with no
@@ -1255,13 +1279,13 @@ mods. It is three things, and all three have to hold:
    wreck built for TAC carries nothing a USI save recognises.
    (`emergencyRationDays`, default 3.)
 
-Crew thaw automatically at 10 km — outside load range, so the wreck is still
-unloaded and KSP seats them on load — or from a button.
+Crew thaw automatically at 10 km, outside load range, so the wreck is still
+unloaded and KSP seats them on load, or from a button.
 
 A thaw is **two** releases, not one, because the freeze imposes two states: the
 LS mods have to let go (`LsFreeze.Thaw`) and so does the roster
 (`ReleaseParked`). Every path that drops a freeze record must therefore thaw
-first — including the path where the wreck is already gone, since Kerbalism's
+first, including the path where the wreck is already gone, since Kerbalism's
 `disabled` flag is saved and a kerbal frozen but never thawed would be exempt
 from life support forever. Any path that drops a record without seating the crew
 must release them too: ours back to `Available`, borrowed ones out of the roster.
@@ -1270,17 +1294,17 @@ shows as kerbals simply missing from the Available tab.
 
 Gated by `enableEmergencyFreeze` (default on).
 
-### Trait Repair — `TraitRepair`
+### Trait Repair: `TraitRepair`
 
 Repairs a save whose roster holds a kerbal with a profession no installed mod
-defines — the state `VesselTransfer.ApplyTrait` refuses to *create*, arrived at
+defines: the state `VesselTransfer.ApplyTrait` refuses to *create*, arrived at
 by uninstalling a mod between sessions.
 
 It is not cosmetic. A trait string is just a name; KSP resolves it to an
 `EXPERIENCE_TRAIT` config on demand, and when nothing matches, `pcm.trait` keeps
 the unresolvable name while `pcm.experienceTrait` stays null. Every stock screen
 built out of `CrewListItem` (Astronaut Complex, crew assignment) reads
-`experienceTrait.Title` and NullRefs part-way through drawing the list — taking
+`experienceTrait.Title` and NullRefs part-way through drawing the list, taking
 out the rest of the list, the other tabs, and any chance of telling which kerbal
 caused it.
 
@@ -1291,7 +1315,7 @@ Three things make the repair safe:
 - `TraitRepair.Repair` runs **only from a button**, and copies the original into
   `PluginData/trait_repairs.cfg` **before** overwriting it.
 - `RestoreRecovered` hands the profession back by itself once the defining mod is
-  installed again — which makes the repair a **loan**, not a deletion.
+  installed again, which makes the repair a **loan**, not a deletion.
 
 Records are keyed by save folder as well as kerbal name, and are dropped only
 once the profession is safely back on the kerbal (or the player has moved that
@@ -1300,7 +1324,7 @@ deliberately share one record file, since they are the same loss.
 
 Two tables must not be confused: `ContractConstraints.TraitMods` is a **fact**
 (which mod owns a profession), while `TraitRepair.StockEquivalent` is a
-**usability guess** (which stock job is closest) — the same separation
+**usability guess** (which stock job is closest), the same separation
 `PartAliases` draws between substitutions and `LookAlikes`. Deciding what to
 *write* asks `CanDefine` (strict); deciding what is *broken* asks `IsDefined`
 (lenient, so an unready `GameDatabase` never reads as a roster full of broken
@@ -1309,14 +1333,144 @@ kerbals).
 The button is reachable two ways, via `LocalNotifActions`: as a button on the
 local notification (rendered and dispatched by `NotificationsPanel` without
 either front end knowing what the action does), and as a card in the sidebar's
-Tools panel — above the link gate and only while something is broken, so the fix
+Tools panel, above the link gate and only while something is broken, so the fix
 survives dismissing the notification.
+
+---
+
+## Anti-Cheat & Simulation Detection
+
+### `CheatDetection`
+
+A teleported vessel really is at the target, and its numbers are perfectly
+consistent, so a server-side telemetry check cannot see it. Only the client is
+present when it happens, so detection lives here.
+
+`CheatWatchdog` taints a vessel whose state breaks physics continuity. On rails
+the orbital elements are mathematically constant; off rails the position must
+extrapolate from last tick's position and velocity (in body-relative vectors, so
+floating-origin and Krakensbane shifts cancel); and a change of main body must
+happen at the SOI boundary. That catches F12 Set Position, Set Orbit and
+HyperEdit **by effect**, without knowing which tool did it. Two channels
+supplement it, because some cheats look physical: the stock `CheatOptions`
+toggles are read directly, and VesselMover's "currently moving" state is probed
+by defensive reflection.
+
+Every threshold prefers **false negatives**: grace ticks around every legitimate
+perturbation (scene load, dock/undock, staging, pack/unpack), a jump floor no
+thrust crosses in one tick, and the on-rails element rule switched off entirely
+under Principia and PersistentThrust, whose whole point is moving on-rails
+orbits.
+
+Grace forgives *derivatives* only, never state. Stock Set Orbit and Set Position
+teleport by way of the very pack/unpack events grace absorbs, so
+`CheckStateContinuity` judges state on every tick including grace ones. The
+invariant is **position-via-the-orbit**: propagate last tick's conic to now and
+compare against where the current conic says the vessel is. That was chosen over
+per-element checks after both of the latter's blind spots bit in testing.
+
+Taint is per vessel (`persistentId`), persisted so a quickload to before the
+cheat legitimately clears it, and it spreads via docking, undocking and EVA.
+`DebugMenuCheatWarning` is the companion surface: it writes a disqualification
+warning into the F12 screens' own error slot and hooks all three teleport
+buttons as a second, direct channel.
+
+Submissions always attach a `cheat_report` for exactly the submitted vessels. An
+explicit clean report is distinct from an old client that never checked, and the
+server treats only *tainted* as a verdict: absent reports pass, and
+`tools_installed` (HyperEdit merely present) is reviewer context, never grounds,
+because presence is not usage.
+
+### `SimulationDetection`
+
+RP-1/KCT's "Simulate" and KRASH are the RSS/RO test-flight loop. The physics
+inside a simulation is perfectly continuous, so the watchdog cannot see it and
+only the simulation mod can say. Each mod's own "simulation active" flag is
+probed by defensive reflection, the watchdog taints any vessel flown while one
+runs, and `SubmissionSession` refuses a flight submit outright before upload.
+Ending a simulation reverts the save, which rolls the taint store back with it,
+so a simulation leaves no mark on the real career. Editor (`craft_build`) submits
+are exempt, a blueprint having no flight to have simulated.
+
+---
+
+## Privacy: `StreamerMode`
+
+Hides other players' Discord avatars and Boundless usernames in the player
+pickers, either because the player asked (`hidePlayerDetails`) or because
+broadcasting software is running (`enableStreamerMode`).
+
+Detection copies Discord's approach, which is process-name matching against a
+short list, because no OS reports that a window is being captured. Three scans,
+tried in order and each only when the last found nothing: the managed process
+list; a `/proc` scan, which is what makes it work under **Proton**, since scan 1
+sees only the Wine prefix while a native Linux OBS lives outside it; and KSP's
+own loaded modules, where OBS Game Capture's injected `graphics-hook64.dll` is
+the one signal that means "capturing *this game*" rather than "running".
+
+Two rules hold the file together. **Nothing is scanned unless the switch is on**,
+because reading the list of programs somebody runs is itself an intrusion.
+And the scan runs **off the main thread**, because enumerating processes blocks.
+
+Unlike `CheatDetection` it prefers **false positives**: hiding an avatar that
+needed no hiding costs nothing, while missing one puts a face on a stream.
+Hiding means the avatar is never *fetched*, not merely not drawn. Nothing here is
+ever sent to the server.
+
+---
+
+## Landing a Transferred Craft: `SurfacePlacement`
+
+A landed vessel's `alt` is an altitude above **sea level**, so it only means
+anything against the terrain that produced it. Hand a craft parked on stock Duna
+to someone running Parallax and the same number is metres in the air or metres
+inside the hill, with nothing in the craft file to notice it by: both saves agree
+on every value and disagree about where the ground is.
+
+So the sender's ground level under the craft is carried in a `GKLAND` block, and
+the correction is **relative**: `alt = terrain_local + (alt_sender -
+terrain_sender)`, the only arithmetic that survives two installs disagreeing about
+the landscape.
+
+The last few metres are stock's job, and the real work is not letting KSP skip
+it. `Vessel.Load` clamps a landed craft up to the local PQS height, and
+`GoOffRails` then calls `CheckGroundCollision`, which raycasts the actual collider.
+But `GoOffRails` skips that whenever the vessel's stored `PQSMin`/`PQSMax` match
+the local PQS levels, which between two players on default terrain detail they
+do, precisely the case that needs it most. `ForceGroundReseat` therefore imports
+the vessel the way KSP *spawns* one, so the seating runs regardless. That flag
+alone fixes a craft at any wrong altitude, which is what makes the whole thing
+degrade gracefully for a client that never wrote `GKLAND`.
+
+`GKLAND` also carries the body **name**, because a VESSEL node names its world by
+an index into `FlightGlobals.Bodies` that a planet pack reorders, so a Minmus
+lander can otherwise arrive on Ike.
+
+---
+
+## Rescue Waypoints: `RescueWaypoints`
+
+A surface rescue's landing site is the whole job, and until this the rescuer was
+handed a coordinate and nothing else while KSP already owned the instrument for
+it. A stock FinePrint waypoint draws on the map, in the tracking station and,
+once activated, on the navball, which is what a landing is actually flown against.
+
+Four things shape it. Markers are **derived, never stored**, recomputed from the
+contract list the client already holds, so a contract ending anywhere takes its
+marker with it and nothing goes in the save. They **live and die with the map
+camera**, since `FinePrint.WaypointManager` is a component on the map camera's
+GameObject; entries are therefore invalidated rather than dropped, so the navball
+can still be cleared for a rescue that ended while there was no map at all.
+**Absent lat/lon is not 0°, 0°**: a rescue with the landing-site switch off means
+"anywhere on the body", so the test is presence, never value. And only active,
+incoming contracts are marked. Navigation is **offered, not forced**, because
+switching the player's navball target out from under them is not ours to do.
 
 ---
 
 ## Checkpoint & Milestone Detection
 
-### Checkpoint Detector — `CheckpointDetector`
+### Checkpoint Detector: `CheckpointDetector`
 
 Ticked each frame during flight. Detects milestones worth photographing:
 
@@ -1328,8 +1482,8 @@ Ticked each frame during flight. Detects milestones worth photographing:
   tracking runs every frame to catch the transition).
 
 **Event-driven detectors** (via `GameEvents`):
-- **EVA**: `onCrewOnEva` — a kerbal steps outside
-- **Staging**: `onStageActivate` — stage separation while in space (pad
+- **EVA**: `onCrewOnEva`: a kerbal steps outside
+- **Staging**: `onStageActivate`: stage separation while in space (pad
   staging is skipped)
 - **Orbit**: `onVesselSituationChange` → `ORBITING`
 - **Landing**: `onVesselSituationChange` → `LANDED`
@@ -1350,12 +1504,12 @@ the `CinematicCapture` coroutine.
 
 ## Identity & Security
 
-### Consent Gate — `Consent`
+### Consent Gate: `Consent`
 
 KSP's add-on rules (8.1) require an unambiguous in-game opt-in before any
 personally-identifiable information is gathered or sent. That consent is stored
-in its own file, `PluginData/consent.cfg` (node `GeneKermanConsent`) — separate
-from `settings.cfg` — so the agreement is an explicit, standalone record.
+in its own file, `PluginData/consent.cfg` (node `GeneKermanConsent`), separate
+from `settings.cfg`, so the agreement is an explicit, standalone record.
 
 - **Nothing is transmitted until it is accepted.** `ApiClient.TransmissionBlocked`
   short-circuits every request, and the link/login menu is gated behind it.
@@ -1364,13 +1518,13 @@ from `settings.cfg` — so the agreement is an explicit, standalone record.
 - The **required policy version is server-driven**: `/api/v1/version/check`
   returns `policy_version` (from `config/policy` in Firestore, set with the
   `/policyversion` admin command). When the server requires a newer version than
-  the one recorded, the mod blocks transmission and forces re-consent — a
+  the one recorded, the mod blocks transmission and forces re-consent, a
   fleet-wide re-consent with no mod rebuild.
 
 The opt-in is drawn by `UI/ConsentWindow.cs` in IMGUI, deliberately: porting it
 to the canvas would put the gate on the surface the gate exists to disable.
 
-### Device Identity — `DeviceId`
+### Device Identity: `DeviceId`
 
 A random GUID generated once and persisted to `PluginData/device.id`. It is:
 
@@ -1383,49 +1537,176 @@ The server blocks unrecognized device IDs until the user approves them from
 Discord. `GetKspLog()` is only used when the player files a moderation report;
 no hardware identifier is read at any point.
 
-### Version Integrity — `ModVersion`
+### Version Integrity: `ModVersion`
 
 - **`Current`**: Human-readable version string (e.g. `"1.0.0"`)
 - **`Sha256`**: SHA-256 hash of the running `GeneKerman.dll` on disk, computed
   once and cached. Sent to the server for version gating.
-- **`AttestDigest(nonce, offset, length)`**: Challenge-response —
+- **`AttestDigest(nonce, offset, length)`**: challenge-response,
   `SHA256(UTF8(nonce) || dll[offset..offset+length])`. The server recomputes
   the same over the published DLL; a mismatch means the client's DLL has been
   modified.
 
+### The Update Gate and its Grace Window
+
+The server compares `ModVersion.Sha256` against the published latest and answers
+`/api/v1/version/check`. A refused client raises `UI/UpdateRequiredWindow`, which
+blocks every server-backed feature; "Continue anyway" drops into **limited mode**,
+where only panels declaring `WorksOffline` (Tools, Settings) draw. That last part
+is the point: without it a client rejected by the official server would have no
+way to switch to a server that would accept it.
+
+Being out of date is **not** the same as being refused. CKAN is the recommended
+update route and it indexes and upgrades on its own schedule, so a build that was
+the published latest until recently is accepted and merely told it is behind. The
+client reads that from three fields:
+
+- **`up_to_date`** answers "may I proceed", not "am I newest", and is `true` for a
+  graced build. It has to be this field, because every client already shipped
+  treats `false` as "raise the blocking window" and knows nothing about grace.
+- **`update_available`** is the literal question, and drives the advisory notice.
+- **`grace_until`** is when this build stops being accepted.
+
+`NoticeUpdateAvailable` raises that as one non-blocking notification per session,
+carrying the **server's** own sentence when it sent one, so the update wording can
+be corrected without shipping a client. A deadline is only ever appended when it
+parsed, because a wrong date here is a wrong promise about when the mod stops
+working.
+
+`OnVersionGate` raises the same blocking window from any `426` on a gated
+request, so a modified DLL that skipped the startup check is still stopped on its
+first call.
+
+### Craft Hash Bans
+
+A ban names one *craft file* that must not circulate, which is the case between
+"this listing is bad" and "this player is bad". Every upload is fingerprinted
+three ways server-side (`exact` bytes, `design` including part positions rounded
+to the centimetre, and `parts` names alone) and a ban names which it enforces.
+
+The mod needed no change for this. All three refusals ride the `success:false`
+plus message path its panels already render, and quicksend only removes the
+sender's vessel on `ok`, so a refusal can never destroy a ship. Worth knowing
+while reading this file: a `.craft` is plain text, so anyone willing to open one
+in an editor gets past any hash of it, and nothing downstream may treat "got past
+the gate" as "safe".
+
 ### Service Suspensions
 
-A suspension is a **timed block on the API surface** — the KSP client and the
-website — issued from the owner console. It is deliberately *not* a Discord ban
-(`cogs/moderation.py` owns those) and not a wipe: balance, XP, contracts and
+A suspension is a **timed block on the API surface** (the KSP client and the
+website), issued from the owner console. It is deliberately *not* a Discord ban
+(the server repo's `cogs/moderation.py` owns those) and not a wipe: balance, XP, contracts and
 listings are untouched and waiting. There is no permanent option.
 
 Refusal is `403 {"code": "suspended", reason, until}`, structured like the device
 gate so the client can *draw* it: `ApiClient` routes it to
-`GeneKermanMod.OnSuspended` → `UI/SuspendedWindow.cs` — reason, live countdown,
+`GeneKermanMod.OnSuspended` → `UI/SuspendedWindow.cs`: reason, live countdown,
 a "check again" button, and the reassurance that nothing was deleted. The
 sidebar stops rendering behind it.
 
 Sessions are deliberately **not** revoked. A revoked token would drop the mod to
-its link screen, whose only offer — link again — would work and change nothing;
+its link screen, whose only offer (link again) would work and change nothing;
 a live token means every request comes back carrying the explanation.
 
 Expiry is resolved on read on both sides: the server checks `until > now` with
 no sweeper, and the mod's `Update` frees itself on the clock and simply earns a
 fresh 403 if it was wrong.
 
-Unlike the update gate, `SuspendedWindow` has **no limited mode** behind it —
+Unlike the update gate, `SuspendedWindow` has **no limited mode** behind it:
 nothing here is fixable from the client side.
 
-### Part Catalog Upload — `PartCatalogUploader`
+### Part Catalog Upload: `PartCatalogUploader`
 
 Uploads the player's installed part list (`internal_name + display_title` for
 every loaded part) to the server so the bot can resolve fuzzy part mentions in
 mission constraints (e.g. "the Thud engine" → `liquidEngine2-2`).
 
 - Runs at most once per session
-- Hash-gated (FNV-1a of the sorted part list) — skips the upload if the catalog
+- Hash-gated (FNV-1a of the sorted part list): skips the upload if the catalog
   hasn't changed since the last upload
+
+---
+
+## Friends, Quicksend and the Crew Ledger
+
+### Who you may hand a craft to
+
+The quicksend recipient list used to be everyone with a corp in your guild, which
+made the counterparty of a hand-over anybody at all in a large Discord.
+Friendship is now mutual and explicit (request, then accept), keyed on account
+ids so a Boundless account with no Discord is a first-class friend, and
+deliberately independent of any guild.
+
+`PlayerPicker` grew a `Source` for exactly the reason it must not matter:
+quicksend lists friends, contract creation still lists the roster, because a
+contract is an offer of work and anyone may be offered one. **The gate is the
+server**, not the picker, so a client drawing the wrong list cannot become a send
+to a stranger.
+
+### A copy versus a hand-over
+
+A blueprint send is a copy. A **live-vessel send is a hand-over**: once the
+server confirms, this client queues the vessel and its crew out of the save
+through the same removal machinery as a rescue, and a decline gives it back.
+
+Three fields make that safe across versions and rollbacks, and all three must
+stay:
+
+- **`vessel_pid`**, the pid in the *sender's* save, captured with the snapshot.
+  It is the marker that the sender actually removed the ship, so the reject
+  handler only returns entries carrying it.
+- **`vessel_returnable`** in the send response is the mirror image: the client
+  only removes the vessel on the server's promise that a decline can return it,
+  so a new mod against an old server degrades to send-a-copy rather than deleting
+  a ship nothing would give back.
+- **The pid echoed back on accept**, which `MaybeHandleGiftAccepted` uses to
+  re-assert a removal a quickload rolled back. Quicksends have no contract for
+  `ReconcileRescueVessels` to re-derive that intent from, so the echo is the
+  backstop.
+
+On the return import, `ClientState` checks the pid before spawning: original
+still in the save means cancel the queued removal and keep it, never spawn a
+duplicate.
+
+### Lending crew back
+
+`VesselTransfer.ApplyIncomingOwnershipTag` refuses an incoming crew name that
+claims to be ours, because the crew node is written entirely by the sender.
+"{me}'s Jeb" arriving from somebody else is a *claim, not a fact*, and that
+refusal is the impersonation defence.
+
+The honest **return leg has exactly the forgery's shape**. A rescue escapes it
+only because the server holds independent evidence. A quicksend had none, so
+lending a crewed ship to a friend and getting it back returned the kerbals
+double-tagged and borrowed, with the originals gone from the roster, and borrowed
+crew are eligible for the ghost purge, so a round trip could eventually *delete*
+the lender's own crew.
+
+The server-side crew ledger is the missing record. On a live-vessel send back to
+the same person it offers exactly the names that went out as `homebound`, which
+the client passes to the one code path that may strip a tag. The refusal itself
+is untouched: attested returns strip, everything else keeps it.
+
+---
+
+## The Finance Panel
+
+The wallet was a single number, which answers "how much have I got" and nothing
+else. `FinancePanel` is the history: the summary, a 14-day graph and the list in
+one column, with "Where it goes" (lifetime per-category, click-through to filter
+the list) and "Send coins" taking the detail slot.
+
+The graph is a **diverging** bar chart, income above the axis and spending below,
+which puts *position* on the in/out distinction so the two series never depend on
+a colour pair alone. The tab re-fetches on **every** open rather than once per
+KSP session, because a contract issued after the first open would otherwise never
+appear. Totals come from the server as their own field and the panel never adds
+anything up, because the stored list is a ring buffer and a summary computed by
+summing visible rows would silently shrink over time.
+
+Fine debt is shown here and in the Profile panel, with the rate it is being
+collected at, because rewards that silently halve arrive as a bug report rather
+than as an appeal.
 
 ---
 
@@ -1449,9 +1730,9 @@ requirement is ModuleManager, which applies the `GeneKermanScale` patch.
 | **Physics Range Extender** | Temporarily disabled during a submission, and restored only if *we* disabled it | `PhysicsRangeManager` |
 | **Click Through Blocker** | IMGUI windows drawn through CTB's `GUILayoutWindow` so clicks don't reach the game behind them | `ClickThroughHelper` |
 | **CKAN** | `registry.json` read (indexed by **install path**, not folder) to map parts → mod identifiers | `CkanGenerator` |
-| **Making History / Breaking Ground** | Treated as **dependencies, not stock** — keyed by two-segment path (`SquadExpansion/MakingHistory`), reported when missing but never written into a `.ckan` (CKAN can detect a DLC and never install one) | `CkanGenerator` |
+| **Making History / Breaking Ground** | Treated as **dependencies, not stock**: keyed by two-segment path (`SquadExpansion/MakingHistory`), reported when missing but never written into a `.ckan` (CKAN can detect a DLC and never install one) | `CkanGenerator` |
 
-### Physics Range Extender — `PhysicsRangeManager`
+### Physics Range Extender: `PhysicsRangeManager`
 
 **Problem:** PRE inflates the physics bubble so many distant vessels stay
 loaded. During a multi-vessel submission, this causes unstable spam-loading.
@@ -1459,22 +1740,22 @@ loaded. During a multi-vessel submission, this causes unstable spam-loading.
 **Solution:** Before capture, `TryDisable()` probes for PRE's static enable
 toggle (searching member names: `ModEnabled`, `Enabled`, `Active`,
 `IsEnabled`, `enabled`), turns it off, resets all loaded vessels' ranges to
-stock defaults, captures, then `Reenable()` restores PRE — but **only** if the
+stock defaults, captures, then `Reenable()` restores PRE, but **only** if the
 mod was the one that disabled it.
 
-### Click Through Blocker — `ClickThroughHelper`
+### Click Through Blocker: `ClickThroughHelper`
 
 When installed, IMGUI windows are drawn through CTB's `GUILayoutWindow` instead
 of the stock `GUILayout.Window`, preventing clicks on the mod's UI from also
 reaching the game underneath. Resolved via reflection on
 `ClickThroughFix.ClickThruBlocker.GUILayoutWindow`. The uGUI sidebar does not
-need this — it holds an `InputLockManager` lock instead.
+need this: it holds an `InputLockManager` lock instead.
 
 ### A note on mod detection
 
 Every part-walk detection path in this codebase resolves a part to its GameData
 folder via `AvailablePart.partUrl`. That means it is **structurally blind** to
-any mod that adds no parts — TweakScale, Textures Unlimited, RealFuels — which
+any mod that adds no parts (TweakScale, Textures Unlimited, RealFuels), which
 is exactly why each of those has a side-channel block of its own.
 
 And a GameData folder is **not** a mod. DeepFreeze installs
@@ -1493,7 +1774,7 @@ rather than guessing.
 The mod draws in **two** toolkits, and which one a screen uses is a decision, not
 an accident.
 
-### The uGUI sidebar (`UI/Gui/`) — the primary interface
+### The uGUI sidebar (`UI/Gui/`): the primary interface
 
 A retained-mode Canvas UI in the `GeneKerman.UI.Gui` namespace. The toolbar
 button opens it; the classic IMGUI main window it replaced is **gone**, and so
@@ -1503,13 +1784,13 @@ gate the old window never had).
 
 | Piece | Role |
 |-------|------|
-| `Theme.cs` | Design tokens, ported from the website's `globals.css`. The mod's only shared palette — the IMGUI files still use inline colors |
+| `Theme.cs` | Design tokens, ported from the website's `globals.css`. The mod's only shared palette: the IMGUI files still use inline colors |
 | `Sprites.cs` | Procedural 9-slice rounded-rect sprites (there is no Unity Editor on this machine) |
 | `UIF.cs` | The fluent widget builder |
 | `SidebarController.cs` | Owns the Canvas, the expand animation, the input locks |
 | `FloatWindow.cs` | Draggable, clamped window shell |
 | `ImageViewer.cs` | Full-screen zoom/pan lightbox for submission images (borrows textures, never owns them) |
-| `PlayerPicker.cs` / `BodyPicker.cs` / `DatePicker.cs` | Shared pickers — players (quicksend + contracts), celestial bodies (rescues), an inline month grid |
+| `PlayerPicker.cs` / `BodyPicker.cs` / `DatePicker.cs` | Shared pickers: players (quicksend + contracts), celestial bodies (rescues), an inline month grid |
 | `Panels/` | The screens: missions, contract inbox, profile, feed, market (selling half), tools, settings |
 
 **The panel is centred** and opens by expanding sideways out of the middle of the
@@ -1517,7 +1798,7 @@ screen. There is no pull-out tab and no near edge, so there is no VAB/SPH edge
 mirroring to do. `AnimateExpand` drives `openAmount` and `ApplyExpand` is the
 single writer of the transform: it scales `panelRect.localScale.x` through
 `EaseOutExpo` from a centre pivot rather than animating the width, because a
-per-frame width change re-runs the whole layout — and a layout squeezed near zero
+per-frame width change re-runs the whole layout, and a layout squeezed near zero
 makes every `Ellipsis` label render nothing, so the panel would flash empty on
 the way out. The resting width still animates (400 ↔ 880 for master-detail),
 because that one genuinely *is* a change of layout size.
@@ -1527,26 +1808,26 @@ because that one genuinely *is* a change of layout size.
 1. A Canvas renders independently of `OnGUI`, so it needs explicit
    `GameEvents.onHideUI` handling or it appears in every screenshot.
 2. It needs an `InputLockManager` lock, or clicks reach the game behind it.
-   `PointerOverSidebar` returns false outright while closed — a scaled-to-nothing
+   `PointerOverSidebar` returns false outright while closed, a scaled-to-nothing
    panel still has a rect, and would otherwise hold a lock over a sliver of
    screen showing nothing.
 3. A focused text box needs a second, wider lock (`KEYBOARDINPUT` plus the
    quick-save pair) held screen-wide, since a keystroke has no cursor position.
-4. Every lock must be released in `Destroy()` — a leaked control lock outlives
+4. Every lock must be released in `Destroy()`: a leaked control lock outlives
    the mod.
 5. **The TMP font is borrowed from KSP**, and it fails two ways that both look
    like "the sidebar has no text at all":
    - A scene load can unload the font's atlas while leaving the asset non-null.
      `onGameSceneLoadRequested` fires *before* the teardown and so cannot detect
-     it — `SidebarController.UpdateAssets` polls for it and `UIF.RefreshFont()`
+     it, `SidebarController.UpdateAssets` polls for it and `UIF.RefreshFont()`
      re-points the live labels (`Theme.Alive` tests the material, not the
      reference).
    - A `TMP_FontAsset` ships **one** default material that every label not asking
-     for its own *shares* — colour mask, stencil, z-test and clip rect all live
+     for its own *shares*: colour mask, stencil, z-test and clip rect all live
      on it, so anything in the game (flight is where it happens) can make every
      label invisible. `Theme.FontMaterial` is a private normalized clone taken in
      the main menu, `UIF.Label` assigns it, and `UIF.RefreshText()` re-asserts it
-     **and rebuilds meshes synchronously** — `SetAllDirty` only *queues*, and a
+     **and rebuilds meshes synchronously**, `SetAllDirty` only *queues*, and a
      queued-but-unserviced label draws nothing, silently.
 
 **Limited mode.** The acknowledged-update gate used to belong to the classic
@@ -1560,18 +1841,18 @@ it drawing the link window and the device prompt under the gate.
 
 ### What is still IMGUI
 
-Exactly the set that draws when the canvas may not — porting any of them would
+Exactly the set that draws when the canvas may not, porting any of them would
 put a gate on the surface the gate exists to disable.
 
 | Window | Purpose |
 |--------|---------|
 | `ConsentWindow` | First-run privacy/terms opt-in (KSP add-on rule 8.1) |
 | `UpdateRequiredWindow` | Mandatory update gate |
-| `SuspendedWindow` | Service-suspension notice — reason, countdown, "check again" |
+| `SuspendedWindow` | Service-suspension notice: reason, countdown, "check again" |
 | `DataPausedWindow` | Data-sharing paused notice |
 | `DeviceVerifyWindow` | Device binding approval |
 | `LinkWindow` | Discord account linking (the toolbar opens the sidebar only once linked) |
-| `CheckpointPrompt` | "Capture this moment?" — time-critical, drawn over the game |
+| `CheckpointPrompt` | "Capture this moment?": time-critical, drawn over the game |
 | `WebUiWindow` | Recovery path for a browser that never opened |
 
 `GKSkin` defines the custom `GUISkin` these use, and all of them are drawn
@@ -1579,34 +1860,34 @@ through `ClickThroughHelper.Window()`.
 
 ### Where the notable screens live
 
-- **Submission** — `Panels/SubmitPanel.cs` in a `FloatWindow`, because submitting
+- **Submission**: `Panels/SubmitPanel.cs` in a `FloatWindow`, because submitting
   is read *against* the scene behind it. Living on the canvas gives it the render
   gate (F2 and every capture hide the whole canvas, so submission no longer needs
   a window of its own to be hidden for a screenshot), the input lock, the font
   recovery and the teardown for free.
-- **Contract inbox** — `Panels/ContractsPanel.cs`, carrying the classic window's
+- **Contract inbox**: `Panels/ContractsPanel.cs`, carrying the classic window's
   mail furniture: week groups, a local bin and multi-select (`ContractInbox.cs`
   holds both, shared so trashing in one front end hides it in the other),
   mark-read/dismiss routed through `ClientState`'s `Request*` wrappers so the
-  unread badge cannot drift from the list, and — in the editor, on an active
-  contract — the contract's part limits plus the switch that arms
+  unread badge cannot drift from the list, and, in the editor, on an active
+  contract: the contract's part limits plus the switch that arms
   `EditorPartEnforcer`.
-- **Rescues** — issuing one is in `ContractForm`, behind an explicit "this is
+- **Rescues**: issuing one is in `ContractForm`, behind an explicit "this is
   permanent" switch (sending destroys the issuer's vessel); spawning the wreck is
   in `ContractsPanel`'s active-contract actions. Both call `ContractCreation` /
   `RequestSpawnRescueWreck` rather than reimplementing, since the per-save dedup,
   the orbit-epoch freeze and the emergency-freeze registration hang off those.
-- **Marketplace** — `Panels/MarketPanel.cs` is the **selling** half only.
+- **Marketplace**: `Panels/MarketPanel.cs` is the **selling** half only.
   Browsing and buying stay on the website; what a browser cannot do is read the
   ship in the VAB and render it.
-- **Bug reports** — filed from the Tools panel. Its action sits in `ToolActions`
+- **Bug reports**: filed from the Tools panel. Its action sits in `ToolActions`
   with the others but, alone among them, is not exposed on the `/gk/actions/*`
   bridge and has no card in the web screen: the attachment that makes a KSP bug
   diagnosable (`KSP.log`) can only be read from inside the running game.
 
 ---
 
-## Browser UI Bridge — `Web/`
+## Browser UI Bridge: `Web/`
 
 An **optional** second front end: the same account, drawn as a React page in the
 player's own browser. Off by default (`enableWebUi = false`), switched on in the
@@ -1632,8 +1913,8 @@ CORS, no mixed content, and **the session token never enters JavaScript**.
 it to anything it proxies, so "only our page may call this" has to be airtight.
 No layer is sufficient alone:
 
-1. Bound to `127.0.0.1` only — nothing on the LAN can reach it.
-2. Random ephemeral port per session — **defence in depth only.** A local
+1. Bound to `127.0.0.1` only: nothing on the LAN can reach it.
+2. Random ephemeral port per session: **defence in depth only.** A local
    process can scan 65k ports in under a second; this is never treated as
    security.
 3. A one-time launch nonce, 15 s TTL, in the URL handed to the browser.
@@ -1644,14 +1925,14 @@ No layer is sufficient alone:
 Layers 1, 2 and 5 live in `LocalServer`; `BridgeAuth` owns 3 and 4.
 
 > **Known residual risk, documented rather than pretended away:**
-> `Application.OpenURL` shells out to `xdg-open` on Linux, so the launch URL —
-> nonce included — is briefly visible in `/proc` and `ps aux`. The 15 s TTL plus
+> `Application.OpenURL` shells out to `xdg-open` on Linux, so the launch URL,
+> nonce included, is briefly visible in `/proc` and `ps aux`. The 15 s TTL plus
 > single use plus the browser consuming it in ~200 ms makes the window narrow,
 > and a hostile local user on the same account could already just read
 > `PluginData/session.token`.
 
 **`ApiProxy` is a confused deputy by construction**, so its **allow-list is the
-security boundary** — an endpoint not on the list cannot be reached with the
+security boundary**: an endpoint not on the list cannot be reached with the
 mod's token, whatever the page asks for.
 
 **Threading.** The accept loop and every handler run off the main thread.
@@ -1660,7 +1941,7 @@ Anything that touches KSP goes through `MainThreadQueue`, drained by
 page that reloads mid-install still learns the outcome.
 
 Because the bridge binds a fresh ephemeral port every session,
-`http://127.0.0.1:<port>` is a **different origin on every launch** — so
+`http://127.0.0.1:<port>` is a **different origin on every launch**, so
 `localStorage` is empty each time and anything that must persist (starred
 players, the inbox bin) lives in `PluginData` instead. See `Favorites.cs` and
 `ContractInbox.cs`.
@@ -1684,11 +1965,11 @@ cd "KSP Mod Side"
 #    dotnet build -c Release -p:GKChannel="$CHANNEL"
 #    CHANNEL=production strips the debug self-test panel (GK_DEBUG_PANEL)
 
-# 2. Print the DLL's SHA-256 — register it with the update gate via
+# 2. Print the DLL's SHA-256: register it with the update gate via
 #    /admin publishversion, or the admin console's Mod Version tab
 
 # 3. Build the browser UI (repo-root WebUI/, via Vite → GameData/…/WebUI/)
-#    Skipped, not fatal, when node_modules is absent — but then WebUI/ is
+#    Skipped, not fatal, when node_modules is absent: but then WebUI/ is
 #    whatever was last built, which is what the manifest check below catches.
 
 # 4. Prepare GameData/BoundlessMissions/
@@ -1701,23 +1982,16 @@ cd "KSP Mod Side"
 # 5. Deploy to every KSP install in KSP_PATHS[]
 #    - Preserve each install's existing settings.cfg (backup → copy → restore)
 #    - Copy the whole GameData/BoundlessMissions/ into each KSP's GameData/
-#      (WebUI/ is removed first — its assets are content-hashed, so a plain cp
+#      (WebUI/ is removed first: its assets are content-hashed, so a plain cp
 #       would leave every previous build's files behind)
 ```
 
 The Vite build stamps `WebUI/manifest.json` with `ModVersion.Current`, and the
-mod **refuses to start the bridge** if that does not match the running DLL — a
+mod **refuses to start the bridge** if that does not match the running DLL, a
 stale bundle talking to a newer `/gk` surface is exactly the failure this
 prevents.
 
-**Deploy targets** (`KSP_PATHS` in `build.sh`) — three dev instances, each
-testing a different thing:
-
-| Instance | What it is for |
-|----------|----------------|
-| `KR-KSP` | The rendering-stack testbed — SSPX, TAC-LS, Kerbalism, kOS, TUFX, ReforgedRedux, KerbalEngineer, and **Deferred + TexturesUnlimited**. Deferred here is what `VesselRenderer`'s deferred path exists for |
-| `RSS-RO` | Realism Overhaul / Real Solar System — RealFuels, FAR, Kopernicus+RSS. Tests `RealFuelsTransfer` against RO's part and resource rewrites |
-
+**Deploy targets** (`KSP_PATHS` in `build.sh`).
 To build without deploying:
 
 ```bash
@@ -1726,14 +2000,13 @@ dotnet build -c Release
 ```
 
 Release packaging (the CKAN-shaped zip in `dist/`) is covered in
-[`PACKAGING.md`](PACKAGING.md); the day-to-day toolchain notes live in
-`DEV-SETUP.md` at the repo root.
+[`PACKAGING.md`](PACKAGING.md).
 
 ### Project Configuration (`GeneKerman.csproj`)
 
 - **Target**: .NET Framework 4.7.2 (KSP's runtime)
 - **Output**: `bin/GeneKerman.dll` (class library, no entry point)
-- **Assembly paths**: `KSPPath` defaults to the `KR-KSP` dev instance (`FK-KSP` was the reference until it was deleted on 2026-08-22). `ManagedPath` is probed, not assumed — `KSP_x64_Data/Managed` on KR-KSP/KR2-KSP, `KSP_Data/Managed` on RSS-RO — with a fallback to any sibling instance that has assemblies and one explicit error if none do;
+- **Assembly paths**: `KSPPath` defaults to the `KR-KSP` dev instance (`FK-KSP` was the reference until it was deleted on 2026-08-22). `ManagedPath` is probed, not assumed (`KSP_x64_Data/Managed` on KR-KSP/KR2-KSP, `KSP_Data/Managed` on RSS-RO) with a fallback to any sibling instance that has assemblies and one explicit error if none do;
   `ManagedPath` is `$(KSPPath)/KSP_Data/Managed` (**not** `KSP_x64_Data/Managed`
   on these installs). Override with `-p:KSPPath="..."` to compile against
   another install.
@@ -1744,7 +2017,7 @@ Release packaging (the CKAN-shaped zip in `dist/`) is covered in
     `ImageConversionModule`, `ScreenCaptureModule`, `TextRenderingModule`,
     `InputLegacyModule`, `AnimationModule`, `PhysicsModule`
   - `websocket-sharp.dll` (bundled in `lib/`, the only `Private=true` reference)
-  - `ToolbarControl` and `ClickThroughBlocker` — referenced **conditionally**,
+  - `ToolbarControl` and `ClickThroughBlocker`: referenced **conditionally**,
     only if present in the target install's GameData
 - **Conditional symbols**: `GK_DEBUG_PANEL` is defined only off the `production`
   channel, so a shipped DLL contains none of `DebugTestPanel.cs`.
@@ -1760,7 +2033,7 @@ Release packaging (the CKAN-shaped zip in `dist/`) is covered in
 | `websocket-sharp.dll` | Bundled (`lib/`) | WebSocket client (KSP's Mono lacks `ClientWebSocket`) |
 | **ModuleManager** | Required (separate install) | Patches `GeneKermanScale` onto every part prefab |
 
-**Soft dependencies** — all optional, all reflection-based, all no-ops when
+**Soft dependencies**, all optional, all reflection-based, all no-ops when
 absent. See [Third-Party Mod Compatibility](#third-party-mod-compatibility) for
 what each one actually does:
 
@@ -1770,7 +2043,7 @@ ConformalDecals · Deferred · USI-LS · TAC-LS · Snacks · Kerbalism · DeepFr
 Physics Range Extender · CKAN
 
 The stock expansions (Making History, Breaking Ground) are treated as
-dependencies rather than as stock — they are bought separately, and owning one
+dependencies rather than as stock: they are bought separately, and owning one
 says nothing about the other.
 
 ---
@@ -1779,7 +2052,7 @@ says nothing about the other.
 
 `GameData/BoundlessMissions/PluginData/settings.cfg` (KSP `ConfigNode` format;
 node name is `GeneKerman`). Everything here is editable from the sidebar's
-Settings panel — hand-editing is supported but not required.
+Settings panel, hand-editing is supported but not required.
 
 ```
 GeneKerman
@@ -1810,16 +2083,16 @@ GeneKerman
 | `enableNotifications` | `true` | Notification push and polling |
 | `enableCheckpointPhotos` | `true` | Offer the cinematic capture prompt at detected milestones |
 | `enableDataGathering` | `true` | Send telemetry with submissions. Off shows the "data sharing paused" notice |
-| `enableWebUi` | `false` | Open the browser UI instead of the sidebar. Absent means classic — an existing install is never moved to a different UI by an update |
+| `enableWebUi` | `false` | Open the browser UI instead of the sidebar. Absent means classic: an existing install is never moved to a different UI by an update |
 | `enableEmergencyFreeze` | `true` | Freeze stranded rescue crew so they survive any life-support mod |
-| `emergencyRationDays` | `3` | Days of the rescuer's resources stowed aboard a rescue wreck. Clamped at 0 — a hand-edited negative would size the kit backwards |
+| `emergencyRationDays` | `3` | Days of the rescuer's resources stowed aboard a rescue wreck. Clamped at 0: a hand-edited negative would size the kit backwards |
 | `enablePartSubstitution` | `true` | Swap missing parts for local equivalents. Off still scans and reports |
 | `enableTextureTransfer` | `true` | Carry Textures Unlimited paint jobs. Off still scans and warns |
 | `enableFuelConfigTransfer` | `true` | Carry RealFuels tank/engine configs. Off still scans and warns |
 
-Consent is deliberately **not** in this file — it lives in
+Consent is deliberately **not** in this file: it lives in
 `PluginData/consent.cfg` as a standalone record. See
-[Consent Gate](#consent-gate--consent).
+[Consent Gate](#consent-gate-consent).
 
 **Runtime data** (created automatically):
 

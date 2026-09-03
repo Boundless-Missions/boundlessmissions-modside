@@ -2,12 +2,14 @@
  * StreamerMode.cs – Answers one question: is broadcasting software running on
  * this PC right now?
  *
- * The player lists (quicksend, contract creation) draw a Discord avatar and the
- * player's corporation under their display name. That is exactly the material a
- * streamer does not want on screen — someone else's face, and a corp name that is
- * often a real name with "Space Agency" after it. `hidePlayerDetails` in
- * settings.cfg turns both off by hand; this file is the second way to turn them
- * off, the one that does not depend on remembering before going live.
+ * The player lists (quicksend, contract creation, friends) draw a Discord avatar
+ * and the player's Boundless username under their display name. That is exactly
+ * the material a streamer does not want on screen — someone else's face, and the
+ * permanent handle that finds them on every server the bot is in, which is worth
+ * more to somebody watching a stream than the display name above it precisely
+ * because it cannot be changed afterwards. `hidePlayerDetails` in settings.cfg
+ * turns both off by hand; this file is the second way to turn them off, the one
+ * that does not depend on remembering before going live.
  *
  * ── How Discord does it, and why we do the same
  *

@@ -212,7 +212,7 @@ namespace GeneKerman.UI.Gui
             var card = UIF.Card(parent, "Privacy").Column(Theme.Space1).Pad(Theme.Space3);
             UIF.Label(card, "Privacy", Theme.FontSm).Bold();
 
-            UIF.Switch(card, "Hide profile pictures and corp names",
+            UIF.Switch(card, "Hide profile pictures and usernames",
                        "Player lists show display names only. Pictures are not just hidden but " +
                        "never downloaded, so nothing on this PC asks Discord for them.",
                        api.HidePlayerDetails,
@@ -240,7 +240,7 @@ namespace GeneKerman.UI.Gui
                 UIF.Label(strip, app + " is running", Theme.FontXs, Theme.AccentForeground).Body();
                 UIF.Muted(strip, api.HidePlayerDetails
                           ? "Details are hidden by the switch above anyway."
-                          : "Profile pictures and corp names are hidden while it is.").Body();
+                          : "Profile pictures and usernames are hidden while it is.").Body();
             }
             else
             {

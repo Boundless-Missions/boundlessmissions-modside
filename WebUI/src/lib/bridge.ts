@@ -319,6 +319,16 @@ export interface Corp {
   owner_id: string;
   owner_name: string;
   corp_name: string;
+  /**
+   * The player's claimed Boundless username — the line the pickers draw under the
+   * display name, where they used to draw `corp_name`. A corp is auto-named
+   * "{display name} Space Agency", so that line was the name above it repeated,
+   * while the one handle that identifies a player across every server was nowhere
+   * in the list. "" (or absent, from an older bot) for a player with no username
+   * yet, which draws as no second line rather than as a corp name — a fallback
+   * would make the same column mean two different things on adjacent rows.
+   */
+  username?: string;
   // Both are best-effort from the bot: avatar_url is null when the member is not in
   // Discord's cache, and level is 0 for anyone with no economy record yet.
   avatar_url?: string | null;

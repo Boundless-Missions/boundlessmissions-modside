@@ -2,8 +2,8 @@
     "spec_version": "v1.18",
     "identifier": "BoundlessMissions",
     "name": "Boundless Missions",
-    "abstract": "Connects your game to the Boundless Missions Discord community: player-issued contracts, reverse auctions, rescue missions, craft transfers and an in-game economy, all without leaving KSP.",
-    "description": "Links a KSP install to a Discord account with a 6-digit code, then delivers contracts, missions, notifications and craft transfers in game. Includes an optional browser interface served from a loopback-only HTTP listener on 127.0.0.1 (off by default; see the Interface section of the in-game Settings tab).",
+    "abstract": "Boundless Missions is a inter-player mod for Kerbal Space Program 1 that allows you to create and complete player-issued contracts, rescue vessels, transfer vessels between players, and participate in an in-game economy.",
+    "description": "Boundless Missions introduces player-issued contracts, auctions, rescue missions, craft transfers and an in-game economy, all without leaving KSP.",
 
     "author": [ "Boundless-Missions" ],
     "license": "GPL-3.0",
@@ -17,15 +17,13 @@
         "bugtracker": "https://github.com/Boundless-Missions/boundlessmissions-modside/issues"
     },
 
-    "ksp_version_min": "1.12.0",
-    "ksp_version_max": "1.12.5",
-
     "depends": [
         { "name": "ModuleManager" }
     ],
 
     "recommends": [
-        { "name": "ClickThroughBlocker" }
+        { "name": "ClickThroughBlocker" },
+        { "name": "JanitorsCloset" }
     ],
 
     "install": [

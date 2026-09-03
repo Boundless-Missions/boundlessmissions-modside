@@ -1,5 +1,5 @@
 {
-    "spec_version": "v1.18",
+    "spec_version": "v1.27",
     "identifier": "BoundlessMissions",
     "name": "Boundless Missions",
     "abstract": "Boundless Missions is a inter-player mod for Kerbal Space Program 1 that allows you to create and complete player-issued contracts, rescue vessels, transfer vessels between players, and participate in an in-game economy.",
@@ -7,6 +7,13 @@
 
     "author": [ "Boundless-Missions" ],
     "license": "GPL-3.0",
+
+    "tags": [
+        "plugin",
+        "app",
+        "career",
+        "crewed"
+    ],
 
     "$kref": "#/ckan/github/Boundless-Missions/boundlessmissions-modside",
     "$vref": "#/ckan/ksp-avc",

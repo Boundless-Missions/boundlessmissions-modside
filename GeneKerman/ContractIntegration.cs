@@ -505,6 +505,10 @@ namespace GeneKerman
             // persistence. Must run before the null-node return: loading a save with
             // no taints has to CLEAR taints carried over from another save.
             CheatDetection.LoadFrom(node);
+            // Spent sanction nonces ride the same scenario node as the taint
+            // store, and for the same reason: a quickload must not hand back
+            // a nonce that has already been used.
+            SanctionedTransition.LoadFrom(node);
 
             if (node == null) return;
 
@@ -662,6 +666,7 @@ namespace GeneKerman
                 }
 
                 CheatDetection.SaveTo(node);
+                SanctionedTransition.SaveTo(node);
 
                 var pend = node.AddNode("RESCUE_PENDING_REMOVALS");
                 foreach (var kvp in (pendingRescueRemovals ?? new Dictionary<string, PendingRescueRemoval>()))

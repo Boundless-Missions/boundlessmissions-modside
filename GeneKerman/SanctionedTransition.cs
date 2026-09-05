@@ -69,7 +69,21 @@ namespace GeneKerman
         /// 90-day schedule; the origin it is fetched from does not, so it is the
         /// part that can be pinned.
         /// </summary>
+#if GK_DEBUG_PANEL
+        /// <summary>
+        /// Dev-channel origin: the local dev stack.
+        ///
+        /// The pin is the point of this constant, so moving it is not something to
+        /// do lightly — but a pin that cannot be exercised is a pin nobody has
+        /// tested. This sits behind the same `GK_DEBUG_PANEL` gate as the agent
+        /// bridge, which `tools/assert_production_clean.sh` proves absent from
+        /// every shipped DLL in both directions, so the production build's origin
+        /// is unreachable-by-construction rather than merely different.
+        /// </summary>
+        public const string KeyOrigin = "http://127.0.0.1:5022/api/v1/mp/jwks";
+#else
         public const string KeyOrigin = "https://boundlessmissions.com/api/v1/mp/jwks";
+#endif
 
         /// <summary>How long a token may live. Seconds, so a captured one cannot be banked.</summary>
         public const double MaxLifetimeSeconds = 30.0;

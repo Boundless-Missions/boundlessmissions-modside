@@ -1,8 +1,10 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
+using System.Security.Cryptography;
 
 namespace GeneKerman
 {
@@ -36,8 +38,15 @@ namespace GeneKerman
         private static double lastAttemptWc;
         private static bool fetching;
 
-        /// <summary>server_id -> public key material. An empty id is the account service's own key.</summary>
-        private readonly Dictionary<string, byte[]> keys = new Dictionary<string, byte[]>();
+        /// <summary>An RSA public key, as JWKS carries it: modulus and exponent.</summary>
+        private struct PubKey
+        {
+            public byte[] Modulus;
+            public byte[] Exponent;
+        }
+
+        /// <summary>server_id -> public key. An empty id is the account service's own key.</summary>
+        private readonly Dictionary<string, PubKey> keys = new Dictionary<string, PubKey>();
 
         /// <summary>The cached key set, or null if none is usable yet.</summary>
         internal static TransitionKeys Get()
@@ -139,45 +148,89 @@ namespace GeneKerman
                 if (k == null) continue;
                 string use = Str(k, "use");
                 if (use.Length > 0 && use != "sig") continue;
-                string material = Str(k, "x");           // OKP/Ed25519 public key
-                if (material.Length == 0) material = Str(k, "n");   // RSA modulus
-                if (material.Length == 0) continue;
+
+                // RSA only, and an Ed25519 key in this set is skipped rather than
+                // half-understood. The two token families deliberately use
+                // different algorithms (see Verify), so an OKP key appearing here
+                // is a player-token key that this mod has no business verifying.
+                if (Str(k, "kty") != "RSA") continue;
+                string alg = Str(k, "alg");
+                if (alg.Length > 0 && alg != "RS256") continue;
+
+                string n = Str(k, "n"), e = Str(k, "e");
+                if (n.Length == 0 || e.Length == 0) continue;
                 string owner = Str(k, "server_id");      // "" = the account service's own
-                byte[] bytes;
-                try { bytes = Base64Url(material); }
+                try { set.keys[owner] = new PubKey { Modulus = Base64Url(n), Exponent = Base64Url(e) }; }
                 catch { continue; }
-                set.keys[owner] = bytes;
             }
             return set;
         }
 
         /// <summary>
-        /// Check a payload's signature.
+        /// Check a payload's signature. **RS256** — RSA PKCS#1 v1.5 over SHA-256.
         ///
-        /// **This is the one seam the signature algorithm decision lands in, and
-        /// it is unresolved — so it refuses everything.**
+        /// Not the Ed25519 the player tokens use, and the difference is
+        /// deliberate rather than an inconsistency waiting to be tidied up. The
+        /// two token families have different verifiers with different
+        /// capabilities: a player token is verified by a Python game server,
+        /// which has Ed25519 readily; a transition token is verified *here*, in
+        /// KSP's Mono, which carries no Ed25519 anywhere in `Managed/`. Matching
+        /// the algorithms would mean shipping a signature implementation into a
+        /// security-boundary hook, which is the wrong trade — and it would buy
+        /// nothing, because both of the usual arguments run backwards on this
+        /// path. Verification is the only operation that happens here, and RSA
+        /// with e=65537 verifies *faster* than Ed25519; and the token never
+        /// leaves the process, so its size is irrelevant.
         ///
-        /// The reason is a runtime fact rather than a preference: KSP's Mono
-        /// carries no Ed25519 anywhere in `KSP_x64_Data/Managed`, and no
-        /// instance here has BouncyCastle or a NaCl port either. What it does
-        /// have is `RSACryptoServiceProvider.VerifyData`, `RSAParameters` and
-        /// `SHA256Managed`. So verifying an Ed25519 signature in this process
-        /// means shipping an implementation of it; verifying an RSA one means
-        /// calling what is already present.
+        /// PKCS#1 v1.5 rather than PSS because `RSACryptoServiceProvider` is what
+        /// this runtime has and it does v1.5; PSS needs `RSACng`, which it does
+        /// not. That makes the wire format exactly JWS `RS256`, which the signing
+        /// side gets from any standard library.
         ///
-        /// Until that is settled this returns false, which is the safe direction
-        /// and not a placeholder that could be mistaken for working code: every
-        /// token is rejected, `Submit` reports `Rejected`, and the watchdog judges
-        /// every transition exactly as it does today. The mod's behaviour is
-        /// therefore identical to its behaviour before this file existed — which
-        /// is precisely what "inert" is supposed to mean, and what makes it safe
-        /// to have merged this far ahead of the primitive.
+        /// The key is selected by the token's own `srv` field, which is safe only
+        /// because the *set* of keys came from the pinned origin: a token naming a
+        /// server we have no published key for verifies against nothing and is
+        /// refused, so naming a server is a lookup, never an assertion.
         /// </summary>
         internal bool Verify(string payload, string signature, string serverId)
         {
-            byte[] key;
-            if (!keys.TryGetValue(serverId ?? "", out key) || key == null) return false;
-            return false;
+            PubKey key;
+            if (!keys.TryGetValue(serverId ?? "", out key)) return false;
+            if (key.Modulus == null || key.Exponent == null) return false;
+
+            byte[] sig;
+            try { sig = Base64Url(signature); }
+            catch { return false; }
+
+            try
+            {
+                using (var rsa = new RSACryptoServiceProvider())
+                {
+                    rsa.ImportParameters(new RSAParameters
+                    {
+                        Modulus = key.Modulus,
+                        Exponent = key.Exponent,
+                    });
+                    // The signed bytes are the canonical payload as UTF-8 — the
+                    // exact string that was parsed, never a re-serialisation of
+                    // the parsed fields, so a parser disagreement can never
+                    // become a signature that checks out over different data.
+                    byte[] data = Encoding.UTF8.GetBytes(payload);
+                    return rsa.VerifyData(data, CryptoConfig.MapNameToOID("SHA256"), sig);
+                }
+            }
+            catch (CryptographicException)
+            {
+                // A malformed key or signature is a refusal, not an exception the
+                // caller has to handle: every failure here means "judge it as you
+                // would have without a token".
+                return false;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] transition signature check failed: " + ex.Message);
+                return false;
+            }
         }
 
         // ── helpers ─────────────────────────────────────────────────────────

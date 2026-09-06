@@ -329,6 +329,37 @@ namespace GeneKerman.Web
         /// the two are routinely confused and a test that cannot tell them apart cannot
         /// prove a removal targeted the right hull.
         /// </summary>
+        /// <summary>
+        /// A vessel's orbital elements, or `null` when it has no orbit.
+        ///
+        /// Degrees for the angles and radians for the mean anomaly, which is not a
+        /// choice: it is what KSP's own `Orbit` holds and what the save file
+        /// stores, so anything else here would be a second convention to convert
+        /// between. `epoch` is `Orbit.epoch`, the UT the mean anomaly is stated
+        /// at.
+        /// </summary>
+        private static string OrbitJson(Vessel v)
+        {
+            try
+            {
+                Orbit o = v != null ? v.orbit : null;
+                if (o == null) return "null";
+                var sb = new StringBuilder();
+                sb.Append("{\"sma\":").Append(Num(SafeD(() => o.semiMajorAxis)))
+                  .Append(",\"ecc\":").Append(Num(SafeD(() => o.eccentricity)))
+                  .Append(",\"inc\":").Append(Num(SafeD(() => o.inclination)))
+                  .Append(",\"lan\":").Append(Num(SafeD(() => o.LAN)))
+                  .Append(",\"argpe\":").Append(Num(SafeD(() => o.argumentOfPeriapsis)))
+                  .Append(",\"mna\":").Append(Num(SafeD(() => o.meanAnomalyAtEpoch)))
+                  .Append(",\"epoch\":").Append(Num(SafeD(() => o.epoch)))
+                  .Append(",\"body\":").Append(JobResult.Quote(
+                      Safe(() => o.referenceBody != null ? o.referenceBody.bodyName : "")))
+                  .Append('}');
+                return sb.ToString();
+            }
+            catch { return "null"; }
+        }
+
         private static string VesselJson(Vessel v)
         {
             var sb = new StringBuilder();
@@ -349,6 +380,22 @@ namespace GeneKerman.Web
               .Append(",\"partCount\":").Append(SafeI(() => v.loaded && v.parts != null
                                                      ? v.parts.Count
                                                      : (v.protoVessel?.protoPartSnapshots?.Count ?? 0)))
+              // The orbit, in the same shape and units the multiplayer client
+              // publishes to its server, so the two can be compared directly.
+              //
+              // Added because they could not be. The bridge reported only
+              // lat/lon/alt, so a disagreement between where the server thought a
+              // craft was and where the game actually had it could only be
+              // inferred from longitudes — which is how a pair the server placed
+              // 1,149 m apart, and which both clients bubbled, turned out to be
+              // 277 km apart in the games, with three different answers on record
+              // for one distance and no way to tell which was lying.
+              //
+              // `epoch` rides along because elements without it are unusable: two
+              // craft are only ever a fixed distance apart when their elements are
+              // read at a common UT, and half of today's confusion was comparing
+              // sets stated at different ones.
+              .Append(",\"orbit\":").Append(OrbitJson(v))
               .Append(",\"crew\":").Append(CrewNamesJson(v))
               // Cheat-detection state, read from the production store rather than
               // re-derived. A tainted vessel is refused at submission by the server, so a

@@ -222,7 +222,7 @@ def ensure_focused(inst: Instance, tries: int = 3) -> None:
     for _ in range(tries):
         if focused(inst):
             return
-        focus(inst)
+        focus(inst, verify=False)
         time.sleep(0.6)
     raise BridgeError(
         f"{inst.name}: input is not reaching this instance — focus could not be taken. "
@@ -231,12 +231,30 @@ def ensure_focused(inst: Instance, tries: int = 3) -> None:
         "work against one instance at a time.")
 
 
-def focus(inst: Instance, allow_caption_fallback: bool = True, timeout: float = 10.0) -> bool:
-    """Raise and focus this instance's window. Returns False if it could not.
+def focus(inst: Instance, allow_caption_fallback: bool = True, timeout: float = 10.0,
+          verify: bool = True) -> bool:
+    """Raise and focus this instance's window. Returns whether input now reaches it.
 
     Matches on pid first. The caption fallback is opt-out because with two instances
     running both windows are titled "Kerbal Space Program", so falling back would focus
     an arbitrary one — fine when only one is up, wrong exactly when it matters.
+
+    ## Why it verifies
+
+    It used to return True whenever the three `qdbus6` calls did not throw, which is
+    not the same question. KWin's `loadScript`/`start` reports nothing about whether a
+    window actually took focus, so a silent refusal came back as success — and ydotool
+    then delivered every keystroke to whatever *was* focused, which with two instances
+    up is the other game.
+
+    That is not a hypothetical either: it cost an hour of this session. Keys aimed at
+    one instance opened, refreshed and joined a server in the other, while the intended
+    one sat untouched, and every symptom pointed at the panel's own logic rather than at
+    the window manager. `focused()` was already sitting right here as the only
+    trustworthy test.
+
+    `verify=False` is the cheap path for a caller that will prove it some other way —
+    `ensure_focused` does, so it uses it and does not pay for the check twice.
     """
     pids = host_pids(inst)
     if not pids:
@@ -282,7 +300,16 @@ def focus(inst: Instance, allow_caption_fallback: bool = True, timeout: float = 
         subprocess.run(["qdbus6", "org.kde.KWin", "/Scripting",
                         "org.kde.kwin.Scripting.unloadScript", plugin],
                        capture_output=True, text=True, timeout=timeout)
-        return True
+        if not verify:
+            return True
+        # A raise is not instant, and asking too early reports a failure that was
+        # only earliness. Two looks rather than one long sleep: the usual case
+        # answers on the first.
+        for _ in range(2):
+            if focused(inst):
+                return True
+            time.sleep(0.4)
+        return False
     except Exception:
         return False
     finally:

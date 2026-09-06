@@ -34,6 +34,22 @@
  *  5. The expand runs off Time.unscaledDeltaTime in Tick(), not a coroutine, so
  *     a scene load mid-animation cannot strand the panel half-open.
  *
+ * The panel is dragged by its header, and the offset is the *only* thing about
+ * its placement that is the player's: everything else — the vertical stretch, the
+ * centre pivot the expand grows out of, the resting width — is still computed.
+ * ApplyExpand is therefore still the single writer of the transform, and the drag
+ * moves a stored offset that it applies, rather than writing anchoredPosition
+ * behind its back and being overwritten on the next frame something animates.
+ *
+ * Two consequences are worth keeping. The offset is clamped into the canvas on
+ * every apply rather than only on release, because the *panel* changes size under
+ * a fixed offset — the master-detail widen is 480px of growth that can push a
+ * panel parked at the edge off screen — and a resolution change does it too.
+ * And the way back is a button rather than a gesture: a panel dragged mostly off
+ * screen still has its header, but hunting for the last few pixels of it is not a
+ * recovery, so the recentre button appears beside the close button the moment the
+ * panel is anywhere but home and takes it back in one click.
+ *
  * The canvas also carries the draggable windows (UI/Gui/FloatWindow.cs), for the
  * flows that are read *against* the scene behind them rather than instead of it —
  * today, submitting a contract. They open and close independently of the panel,
@@ -120,6 +136,32 @@ namespace GeneKerman.UI.Gui
         private bool typing;            // a text box in the sidebar has focus
         private bool dragLatch;         // a drag that started on the panel
         private float lastCanvasScale = -1f;
+
+        /// <summary>
+        /// Where the player has dragged the panel, as an offset from the screen
+        /// centre in canvas units. Zero is home, and the only value at which the
+        /// recentre button is hidden.
+        ///
+        /// Session-scoped and deliberately not persisted: adding a settings key
+        /// means adding it to ApiClient's Save/Load pair and to build.sh's shipped
+        /// default, and a stored position is the one kind of setting that can be
+        /// wrong for a screen the player has since stopped using. FloatWindow keeps
+        /// its remembered positions the same way, and for the same reason.
+        /// </summary>
+        private Vector2 panelOffset;
+
+        /// <summary>The recentre glide is running. Cancelled by a drag, since the
+        /// player grabbing the panel outranks an animation they started before.</summary>
+        private bool recentering;
+
+        /// <summary>Canvas units per second for that glide, fixed when it starts so
+        /// the trip takes ExpandSeconds however far it has to travel — a speed
+        /// derived from the *current* distance would decay and never arrive.</summary>
+        private float recenterSpeed;
+
+        private RectTransform canvasRect;
+        private Vector2 lastCanvasSize = Vector2.zero;
+        private Btn recenterBtn;
 
         /// <summary>Scene the labels were last rebuilt for. See RefreshTextAfterSceneChange.</summary>
         private GameScenes lastScene = GameScenes.LOADING;
@@ -244,6 +286,10 @@ namespace GeneKerman.UI.Gui
         private void BuildHierarchy()
         {
             var root = new El(rootGo).Stretch();
+            // The area the panel is clamped into. The canvas root rather than the
+            // screen, so the drag is in the same units as anchoredPosition and the
+            // CanvasScaler's mapping is already accounted for.
+            canvasRect = root.Rt;
 
             BuildPanel(root);
 
@@ -287,11 +333,30 @@ namespace GeneKerman.UI.Gui
             // would otherwise have found the list. Hand them down instead.
             panel.Go.AddComponent<ScrollForwarder>();
 
-            // Header
-            var header = UIF.Box(panel, "Header").Row(Theme.Space2).H(28);
+            // Header. Also the drag handle, which is why it is a raycast target at
+            // all: a Box paints nothing and so receives no pointer events, and El
+            // .Raycast is a no-op without an Image to set the flag on. The fill is
+            // fully transparent — an Image with alpha 0 is still hit (the default
+            // alphaHitTestMinimumThreshold is 0), so this buys the grab area without
+            // painting a bar the design does not otherwise have.
+            var header = UIF.Box(panel, "Header").Row(Theme.Space2).H(28)
+                            .Fill(Theme.Alpha(Theme.Foreground, 0f));
+
             UIF.Label(header, "Boundless Missions", Theme.FontLg).Bold();
             UIF.Grow(header);
+
+            // Left of the X, and hidden until the panel is actually away from home —
+            // see UpdateRecentre, which also aims the arrow.
+            recenterBtn = UIF.IconButton(header, RecenterIcon(), Recenter, BtnStyle.Ghost, 24, 13);
+            recenterBtn.E.Active(false);
+
             UIF.Button(header, "X", () => SetOpen(false), BtnStyle.Ghost, 24).E.W(30);
+
+            // Bound after the buttons so it is the header's own handler: uGUI hands a
+            // drag to the nearest ancestor that takes one, and neither Button does,
+            // so a drag begun on either of them moves the panel and only a genuine
+            // click still clicks. FloatWindow's headers behave the same way.
+            header.Add<WindowDrag>().Bind(panelRect, canvasRect, null, OnPanelDragged);
 
             UIF.Divider(panel);
 
@@ -572,7 +637,9 @@ namespace GeneKerman.UI.Gui
             UpdatePixelDensity();
             UpdateAssets();
             UpdateLimited();
+            UpdatePanelBounds();
             AnimateExpand();
+            UpdateRecentre();
             viewer.Tick();
             toasts.Tick();
             UpdateInputLock();
@@ -789,6 +856,15 @@ namespace GeneKerman.UI.Gui
                 moved = true;
             }
 
+            // The way home. Same duration as the expand and the widen, so a click
+            // that happens to do two of the three still reads as one motion.
+            if (recentering)
+            {
+                panelOffset = Vector2.MoveTowards(panelOffset, Vector2.zero, recenterSpeed * dt);
+                if (panelOffset == Vector2.zero) recentering = false;
+                moved = true;
+            }
+
             if (moved) ApplyExpand();
         }
 
@@ -806,7 +882,16 @@ namespace GeneKerman.UI.Gui
             if (panelRect == null) return;
 
             panelRect.sizeDelta = new Vector2(currentWidth, -VerticalMargin * 2f);
-            panelRect.anchoredPosition = Vector2.zero;
+            panelRect.anchoredPosition = panelOffset;
+
+            // Clamped on every apply, not only when the drag ends: the panel changes
+            // size under a fixed offset — the master-detail widen is 480px of growth
+            // — and so does the canvas, on a resolution or window change. Either can
+            // push a panel parked near the edge off screen with its header out of
+            // reach. WindowDrag's clamp rather than a second copy of the arithmetic,
+            // so there is one edge margin in this file and not two.
+            WindowDrag.Clamp(panelRect, canvasRect);
+            panelOffset = panelRect.anchoredPosition;
 
             // X only, from a pivot at the panel's centre, so it grows out of the middle
             // of the screen in both directions at once. Y is left at 1: scaling both
@@ -817,6 +902,106 @@ namespace GeneKerman.UI.Gui
             // opening announces itself, closing gets out of the way.
             float scale = EaseOutExpo(openAmount);
             panelRect.localScale = new Vector3(scale, 1f, 1f);
+        }
+
+        // ── Dragging the panel ──────────────────────────────────────────────
+
+        /// <summary>
+        /// The header was dragged. WindowDrag has already moved and clamped the rect;
+        /// this records where it landed, because ApplyExpand is the single writer of
+        /// the transform and would otherwise put the panel back on the next frame
+        /// anything animated.
+        /// </summary>
+        private void OnPanelDragged()
+        {
+            if (panelRect == null) return;
+            panelOffset = panelRect.anchoredPosition;
+            // A hand on the panel outranks an animation the same hand started a
+            // moment ago.
+            recentering = false;
+        }
+
+        /// <summary>The recentre button's arrow, baked pointing up. UpdateRecentre
+        /// turns it; the sprite itself is cached per (shape, size, colour), so the
+        /// rotation costs nothing beyond one transform write.</summary>
+        private static SpriteKey RecenterIcon() => Sprites.Arrow(Theme.Foreground, 13);
+
+        /// <summary>
+        /// Put the panel back in the middle. A glide rather than a jump, and over the
+        /// same ExpandSeconds as everything else here — the point of the button is to
+        /// recover a panel that has been dragged somewhere unhelpful, and a panel that
+        /// teleports leaves the player to work out that it was the same one.
+        /// </summary>
+        private void Recenter()
+        {
+            if (panelOffset == Vector2.zero) return;
+
+            // Fixed at the start, so the trip takes ExpandSeconds however far it has
+            // to go. A speed read from the *current* distance each frame is an
+            // exponential decay, which never actually arrives.
+            recenterSpeed = Mathf.Max(panelOffset.magnitude, 1f) / ExpandSeconds;
+            recentering = true;
+        }
+
+        /// <summary>
+        /// Re-apply the placement when the canvas itself changes size. The offset is
+        /// stored, not derived, so nothing else notices that the space it was clamped
+        /// into has shrunk — and a window resize is exactly how a panel parked at the
+        /// right-hand edge ends up outside the screen.
+        /// </summary>
+        private void UpdatePanelBounds()
+        {
+            if (canvasRect == null) return;
+
+            Vector2 size = canvasRect.rect.size;
+            if (size == lastCanvasSize) return;
+
+            lastCanvasSize = size;
+            ApplyExpand();
+        }
+
+        /// <summary>
+        /// Show the recentre button only while the panel is away from home, and aim
+        /// its arrow at the middle of the screen.
+        /// </summary>
+        private void UpdateRecentre()
+        {
+            if (recenterBtn == null) return;
+
+            // A pixel of slack. A drag that ends a hair off centre is home as far as
+            // anyone can see, and a button that comes back for half a pixel of drift
+            // reads as a flicker rather than as an offer.
+            bool away = panelOffset.sqrMagnitude > 1f;
+            if (recenterBtn.E.Go.activeSelf != away) recenterBtn.E.Active(away);
+            if (!away) return;
+
+            var icon = recenterBtn.Icon;
+            if (icon == null) return;
+
+            // Aimed from the arrow itself rather than from the panel's centre: the
+            // button sits in the panel's top corner, and at close range those two
+            // headings differ by enough to point visibly wide of the middle.
+            //
+            // WorldToScreenPoint with the canvas's own camera (null on a
+            // ScreenSpaceOverlay canvas, which is what this one is) is the one form
+            // that is correct for every canvas mode — reading the corners directly
+            // and assuming they are screen pixels is what put every rect in the test
+            // bridge's UI dump half a screen out.
+            Vector2 here = RectTransformUtility.WorldToScreenPoint(
+                canvas != null ? canvas.worldCamera : null, icon.Rt.position);
+            Vector2 dir = new Vector2(Screen.width, Screen.height) * 0.5f - here;
+
+            // Directly over the centre: keep the last heading rather than snapping to
+            // a meaningless one. The button is on its way out at that point anyway.
+            if (dir.sqrMagnitude < 1f) return;
+
+            // The sprite points up, so its zero is at 90 degrees. The heading is
+            // computed in screen space and applied as a local rotation, which the
+            // panel's X scale shears for the quarter-second of the open animation —
+            // it is exact from the moment the panel has finished arriving, which is
+            // the only time the player is aiming at anything.
+            float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg - 90f;
+            icon.Rt.localRotation = Quaternion.Euler(0f, 0f, angle);
         }
 
         /// <summary>

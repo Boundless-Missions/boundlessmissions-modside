@@ -204,11 +204,21 @@ def focused(inst: Instance) -> bool:
         if "x" not in before:
             return False
         env = dict(os.environ, YDOTOOL_SOCKET=Instance.YDOTOOL_SOCKET)
-        subprocess.run(["ydotool", "mousemove", "-x", "1", "-y", "1"],
-                       env=env, capture_output=True, timeout=10)
-        time.sleep(0.15)
-        after = inst.pointer()
-        return (after.get("x"), after.get("y")) != (before.get("x"), before.get("y"))
+        # Both directions, because one of them can be a no-op through no fault of
+        # focus. The nudge is relative, so a cursor already resting against the
+        # far edge cannot move further that way and the pointer reads back
+        # unchanged — which this used to report as "input is not reaching this
+        # instance". It cost a mouse action every time the previous one had left
+        # the cursor in a corner, which is exactly what clicking a control near
+        # the screen edge does.
+        for dx, dy in ((1, 1), (-1, -1)):
+            subprocess.run(["ydotool", "mousemove", "-x", str(dx), "-y", str(dy)],
+                           env=env, capture_output=True, timeout=10)
+            time.sleep(0.15)
+            after = inst.pointer()
+            if (after.get("x"), after.get("y")) != (before.get("x"), before.get("y")):
+                return True
+        return False
     except Exception:
         return False
 

@@ -202,6 +202,17 @@ if [ "$DO_BUILD" = 1 ]; then
   # person who runs build.sh's packaging step.
   build production
   echo "   (bin/ rebuilt as production)"
+  # …and say what that costs, loudly, because `build` DEPLOYS.
+  #
+  # The production DLL carries no debug bridge, so this does not merely leave a
+  # shippable artefact in bin/ — it strips the harness out of every KSP instance
+  # on the machine, and the next `gkrun.py` reports only "did not come up in
+  # time". That symptom names neither this script nor the channel, and it cost a
+  # live two-instance session the better part of twenty minutes to trace.
+  echo ""
+  echo "⚠  Every dev instance now has a PRODUCTION DLL — no debug bridge."
+  echo "   The harness (tools/gkrun.py) will not see them until you run:"
+  echo "       GK_CHANNEL=dev ./build.sh"
 fi
 
 exit $fail

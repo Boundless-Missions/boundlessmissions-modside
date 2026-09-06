@@ -466,6 +466,15 @@ namespace GeneKerman.UI.Gui
         public readonly Button Button;
         public readonly Lbl Label;
 
+        /// <summary>
+        /// The drawn shape inside an <see cref="UIF.IconButton"/>, null for a
+        /// captioned one. Exposed because an icon is not always a fixed picture: the
+        /// sidebar's recentre button turns its arrow to face the screen's middle, and
+        /// the alternative — reaching into the button's children by name — would let
+        /// a rename here break a caller silently.
+        /// </summary>
+        public El Icon { get; internal set; }
+
         internal Btn(El e, Button b, Lbl l) { E = e; Button = b; Label = l; }
 
         public Btn Interactable(bool on) { Button.interactable = on; return this; }
@@ -790,6 +799,7 @@ namespace GeneKerman.UI.Gui
             img.raycastTarget = false;
             Sprites.Bind(img, icon);
 
+            b.Icon = host;
             return b;
         }
 

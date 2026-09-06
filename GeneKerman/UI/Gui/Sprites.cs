@@ -35,7 +35,7 @@ namespace GeneKerman.UI.Gui
     /// function — which is also what gets it the same antialiasing and the same
     /// fill-or-outline behaviour as everything else (see Star5Distance).
     /// </summary>
-    internal enum IconShape { None = 0, Star5, Trash, Restore }
+    internal enum IconShape { None = 0, Star5, Trash, Restore, Arrow }
 
     /// <summary>Identity of a generated sprite. Value type so it keys a Dictionary cheaply.</summary>
     internal struct SpriteKey : IEquatable<SpriteKey>
@@ -238,6 +238,25 @@ namespace GeneKerman.UI.Gui
         /// </summary>
         public static SpriteKey Restore(Color fill, int size, Color? stroke = null, int borderWidth = Theme.BorderWidth)
             => Icon(IconShape.Restore, fill, size, stroke, borderWidth);
+
+        /// <summary>
+        /// A thick arrow of exactly <paramref name="size"/> px, drawn unsliced and
+        /// pointing **up** — the sidebar's recentre button, which rotates it to face
+        /// the middle of the screen.
+        ///
+        /// Drawn rather than typed for the reason Star and Trash are: KSP's TMP font
+        /// is whatever the game loaded, so an arrow glyph is a bet, and there is no
+        /// Unity Editor here to import one with. Up is the natural orientation
+        /// because the caller supplies the angle: a sprite baked at any other
+        /// heading would make every rotation an offset somebody has to remember.
+        ///
+        /// Head and shaft are unioned, and the shaft deliberately overlaps the head's
+        /// base — two shapes that merely touch leave a hairline seam once the edges
+        /// are antialiased. The head is the wider half by some margin: at 14 px the
+        /// only thing that survives is the silhouette's direction.
+        /// </summary>
+        public static SpriteKey Arrow(Color fill, int size, Color? stroke = null, int borderWidth = Theme.BorderWidth)
+            => Icon(IconShape.Arrow, fill, size, stroke, borderWidth);
 
         private static SpriteKey Icon(IconShape shape, Color fill, int size,
                                       Color? stroke, int borderWidth)
@@ -530,6 +549,7 @@ namespace GeneKerman.UI.Gui
                         {
                             case IconShape.Trash:   d = TrashDistance(ix, iy, ir); break;
                             case IconShape.Restore: d = RestoreDistance(ix, iy, ir); break;
+                            case IconShape.Arrow:   d = ArrowDistance(ix, iy, ir); break;
                             default:                d = Star5Distance(ix, iy, ir); break;
                         }
                     }
@@ -707,6 +727,30 @@ namespace GeneKerman.UI.Gui
             float inner = RoundedBoxDistance(x, y + 0.46f, 0.58f, 0.32f, 0.10f);
 
             return Mathf.Min(d, Mathf.Max(outer, -inner)) * r;
+        }
+
+        /// <summary>
+        /// Signed distance to a thick arrow pointing up, centred on the origin and
+        /// fitting a box of half-extent <paramref name="r"/>.
+        ///
+        /// The head is a triangle and the shaft a rounded box, unioned — the same two
+        /// primitives RestoreDistance builds its arrow from, at proportions that read
+        /// as a direction on their own rather than as the moving part of a larger
+        /// picture. The shaft's top edge sits above the head's base line so the union
+        /// closes the seam; the widths are in units of r, which is what keeps the
+        /// icon identical at every size it is asked for.
+        /// </summary>
+        private static float ArrowDistance(float px, float py, float r)
+        {
+            if (r <= 0f) return 1f;
+
+            float x = px / r;
+            float y = py / r;
+
+            float d = TriangleUpDistance(x, y, 0.94f, 0.10f, 0.70f);
+            d = Mathf.Min(d, RoundedBoxDistance(x, y + 0.42f, 0.26f, 0.54f, 0.07f));
+
+            return d * r;
         }
 
         /// <summary>

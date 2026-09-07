@@ -188,7 +188,16 @@ namespace GeneKerman
                     return Result.Pending;
                 }
 
-                if (!keys.Verify(payload, signature, s.ServerId)) return Result.Rejected;
+                if (!keys.Verify(payload, signature, s.ServerId))
+                {
+                    // Before refusing, consider that our copy of the key may
+                    // simply be old. `RetryOnVerifyFailure` allows exactly one
+                    // refetch per key set, so a forged token is refused on its
+                    // second look and the nonce is never spent on this path —
+                    // `Pending` holds the transition rather than granting it.
+                    if (TransitionKeys.RetryOnVerifyFailure()) return Result.Pending;
+                    return Result.Rejected;
+                }
 
                 spent[s.Nonce] = s.ExpiresWc;
                 live[s.Pid] = s;

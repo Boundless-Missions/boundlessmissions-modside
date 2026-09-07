@@ -38,6 +38,12 @@ namespace GeneKerman
         private static double lastAttemptWc;
         private static bool fetching;
 
+        /// <summary>
+        /// The `fetchedAtWc` of the key set we have already spent a re-fetch on
+        /// after a failed verification, so each set buys exactly one.
+        /// </summary>
+        private static double retriedForFetchAt = double.NegativeInfinity;
+
         /// <summary>An RSA public key, as JWKS carries it: modulus and exponent.</summary>
         private struct PubKey
         {
@@ -76,6 +82,44 @@ namespace GeneKerman
                 fetching = false;
                 Debug.LogWarning("[GeneKerman] transition key fetch could not start: " + ex.Message);
             }
+        }
+
+        /// <summary>
+        /// Drop a cached key set that has just failed to verify a token, and go
+        /// and get the current one. Returns whether a refresh was actually started.
+        ///
+        /// **A rotated key is indistinguishable from a forged token here**, and
+        /// that is the whole problem: both present as a signature that does not
+        /// check out. The set is cached for six hours while keys rotate on ninety
+        /// days, so the rotation window is narrow — but landing inside it used to
+        /// mean every sanctioned transition for the rest of the session came back
+        /// `Rejected`, and the symptom (craft tainted by the watchdog for moves
+        /// that were entirely legitimate) points nowhere near a stale key. It was
+        /// hit routinely in the dev rig, where restarting the stack mints a new
+        /// signing key and only restarting KSP cleared it.
+        ///
+        /// Two things keep this from being a lever. Each fetched set buys **one**
+        /// retry, so a genuinely forged token cannot loop: the second failure
+        /// against the same set is a refusal and stays one. And the caller is told
+        /// `Pending`, never `Accepted` — the transition is *held*, the nonce is
+        /// not spent, and a forger gains a delay rather than a sanction. Failing
+        /// closed is unchanged; this only stops us failing closed permanently on
+        /// the strength of a key we should have thrown away.
+        /// </summary>
+        internal static bool RetryOnVerifyFailure()
+        {
+            if (current == null) return false;
+            if (fetchedAtWc == retriedForFetchAt) return false;
+            retriedForFetchAt = fetchedAtWc;
+            current = null;
+            fetchedAtWc = 0.0;
+            // The one retry that matters must not be swallowed by the ordinary
+            // backoff; the once-per-set guard above is what bounds it instead.
+            lastAttemptWc = 0.0;
+            Debug.Log("[GeneKerman] a transition token failed to verify; "
+                    + "refetching the signing keys in case they rotated");
+            BeginFetch();
+            return true;
         }
 
         private static IEnumerator Fetch()

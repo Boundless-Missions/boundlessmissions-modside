@@ -521,8 +521,60 @@ namespace GeneKerman.UI.Gui
                 return null;
             }
 
-            CircleCrop(tex);
-            return tex;
+            // Never crop the loaded texture in place: see SquareArgb32 for the two
+            // reasons that silently produces a hard-edged rectangle instead.
+            var square = SquareArgb32(tex);
+            UnityEngine.Object.Destroy(tex);
+            if (square == null) return null;
+
+            CircleCrop(square);
+            return square;
+        }
+
+        /// <summary>
+        /// Centre-crop the decoded avatar into a square, mipmapped, alpha-capable
+        /// texture. This is what makes the circle possible at all, and two separate
+        /// things force it — either one alone leaves the picture wrong.
+        ///
+        /// LoadImage replaces the texture's format with the *file's*, so the ARGB32
+        /// asked for above survives only when the image has an alpha channel. An
+        /// opaque source — a JPEG, or a PNG saved without one — arrives as RGB24, and
+        /// every alpha byte CircleCrop writes is then discarded with no error at all:
+        /// the crop becomes a no-op and the avatar draws as a full-bleed rectangle.
+        /// Separately, UIF.Picture derives width from the texture's aspect, so a
+        /// portrait picture draws portrait however well it is rounded.
+        ///
+        /// A Discord avatar is always a square 64px PNG and hits neither. An avatar
+        /// uploaded on the website is whatever the player had — /web/account/avatar
+        /// takes PNG, JPEG or WebP and stores the bytes verbatim, no square crop and
+        /// no resize — so it hits both, which is exactly how it was found.
+        ///
+        /// Mipmaps are on because that upload is capped at 2 MB rather than at a
+        /// resolution: downsampling a 1024px picture to the 26px it is drawn at with
+        /// no mip chain sparkles. CircleCrop's Apply regenerates them, so the levels
+        /// carry the punched alpha rather than the uncropped square's.
+        /// </summary>
+        private static Texture2D SquareArgb32(Texture2D src)
+        {
+            if (src == null) return null;
+
+            int side = Mathf.Min(src.width, src.height);
+            if (side < 2) return null;
+
+            // Centre rather than top-left: a portrait avatar is almost always framed
+            // on its middle, and a face is the one thing a corner crop loses.
+            int x0 = (src.width - side) / 2;
+            int y0 = (src.height - side) / 2;
+
+            var srcPx = src.GetPixels32();
+            var px = new Color32[side * side];
+            for (int y = 0; y < side; y++)
+                Array.Copy(srcPx, (y0 + y) * src.width + x0, px, y * side, side);
+
+            var square = new Texture2D(side, side, TextureFormat.ARGB32, true);
+            square.SetPixels32(px);
+            square.Apply(true, false);
+            return square;
         }
 
         /// <summary>
@@ -532,6 +584,12 @@ namespace GeneKerman.UI.Gui
         /// the same reason ScrollView uses RectMask2D instead. Rounding the texture
         /// is deterministic, costs one pass over a 128px image, and antialiases at
         /// the *source* resolution, which is finer than the 26px it is drawn at.
+        ///
+        /// Only ever called on SquareArgb32's output, and that is a precondition
+        /// rather than a convenience: on a non-square texture this inscribes the
+        /// circle in the short side (leaving transparent bands the aspect-preserving
+        /// UIF.Picture still reserves width for), and on an alpha-less one every
+        /// write below is silently discarded.
         /// </summary>
         private static void CircleCrop(Texture2D tex)
         {
@@ -560,7 +618,10 @@ namespace GeneKerman.UI.Gui
             }
 
             tex.SetPixels32(px);
-            tex.Apply(false, false);
+            // updateMipmaps: the levels are built from the *uncropped* square by
+            // SquareArgb32's own Apply, and a picker avatar is drawn small enough to
+            // read one of them rather than level 0.
+            tex.Apply(true, false);
         }
 
         private void Select(string id, string name)

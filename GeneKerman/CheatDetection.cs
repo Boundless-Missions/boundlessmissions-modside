@@ -668,6 +668,15 @@ namespace GeneKerman
             double ut = Planetarium.GetUniversalTime();
             double dt = ut - baseUt;
             var body = v.mainBody;
+
+            // A server-sanctioned transition (a multiplayer bubble relabel: the
+            // UT moves by Δ in either direction and the craft's epoch with it, so
+            // it stays put). Verified here, never trusted: the token's signature,
+            // nonce and expiry were checked on submit, and it is spent only on the
+            // tick the craft is FOUND in the exact state it names — anything else
+            // is judged as usual. Inert with no multiplayer mod: no tokens exist.
+            if (SanctionedStateReached(v, ut)) { Rebaseline(v); grace = 0; return; }
+
             if (dt <= 0 || body == null) { Rebaseline(v); return; }
 
             if (grace > 0)
@@ -712,6 +721,50 @@ namespace GeneKerman
                 CheckPositionJump(v, body, dt);
             }
             Rebaseline(v);
+        }
+
+        /// <summary>Whether the active vessel carries a sanction and is now in the
+        /// state it names; if so the sanction is spent. Same body and conic
+        /// shape, and the named conic places the craft within a kilometre of
+        /// where it is (the server's copy of the elements trails the craft by up
+        /// to one republish). A landed fix: the same spot within 50 m.</summary>
+        private static bool SanctionedStateReached(Vessel v, double ut)
+        {
+            try
+            {
+                SanctionedTransition.ExpectedState exp; string label;
+                if (!SanctionedTransition.PeekFor(v.persistentId, out exp, out label) || exp == null)
+                    return false;
+                var body = v.mainBody;
+                if (body == null || exp.BodyName != body.bodyName) return false;
+                bool ok;
+                if (exp.Orbital)
+                {
+                    var o = v.orbit;
+                    if (o == null) return false;
+                    ok = Math.Abs(o.semiMajorAxis - exp.Sma) <= Math.Max(1000.0, 0.002 * Math.Abs(exp.Sma))
+                         && Math.Abs(o.eccentricity - exp.Ecc) <= 0.002
+                         && Math.Abs(o.inclination - exp.Inc) <= 0.05;
+                    if (ok)
+                    {
+                        var named = new Orbit(exp.Inc, exp.Ecc, exp.Sma, exp.Lan, exp.ArgPe, exp.Mna,
+                                              exp.EpochUt, body);
+                        Vector3d at = named.getRelativePositionAtUT(ut).xzy;
+                        ok = (at - (v.CoMD - body.position)).magnitude <= 1000.0;
+                    }
+                }
+                else
+                {
+                    Vector3d here = body.GetWorldSurfacePosition(v.latitude, v.longitude, v.altitude);
+                    Vector3d named = body.GetWorldSurfacePosition(exp.Lat, exp.Lon, exp.Alt);
+                    ok = (v.Landed || v.Splashed) && (here - named).magnitude <= 50.0;
+                }
+                if (!ok) return false;
+                SanctionedTransition.TakeFor(v.persistentId, out exp, out label);
+                Debug.Log($"[GeneKerman] Cheat detection: sanctioned {label} for '{v.vesselName}' — re-baselined");
+                return true;
+            }
+            catch (Exception) { return false; }
         }
 
         private void Rebaseline(Vessel v)

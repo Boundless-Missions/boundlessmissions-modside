@@ -231,6 +231,24 @@ namespace GeneKerman
             return true;
         }
 
+        /// <summary>
+        /// The state a vessel's pending sanction names, WITHOUT spending it: the
+        /// watchdog looks every tick and spends it (<see cref="TakeFor"/>) only on
+        /// the tick the vessel is actually found in that state. Expired
+        /// sanctions read as absent.
+        /// </summary>
+        internal static bool PeekFor(uint pid, out ExpectedState expected, out string label)
+        {
+            expected = null;
+            label = "";
+            Sanction s;
+            if (!live.TryGetValue(pid, out s)) return false;
+            if (s.ExpiresWc <= NowWc()) { live.Remove(pid); return false; }
+            expected = s.State;
+            label = s.Type.ToString();
+            return true;
+        }
+
         /// <summary>Drop a vessel's pending sanction — it did not transition after all.</summary>
         internal static void Forget(uint pid)
         {

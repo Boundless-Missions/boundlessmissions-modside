@@ -30,3 +30,12 @@ GameData/BoundlessMissions/PluginData/
 # absence from the repo means a fresh clone cannot build and nothing would ever
 # notice the file changing. `*.dll` above would otherwise exclude it.
 !GeneKerman/lib/websocket-sharp.dll
+
+# Release artifacts. The GitHub Release is the source of record (see
+# PACKAGING.md: the netkan $kref names it), so a copy here is a duplicate that
+# never delta-compresses and grows the repo by ~550KB per release forever.
+# build.sh --release regenerates it from any tagged commit.
+dist/
+
+# Agent guidance for the GK-DW workspace, filter-out for possible private information
+/CLAUDE.md

@@ -209,7 +209,7 @@ namespace GeneKerman
                     if (++seen > MaxFlagsPerPayload)
                     {
                         Debug.LogWarning($"[GeneKerman] FlagTransfer: payload carries {flags.Count} " +
-                                         $"flags, over the {MaxFlagsPerPayload} cap — the rest were " +
+                                         $"flags, over the {MaxFlagsPerPayload} cap, the rest were " +
                                          "not installed. Their references reset to the stock flag.");
                         break;
                     }
@@ -339,7 +339,7 @@ namespace GeneKerman
             // since the craft still installs and merely looks wrong.
             if (runStart < 0 && marks.Count > 0)
                 Debug.LogWarning($"[GeneKerman] FlagTransfer: {marks.Count} GKFLAG marker(s) in this " +
-                                 "craft, none of them a trailing run — nothing follows the last block " +
+                                 "craft, none of them a trailing run, nothing follows the last block " +
                                  "cleanly, so no flags were installed. Either the craft was not written " +
                                  "by the export chain, or a later side-channel strip left residue behind " +
                                  "the flags.");
@@ -388,7 +388,7 @@ namespace GeneKerman
                 if (++seen > MaxFlagsPerPayload)
                 {
                     Debug.LogWarning($"[GeneKerman] FlagTransfer: craft carries {flagNodes.Count} " +
-                                     $"flags, over the {MaxFlagsPerPayload} cap — the rest were " +
+                                     $"flags, over the {MaxFlagsPerPayload} cap, the rest were " +
                                      "not installed. Their references reset to the stock flag.");
                     break;
                 }
@@ -640,7 +640,7 @@ namespace GeneKerman
                     if (png == null)
                     {
                         Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' is .{ext}, which a "
-                            + "recipient may not write, and it could not be re-encoded as PNG here — "
+                            + "recipient may not write, and it could not be re-encoded as PNG here, "
                             + "not embedding; that reference resets to the stock flag.");
                         continue;
                     }
@@ -734,7 +734,7 @@ namespace GeneKerman
                 (long)w * h > ToolActions.MaxImagePixels)
             {
                 Debug.LogWarning($"[GeneKerman] FlagTransfer: flag '{url}' is {w}x{h}, too large to "
-                                 + "re-encode for transfer — not embedding.");
+                                 + "re-encode for transfer, not embedding.");
                 return null;
             }
 

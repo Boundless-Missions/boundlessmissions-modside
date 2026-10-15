@@ -264,8 +264,8 @@ namespace GeneKerman
                         carryRemovals.Remove(kv.Key);
                         carryUt.Remove(kv.Key);
                         Debug.Log($"[GeneKerman] Carried removal for {kv.Key} dropped: queued at " +
-                                  $"UT {when:F1}, loaded UT {now:F1} (Planetarium {NowUt():F1}) " +
-                                  "— rolled back by a quickload.");
+                                  $"UT {when:F1}, loaded UT {now:F1} (Planetarium {NowUt():F1}), " +
+                                  "rolled back by a quickload.");
                         continue;
                     }
                     if (!pendingRescueRemovals.ContainsKey(kv.Key))

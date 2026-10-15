@@ -1384,7 +1384,7 @@ namespace GeneKerman.Web
                     else
                     {
                         bridge.Jobs.Complete(jobId, false,
-                            waiting + " offers are waiting — pass import_id to say which one.");
+                            waiting + " offers are waiting, pass import_id to say which one.");
                         bridge.Broadcast("job", bridge.Jobs.Get(jobId).ToJson());
                         yield break;
                     }
@@ -1455,7 +1455,7 @@ namespace GeneKerman.Web
                 Kind = "rescue",
                 ContractorId = contractorId,
                 ContractorName = MiniJSON.GetString(body, "contractor_name", ""),
-                Mission = MiniJSON.GetString(body, "mission", "Bridge test rescue — bring the crew home."),
+                Mission = MiniJSON.GetString(body, "mission", "Bridge test rescue, bring the crew home."),
                 Payment = MiniJSON.GetInt(body, "payment", 1000),
                 Fine = MiniJSON.GetInt(body, "fine", 0),
                 DueDate = MiniJSON.GetString(body, "due_date", ""),
@@ -1487,7 +1487,7 @@ namespace GeneKerman.Web
                 if (mod?.Api == null) return Refused("Mod not ready.");
                 if (mod.Api.IsLinked != true) return Refused("Not linked.");
                 if (HighLogic.LoadedScene != GameScenes.FLIGHT)
-                    return Refused("A rescue is issued against the vessel being flown — "
+                    return Refused("A rescue is issued against the vessel being flown, "
                                    + "enter flight on the craft that is to become the wreck.");
                 var av = FlightGlobals.ActiveVessel;
                 if (av == null) return Refused("No active vessel.");
@@ -1495,7 +1495,7 @@ namespace GeneKerman.Web
                 // nobody aboard has no crew to come home, and every assertion T1 makes
                 // about the ownership tag would then pass over an empty set.
                 if (av.GetCrewCount() <= 0)
-                    return Refused("The stranded vessel has no crew — a crewless rescue "
+                    return Refused("The stranded vessel has no crew, a crewless rescue "
                                    + "makes every crew assertion true of nothing.");
 
                 string why;
@@ -1638,7 +1638,7 @@ namespace GeneKerman.Web
                     {
                         if (existing == null) return Refused("No kerbal named '" + name + "'.");
                         if (FindCrew(roster, to) != null)
-                            return Refused("'" + to + "' already exists — renaming onto it would "
+                            return Refused("'" + to + "' already exists, renaming onto it would "
                                            + "create the duplicate the collision guard exists to "
                                            + "prevent, and hide whatever it was going to catch.");
                         existing.ChangeName(to);
@@ -1685,7 +1685,7 @@ namespace GeneKerman.Web
                     // remove
                     if (existing == null) return Refused("No kerbal named '" + name + "'.");
                     if (existing.rosterStatus == ProtoCrewMember.RosterStatus.Assigned)
-                        return Refused("'" + name + "' is Assigned — aboard something. Removing a "
+                        return Refused("'" + name + "' is Assigned, aboard something. Removing a "
                                        + "crewed roster entry desyncs the vessel that holds it.");
                     bool gone = roster.Remove(existing);
                     return JobResult.Json("{\"ok\":" + B(gone) + ",\"removed\":" +
@@ -1713,7 +1713,7 @@ namespace GeneKerman.Web
                 case "DEAD":      pcm.rosterStatus = ProtoCrewMember.RosterStatus.Dead;      return null;
                 case "MISSING":   pcm.rosterStatus = ProtoCrewMember.RosterStatus.Missing;   return null;
                 case "ASSIGNED":
-                    return "Assigned is refused — it asserts the kerbal is aboard a vessel, "
+                    return "Assigned is refused, it asserts the kerbal is aboard a vessel, "
                            + "and setting it from the roster side alone manufactures a desync.";
                 default:
                     return "status must be Available|Dead|Missing (got '" + status + "').";
@@ -1835,7 +1835,7 @@ namespace GeneKerman.Web
             {
                 if (HighLogic.CurrentGame == null) return Refused("No save is loaded.");
                 if (HighLogic.LoadedScene != GameScenes.FLIGHT)
-                    return Refused("Must be in flight — the fixture is a copy of the active vessel.");
+                    return Refused("Must be in flight, the fixture is a copy of the active vessel.");
                 var src = FlightGlobals.ActiveVessel;
                 if (src == null) return Refused("No active vessel to copy.");
 
@@ -2303,7 +2303,7 @@ namespace GeneKerman.Web
             var pre = queue.RunSync(() =>
             {
                 if (HighLogic.LoadedScene == GameScenes.FLIGHT)
-                    return Refused("Refusing to load a save from flight — it would discard "
+                    return Refused("Refusing to load a save from flight, it would discard "
                                    + "everything since the last save. Leave the flight first.");
 
                 string path = System.IO.Path.Combine(

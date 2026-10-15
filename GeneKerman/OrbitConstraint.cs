@@ -181,11 +181,11 @@ namespace GeneKerman
             {
                 case "polar":
                     if (Math.Abs(incl - 90.0) > PolarInclTol)
-                        return $"Orbit must be polar (inclination ≈ 90°, ±{PolarInclTol:F0}°); current is {incl:F1}°.";
+                        return $"Orbit must be polar (inclination about 90°, ±{PolarInclTol:F0}°); current is {incl:F1}°.";
                     break;
                 case "equatorial":
                     if (!(incl <= EquatorialInclTol || incl >= 180.0 - EquatorialInclTol))
-                        return $"Orbit must be equatorial (inclination ≈ 0°, ±{EquatorialInclTol:F0}°); current is {incl:F1}°.";
+                        return $"Orbit must be equatorial (inclination about 0°, ±{EquatorialInclTol:F0}°); current is {incl:F1}°.";
                     break;
                 case "retrograde":
                     if (incl <= 90.0 + InclinedMargin)
@@ -197,11 +197,11 @@ namespace GeneKerman
                     break;
                 case "circular":
                     if (ecc > CircularEccTol)
-                        return $"Orbit must be circular (eccentricity ≤ {CircularEccTol:F2}); current is {ecc:F3}.";
+                        return $"Orbit must be circular (eccentricity at most {CircularEccTol:F2}); current is {ecc:F3}.";
                     break;
                 case "elliptical":
                     if (ecc < EllipticEccMin)
-                        return $"Orbit must be elliptical (eccentricity ≥ {EllipticEccMin:F2}); current is {ecc:F3}.";
+                        return $"Orbit must be elliptical (eccentricity at least {EllipticEccMin:F2}); current is {ecc:F3}.";
                     break;
                 case "synchronous":
                     return CheckPeriod(period, rot, 1.0, "synchronous");
@@ -230,7 +230,7 @@ namespace GeneKerman
             if (period <= 0 || rot <= 0) return null;
             double target = rot * factor;
             if (Math.Abs(period - target) / target > SyncPeriodTol)
-                return $"Orbit must be {label} (period ≈ {target / 3600.0:F2} h); current is {period / 3600.0:F2} h.";
+                return $"Orbit must be {label} (period about {target / 3600.0:F2} h); current is {period / 3600.0:F2} h.";
             return null;
         }
 
@@ -238,10 +238,10 @@ namespace GeneKerman
                                    double eccMin, double periodFactor, string label)
         {
             if (Math.Abs(incl - FrozenIncl) > FrozenInclTol)
-                return $"{label} orbit needs the critical inclination ≈ {FrozenIncl:F1}° " +
+                return $"{label} orbit needs the critical inclination about {FrozenIncl:F1}° " +
                        $"(±{FrozenInclTol:F0}°); current is {incl:F1}°.";
             if (ecc < eccMin)
-                return $"{label} orbit must be highly eccentric (eccentricity ≥ {eccMin:F2}); current is {ecc:F3}.";
+                return $"{label} orbit must be highly eccentric (eccentricity at least {eccMin:F2}); current is {ecc:F3}.";
             return CheckPeriod(period, rot, periodFactor, periodFactor < 1 ? label + " (half-day)" : label + " (one-day)");
         }
 

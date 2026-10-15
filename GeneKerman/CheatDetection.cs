@@ -263,7 +263,7 @@ namespace GeneKerman
                     {
                         Debug.LogWarning($"[GeneKerman] Carried cheat taint: ignoring " +
                                          $"{carried.Length - MaxCarriedBlocks} extra {TaintNodeName} " +
-                                         "block(s) — one vessel gets one.");
+                                         "block(s), one vessel gets one.");
                         break;
                     }
 
@@ -313,7 +313,7 @@ namespace GeneKerman
                 }
                 innerNode.RemoveNodes(TaintNodeName);
                 Debug.Log($"[GeneKerman] Applied carried cheat taint to imported vessel ({newPid}); " +
-                          $"{applied} reason(s) kept. It marks this hull only — a carried mark " +
+                          $"{applied} reason(s) kept. It marks this hull only, a carried mark " +
                           "does not spread to anything it docks with.");
             }
             catch (Exception ex)

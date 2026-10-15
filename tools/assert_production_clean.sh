@@ -100,11 +100,26 @@ MARKERS=(
   # already covered indirectly. Named explicitly so a rename that keeps the routes but
   # moves them into production is still caught.
   "DebugTestPanel"
+  # The dev-only test mission board switch: a dev client can ask the server for the
+  # admin-rotated test board instead of the live one (ClientState.ToggleTestBoard, and
+  # the button that calls it in UI/Gui/Panels/MissionsPanel.cs). The server refuses the
+  # request unless the account is on WEEKLY_TEST_ACCOUNT_IDS, so a leak here is not by
+  # itself a way to draw test missions — but a shipped DLL has no business being able
+  # to ask, and a mission from that board mints a real contract.
+  "ToggleTestBoard"         # ClientState.cs
+  "Test (dev)"              # the button label
+  "board=test"              # the query string ApiClient only builds off-production
+  "TEST BOARD"              # the badge MissionsPanel draws while on it
 )
 
 # NOTE: GKScenarioTrace is deliberately NOT a marker. It has an `#else` stub, so the
 # NAME is present in both channels and only its body is gated — asserting its absence
 # would fail every production build. If that stub is ever removed, add it here.
+#
+# `TestBoardRequested` is not a marker for exactly the same reason: it has an `#else`
+# stub returning false, which is what lets the call sites in ClientState stay
+# unconditional. `ToggleTestBoard` above is the half with no stub, so it is the half
+# whose absence actually means something.
 
 # One string from the production surface. If this ever goes missing the DLL was not
 # built, or was built wrong, and every "absent" result above is meaningless.
@@ -202,17 +217,23 @@ if [ "$DO_BUILD" = 1 ]; then
   # person who runs build.sh's packaging step.
   build production
   echo "   (bin/ rebuilt as production)"
-  # …and say what that costs, loudly, because `build` DEPLOYS.
+  # `build` here is `dotnet build`, which writes bin/ and NOTHING ELSE. Deployment to
+  # the KSP instances happens only in build.sh (its `cp -r` into each instance's
+  # GameData), and there is no copy target in GeneKerman.csproj and no
+  # Directory.Build.props/.targets adding one — verified by hashing a deployed DLL
+  # across a production `dotnet build`: byte-identical before and after, while bin/
+  # changed.
   #
-  # The production DLL carries no debug bridge, so this does not merely leave a
-  # shippable artefact in bin/ — it strips the harness out of every KSP instance
-  # on the machine, and the next `gkrun.py` reports only "did not come up in
-  # time". That symptom names neither this script nor the channel, and it cost a
-  # live two-instance session the better part of twenty minutes to trace.
+  # This block used to warn that every dev instance had just been stripped of its
+  # debug bridge and had to be rebuilt with GK_CHANNEL=dev. That was wrong, and
+  # expensively so: it is the loudest line the script prints, so it got believed and
+  # acted on, and the redundant redeploy it asks for is indistinguishable from a
+  # necessary one. If a copy step is ever added to the csproj, restore the warning —
+  # the underlying hazard (a production DLL silently costing the harness, with
+  # `gkrun.py` reporting only "did not come up in time") would be real again.
   echo ""
-  echo "⚠  Every dev instance now has a PRODUCTION DLL — no debug bridge."
-  echo "   The harness (tools/gkrun.py) will not see them until you run:"
-  echo "       GK_CHANNEL=dev ./build.sh"
+  echo "ℹ  bin/ now holds the PRODUCTION DLL. Your KSP instances were not touched —"
+  echo "   only build.sh deploys. If they were on a dev build, they still are."
 fi
 
 exit $fail

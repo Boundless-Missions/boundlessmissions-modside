@@ -74,8 +74,25 @@ namespace GeneKerman
 
             try
             {
-                // Force all parts to update their state before backup
-                vessel.protoVessel = vessel.BackupVessel();
+                // Force all parts to update their state before backup — but only for a
+                // LOADED vessel. `BackupVessel()` builds a fresh ProtoVessel by walking
+                // `vessel.parts`, which is empty on an unloaded one, so calling it there
+                // replaces a perfectly good snapshot with a hull that has no parts.
+                //
+                // This became reachable with relay hand-overs: a network is spread around
+                // a sphere of influence and almost every member is unloaded, so most of
+                // what is being exported has never had parts instantiated. An unloaded
+                // vessel's existing `protoVessel` IS its authoritative state — it is what
+                // persistence round-trips and what the whole SOI scan reads — so it is
+                // used as-is.
+                if (vessel.loaded)
+                    vessel.protoVessel = vessel.BackupVessel();
+                if (vessel.protoVessel == null)
+                {
+                    Debug.LogWarning("[GeneKerman] ExportVesselNode: no ProtoVessel for '"
+                                     + vessel.vesselName + "'; nothing to export.");
+                    return null;
+                }
 
                 ConfigNode vesselNode = new ConfigNode("VESSEL");
                 vessel.protoVessel.Save(vesselNode);
@@ -1084,6 +1101,82 @@ namespace GeneKerman
             LastImportRefusal = null;
         }
 
+        /// <summary>Refuse a vessel this install cannot build: one or more of its parts
+        /// resolve to nothing here.
+        ///
+        /// KSP does not fail on an unknown part, it <b>drops</b> it — the same fact
+        /// `PartAliases.ApplyToVesselNode` is called for a few lines earlier ("or the
+        /// spawn drops the part"). So without this the missing-mod case does not error,
+        /// it succeeds quietly and leaves a structurally incomplete hull in the save: a
+        /// wreck short its docking port or its crew capacity, which can make the rescue
+        /// it was spawned for impossible. Worse, it is sticky — the per-save dedup in
+        /// `GKContractScenario` means the contract cannot simply be spawned again once
+        /// the mod is installed.
+        ///
+        /// It runs at spawn rather than at accept on purpose. Accepting a contract this
+        /// install cannot yet supply is a legitimate thing to do (the pre-flight says so,
+        /// writes a CKAN modpack and offers "Accept anyway") — you accept now, install
+        /// the mod, then spawn. It is only the spawn that must not proceed, because only
+        /// the spawn is irreversible.
+        ///
+        /// Checked AFTER `PrepareInnerNode`, never before: `PartAliases` may have already
+        /// swapped a part that is installed here under another name (a DLC part for its
+        /// ReStock+ stand-in), and `RealFuelsTransfer` may have stripped modules whose
+        /// absence is fine. Asking earlier would refuse vessels that import perfectly.</summary>
+        private static bool PartsAreInstalled(ConfigNode innerNode, string where)
+        {
+            if (innerNode == null) return true;
+
+            var missing = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectUninstallableParts(innerNode, missing, seen);
+            if (missing.Count == 0) return true;
+
+            var shown = new List<string>();
+            for (int i = 0; i < missing.Count && i < 4; i++) shown.Add("'" + missing[i] + "'");
+            string list = string.Join(", ", shown.ToArray());
+            if (missing.Count > shown.Count) list += " and " + (missing.Count - shown.Count) + " more";
+
+            LastImportRefusal =
+                "it is built from " + list + ", which this install has not got. Install the "
+                + "mods it needs (a CKAN modpack has been written to GeneKerman_MissingMods) "
+                + "and try again";
+            Debug.LogError("[GeneKerman] " + where + ": refusing to spawn a vessel with "
+                           + missing.Count + " part(s) this install cannot resolve: " + list
+                           + ". Nothing was spawned; KSP would have dropped them silently.");
+            return false;
+        }
+
+        /// <summary>The hull's own parts, and only those: the PART nodes directly under
+        /// the VESSEL, never the ones nested inside them.
+        ///
+        /// A nested PART is cargo — an item in a stock `ModuleInventoryPart`, or a KIS
+        /// `partName` — and KSP dropping one costs the vessel an item, not its structure.
+        /// Refusing a whole rescue because a container holds a wrench from a mod nobody
+        /// has would block a job that is perfectly flyable, which is the opposite of what
+        /// this guard is for. `PartAliases.Walk` recurses because *substituting* cargo is
+        /// free; refusing on it is not.</summary>
+        private static void CollectUninstallableParts(ConfigNode innerNode, List<string> missing,
+                                                      HashSet<string> seen)
+        {
+            if (innerNode == null) return;
+            var parts = innerNode.GetNodes("PART");
+            for (int i = 0; i < parts.Length; i++)
+                NotePartIfUninstallable(parts[i].GetValue("name"), missing, seen);
+        }
+
+        private static void NotePartIfUninstallable(string name, List<string> missing,
+                                                    HashSet<string> seen)
+        {
+            if (string.IsNullOrEmpty(name)) return;
+            if (PartLoader.getPartInfoByName(name) != null) return;
+            // A part name containing '.' is written with '_' on some save paths, which is
+            // the same fallback VesselDataCollector applies when resolving a snapshot.
+            if (name.IndexOf('_') >= 0
+                && PartLoader.getPartInfoByName(name.Replace('_', '.')) != null) return;
+            if (seen.Add(name)) missing.Add(name);
+        }
+
         /// <summary>Bound a GKFLEET's VESSEL list, recording the refusal when it is over.
         /// Returns null when the payload is refused outright.</summary>
         private static List<ConfigNode> BoundedFleet(List<ConfigNode> nodes, string where)
@@ -1092,7 +1185,7 @@ namespace GeneKerman
             LastImportRefusal =
                 $"it carries {nodes.Count} vessels, past the {MaxFleetVessels} this can import";
             Debug.LogError($"[GeneKerman] {where}: refusing a payload of {nodes.Count} VESSEL " +
-                           $"nodes (cap {MaxFleetVessels}). Nothing was spawned — spawning the " +
+                           $"nodes (cap {MaxFleetVessels}). Nothing was spawned, spawning the " +
                            "first few would leave the rest queued and the same payload would " +
                            "arrive again on the next launch.");
             return null;
@@ -1484,6 +1577,11 @@ namespace GeneKerman
         /// any crew/placement edits) and persist. Returns the vessel name.</summary>
         private static string SpawnInnerNode(ConfigNode innerNode, bool persist = true)
         {
+            // The last gate before the save is touched, and deliberately here rather than
+            // in either caller: this is the one line every import funnels through, and
+            // `new ProtoVessel(...)` below is the step that cannot be undone.
+            if (!PartsAreInstalled(innerNode, "SpawnInnerNode")) return null;
+
             string vesselName = innerNode.GetValue("name") ?? "Imported Vessel";
             // Remember the fresh pid assigned in PrepareInnerNode so the caller (e.g. the
             // rescue-immunity guardian) can identify exactly the vessel we just spawned
@@ -1755,7 +1853,7 @@ namespace GeneKerman
                 {
                     Debug.LogWarning($"[GeneKerman] Import: ORBIT {key}={raw} on a vessel that is " +
                                      "on a surface. That is KSP's own storage for a craft with no " +
-                                     "orbit, not corruption — importing it exactly as it arrived.");
+                                     "orbit, not corruption, importing it exactly as it arrived.");
                     return true;
                 }
 
@@ -2632,7 +2730,7 @@ namespace GeneKerman
                     // stripped with the rest of the node; it just does not become a
                     // person in this save.
                     Debug.LogWarning($"[GeneKerman] Import: GKCREW '{name}' is not seated by any " +
-                                     "part of this vessel — not adding them to the roster.");
+                                     "part of this vessel, not adding them to the roster.");
                     continue;
                 }
                 if (created >= MaxCrewPerVessel)
@@ -2769,7 +2867,7 @@ namespace GeneKerman
                 Debug.LogError($"[GeneKerman] Import: {dropped} crew reference(s) on " +
                                $"'{vesselNode.GetValue("name")}' named a kerbal this import did " +
                                "not create (the per-vessel crew cap, or a name that could not be " +
-                               "made). They have been removed from the vessel — the seats arrive " +
+                               "made). They have been removed from the vessel, the seats arrive " +
                                "empty. A reference left dangling would have broken Astronaut " +
                                "Complex hiring for this save.");
         }

@@ -128,6 +128,79 @@ namespace GeneKerman
 
         // ── Export: collect ──────────────────────────────────────────────────
 
+        /// <summary>One mod a vessel depends on, and the distinct parts aboard that
+        /// come from it — enough to tell a recipient not just "you are missing Near
+        /// Future Propulsion" but which parts of the ship that costs them.</summary>
+        public class ModUsage
+        {
+            public ModEntry mod;
+            public List<string> parts = new List<string>();   // display titles, deduped
+        }
+
+        /// <summary>
+        /// The non-stock mods a live vessel's parts come from, each with the parts it
+        /// supplies. The same walk <see cref="EmbedModsInNode"/> does — inventory items
+        /// included, since a mod reachable only through a container is still a mod the
+        /// recipient needs — but it keeps the attribution instead of flattening to a
+        /// list of mods.
+        ///
+        /// For the rescue hand-off: the wreck exists on the issuer's machine and
+        /// nowhere else, so this is the only moment its parts can be resolved to mods
+        /// at all. The recipient cannot do it — every mod-detection path here walks an
+        /// *installed* part to its GameData folder, and the parts in question are
+        /// exactly the ones they have not got.
+        /// </summary>
+        public static List<ModUsage> DescribeVesselMods(Vessel vessel, ConfigNode node = null)
+        {
+            var usage = new List<ModUsage>();
+            if (vessel == null || vessel.parts == null) return usage;
+
+            try
+            {
+                var parts = vessel.parts.Select(p => p.partInfo).ToList();
+                if (node != null) parts.AddRange(ResolveInventoryParts(node));
+
+                var byKey = new Dictionary<string, ModUsage>(StringComparer.OrdinalIgnoreCase);
+                var seenPart = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var ap in parts)
+                {
+                    var e = ResolvePartMod(ap);
+                    if (e == null) continue;                 // stock, a DLC, or ours
+                    string key = DedupeKey(e);
+
+                    ModUsage u;
+                    if (!byKey.TryGetValue(key, out u))
+                    {
+                        u = new ModUsage { mod = e };
+                        byKey[key] = u;
+                        usage.Add(u);
+                    }
+
+                    // Deduped by part *name*: a lander with eight identical legs is one
+                    // reason to install the mod, not eight.
+                    string name = ap != null ? ap.name : null;
+                    if (string.IsNullOrEmpty(name) || !seenPart.Add(key + "/" + name)) continue;
+                    u.parts.Add(string.IsNullOrEmpty(ap.title) ? name : ap.title);
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] CkanGenerator.DescribeVesselMods failed: " + ex.Message);
+            }
+            return usage;
+        }
+
+        /// <summary>The subset of <paramref name="mods"/> this install does not have.
+        /// Public because the contract pre-flight asks the question without wanting the
+        /// modpack written yet — and one definition of "missing" beats two.</summary>
+        public static List<ModEntry> MissingMods(List<ModEntry> mods)
+        {
+            if (mods == null || mods.Count == 0) return new List<ModEntry>();
+            var installed = InstalledPaths(MaxSegments(mods));
+            return mods.Where(m => !installed.Contains(PathOf(m) ?? "")).ToList();
+        }
+
         /// <summary>Resolve the distinct non-stock mods a set of loaded parts come from,
         /// keyed by GameData folder and (when CKAN is present) CKAN identifier.</summary>
         private static List<ModEntry> CollectMods(IEnumerable<AvailablePart> parts)
@@ -573,13 +646,18 @@ namespace GeneKerman
         /// <summary>Write a CKAN metapackage (.ckan) for the subset of <paramref name="mods"/>
         /// the recipient doesn't have in GameData. No-op when nothing is missing. A missing
         /// stock expansion is reported but never written into the modpack — CKAN cannot
-        /// install a DLC, and listing one as a dependency only makes the pack unresolvable.</summary>
-        public static void GenerateCkanForMissing(string context, List<ModEntry> mods)
+        /// install a DLC, and listing one as a dependency only makes the pack unresolvable.
+        ///
+        /// <paramref name="subject"/> is the noun the messages use for what needs the mods.
+        /// It defaults to "craft" because that is what every transfer path is handing over,
+        /// and the contract pre-flight passes "contract": a player told a *craft* needs
+        /// Making History would go looking for a craft nobody sent them.</summary>
+        public static void GenerateCkanForMissing(string context, List<ModEntry> mods,
+                                                  string subject = "craft")
         {
             if (mods == null || mods.Count == 0) return;
 
-            var installed = InstalledPaths(MaxSegments(mods));
-            var missing = mods.Where(m => !installed.Contains(PathOf(m) ?? "")).ToList();
+            var missing = MissingMods(mods);
             if (missing.Count == 0) return;
 
             var missingDlc = missing.Where(IsDlc).ToList();
@@ -590,9 +668,9 @@ namespace GeneKerman
             {
                 string dlcOnly = string.Join(" and ", missingDlc.Select(m => m.name).ToArray());
                 Post($"'{context}' needs the {dlcOnly} expansion",
-                     $"This craft uses parts from {dlcOnly}, which you don't have. "
-                     + "It is a paid expansion, so CKAN can't install it; the craft will not "
-                     + "load without it.");
+                     $"This {subject} needs parts from {dlcOnly}, which you don't have. "
+                     + $"It is a paid expansion, so CKAN can't install it; the {subject} will not "
+                     + "work without it.");
                 return;
             }
 
@@ -611,7 +689,8 @@ namespace GeneKerman
                     { "spec_version", "v1.6" },
                     { "identifier", id },
                     { "name", "GeneKerman: mods for '" + context + "'" },
-                    { "abstract", "Mods needed to load '" + context + "', shared via GeneKerman: " + list },
+                    { "abstract", "Mods needed for the " + subject + " '" + context
+                                  + "', via GeneKerman: " + list },
                     { "author", "GeneKerman" },
                     { "version", "1.0" },
                     { "kind", "metapackage" },
@@ -894,15 +973,35 @@ namespace GeneKerman
         /// reading as "has DeepFreeze"; it also subsumes the DLCs, whose two-segment paths
         /// used to need a special case so that owning one didn't read as owning the other.
         /// Read fresh each time: a player can install a mod and reopen the craft.</summary>
+        // Cached for the session, keyed by the depth asked for.
+        //
+        // This walks GameData, and it used to run once per modpack — fine when the only
+        // caller was a craft arriving. The contract pre-flight asks on every rebuild of
+        // the contract panel, which is every MarkDirty, and a few hundred directory
+        // enumerations behind a UI redraw is not something to pay repeatedly.
+        //
+        // Caching for the whole session is not merely an optimisation, it is the more
+        // correct answer: KSP reads GameData once at load, so a mod CKAN drops in while
+        // the game is running is *not* usable until a restart, and reporting it as
+        // installed would promise a part that cannot spawn.
+        private static readonly Dictionary<int, HashSet<string>> installedCache =
+            new Dictionary<int, HashSet<string>>();
+
         private static HashSet<string> InstalledPaths(int depth)
         {
+            int key = Math.Max(1, depth);
+            HashSet<string> cached;
+            if (installedCache.TryGetValue(key, out cached)) return cached;
+
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                if (!Directory.Exists(GameDataRoot)) return set;
-                WalkInstalled(GameDataRoot, "", set, Math.Max(1, depth));
+                if (!Directory.Exists(GameDataRoot)) return set;   // not cached: try again later
+                WalkInstalled(GameDataRoot, "", set, key);
             }
             catch { /* unreadable GameData → treat as nothing installed */ }
+
+            installedCache[key] = set;
             return set;
         }
 

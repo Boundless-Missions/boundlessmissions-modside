@@ -28,7 +28,7 @@ namespace GeneKerman
         /// <summary>Contract types the server understands. An allow-list because this
         /// string is forwarded verbatim and "auto" hands classification to the AI.</summary>
         private static readonly HashSet<string> ContractTypes = new HashSet<string>(StringComparer.Ordinal)
-        { "auto", "craft_build", "active_vessel", "rescue", "flag_design" };
+        { "auto", "craft_build", "active_vessel", "constellation", "rescue", "flag_design" };
 
         // Part-restriction modes. Same five the classic window offers, named rather than
         // indexed so the two UIs cannot disagree about which is which.
@@ -361,6 +361,15 @@ namespace GeneKerman
             public int Fine;
             public string DueDate = "";
             public string ContractType = "craft_build";
+            /// <summary>Relay-network contracts only: how many satellites the network
+            /// must have. The spacing is derived from it server-side, so it is not asked
+            /// for separately.</summary>
+            public int RelayCount = 0;
+            /// <summary>Relay-network contracts only: the body the network must be at.</summary>
+            public string TargetBody = "";
+            /// <summary>Relay-network contracts only: how strong each member's relay
+            /// antenna must be, as antenna power. 0 means any relay-capable antenna.</summary>
+            public double MinRelayPower = 0.0;
             public string ModlistMode = ModlistNone;
             public int DurationHours = 24;          // auction only
 
@@ -427,6 +436,25 @@ namespace GeneKerman
 
             if (!ContractTypes.Contains(r.ContractType ?? ""))
             { error = "Unknown contract type."; return false; }
+
+            // A relay network states its terms as numbers rather than in its prose, so
+            // they are checked here — before the escrow, and while the issuer is still
+            // looking at the form. Bounds match ContractCreateRequest.relay_count, so a
+            // contract this accepts is not one the server then 422s.
+            if (r.ContractType == "constellation")
+            {
+                // Player-to-player relay-network contracts are off unless the deployment
+                // opts in (hidden settings.cfg override, off by default). The form hides
+                // the option, but a submission built by any other path is refused here
+                // too; the server is the final gate regardless. Boundless-Missions relay
+                // missions are unaffected — they are not created through this form.
+                if (!(GeneKermanMod.Instance?.Api?.PlayerRelayContractsEnabled ?? false))
+                { error = "Relay-network contracts between players are turned off."; return false; }
+                if (string.IsNullOrEmpty(r.TargetBody))
+                { error = "Pick the body the relay network has to be at."; return false; }
+                if (r.RelayCount < 2 || r.RelayCount > 64)
+                { error = "A relay network needs between 2 and 64 satellites."; return false; }
+            }
 
             if (r.Kind == "auction" && r.DurationHours < 1)
             { error = "Enter a valid auction duration in hours."; return false; }
@@ -545,7 +573,7 @@ namespace GeneKerman
                         // Same as the auction above: the payment is escrowed on create.
                         if (success) mod.State?.RequestProfileRefresh();
                     },
-                    r.ContractType);
+                    r.ContractType, r.RelayCount, r.TargetBody, r.MinRelayPower);
             }
 
             onDone(ok, message);
@@ -642,6 +670,14 @@ namespace GeneKerman
             // the emergency freeze and ration kit exist for.
             LifeSupportInfo ls = LifeSupportScan.Scan(vessel.parts);
 
+            // Which mods this wreck is built from, and which of its parts each supplies.
+            // The uploaded node already carries the same mod list in its GKMODS block,
+            // but that is only read when the wreck is *spawned* — after the rescuer has
+            // accepted and flown out. Sent separately so the contract can show it while
+            // the job is still an offer, which is the only moment the answer can change
+            // anyone's mind. Bounded before it leaves: see BuildWreckModsJson.
+            string wreckMods = BuildWreckModsJson(vessel);
+
             yield return mod.Api.CreateRescueContract(
                 r.ContractorId, r.Mission, r.Payment, r.Fine, r.DueDate,
                 BuildActiveModlist(), r.RescueBody, r.RescueMode,
@@ -656,7 +692,7 @@ namespace GeneKerman
                         ? $"Rescue sent to {who}. Your vessel will be removed."
                         : (err ?? "Failed to create the rescue contract.");
                 },
-                blueprint, wreckTelemetry);
+                blueprint, wreckTelemetry, wreckMods);
 
             // Only once the server has it: the vessel is gone for the issuer, so losing
             // it on a failed send would destroy the ship and produce no contract.
@@ -677,6 +713,69 @@ namespace GeneKerman
                           "time you visit the Space Center.";
 
             onDone(ok, message);
+        }
+
+        // Bounds on the wreck mod list. It is stored inside the contract document, which
+        // Firestore caps at 1 MiB — the same ceiling `kerbals` and `modlist` are trimmed
+        // against on the server, and for the same reason: this is the one creation path
+        // whose fields are sized by the player's ship rather than by their typing. A
+        // wreck using more than this many mods is already telling the rescuer "you need
+        // a lot"; the exact tail is not what decides whether they accept.
+        private const int MaxWreckMods = 40;
+        private const int MaxPartsPerWreckMod = 10;
+        private const int MaxWreckPartTitle = 64;
+
+        /// <summary>
+        /// The wreck's mods and the parts they supply, as the JSON the rescue endpoint
+        /// stores. Null when the ship is stock-only — there is nothing to warn about,
+        /// and an empty list would only add a field for every rescue ever issued.
+        ///
+        /// Best-effort like the blueprint and the telemetry beside it: a rescue with no
+        /// mod list is still a rescue, and this must never be the reason a ship is
+        /// handed over and no contract results.
+        /// </summary>
+        private static string BuildWreckModsJson(Vessel vessel)
+        {
+            try
+            {
+                var usage = CkanGenerator.DescribeVesselMods(vessel);
+                if (usage == null || usage.Count == 0) return null;
+
+                var list = new List<object>();
+                foreach (var u in usage)
+                {
+                    if (u == null || u.mod == null) continue;
+                    if (list.Count >= MaxWreckMods) break;
+
+                    var parts = new List<object>();
+                    foreach (var title in u.parts)
+                    {
+                        if (parts.Count >= MaxPartsPerWreckMod) break;
+                        if (string.IsNullOrEmpty(title)) continue;
+                        parts.Add(title.Length > MaxWreckPartTitle
+                                  ? title.Substring(0, MaxWreckPartTitle) : title);
+                    }
+
+                    list.Add(new Dictionary<string, object>
+                    {
+                        { "folder", u.mod.folder ?? "" },
+                        { "path", u.mod.path ?? u.mod.folder ?? "" },
+                        { "ckan", u.mod.ckan ?? u.mod.folder ?? "" },
+                        { "name", u.mod.name ?? u.mod.folder ?? "" },
+                        { "parts", parts },
+                        // How many distinct parts this mod really supplies, so a trimmed
+                        // list can say "and 6 more" instead of quietly looking complete.
+                        { "part_count", u.parts.Count },
+                    });
+                }
+
+                return list.Count == 0 ? null : MiniJSON.Serialize(list);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning("[GeneKerman] Could not describe the wreck's mods: " + ex.Message);
+                return null;
+            }
         }
 
         /// <summary>

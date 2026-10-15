@@ -176,10 +176,20 @@ namespace GeneKerman
         /// <summary>Whether a part is present AND actually buildable here. A ReStock+
         /// MH stand-in on a DLC install is loaded but hidden (TechHidden, category none);
         /// it flies, but career and science saves treat it as unpurchased and block
-        /// launch, so it is not a valid substitution target.</summary>
-        private static bool Usable(string partName)
+        /// launch, so it is not a valid substitution target.
+        ///
+        /// Public because the contract pre-flight (ContractRequirements) asks the same
+        /// question of every required part, and one definition of "usable" beats two
+        /// that can drift.</summary>
+        public static bool IsUsable(string partName)
         {
-            AvailablePart ap = PartLoader.getPartInfoByName(partName);
+            return IsUsable(PartLoader.getPartInfoByName(partName));
+        }
+
+        /// <summary>The same question about an already-resolved part, so a caller
+        /// walking the whole catalogue does not pay a name lookup per part.</summary>
+        public static bool IsUsable(AvailablePart ap)
+        {
             if (ap == null) return false;
             if (ap.TechHidden && ap.category == PartCategories.none) return false;
             return true;
@@ -191,7 +201,7 @@ namespace GeneKerman
         {
             group = null;
             if (string.IsNullOrEmpty(partName)) return null;
-            if (Usable(partName)) return null; // nothing to fix
+            if (IsUsable(partName)) return null; // nothing to fix
 
             Group g;
             if (!ByName.TryGetValue(partName, out g)) return null;
@@ -199,7 +209,7 @@ namespace GeneKerman
             foreach (var candidate in g.names)
             {
                 if (string.Equals(candidate, partName, StringComparison.OrdinalIgnoreCase)) continue;
-                if (Usable(candidate)) { group = g; return candidate; }
+                if (IsUsable(candidate)) { group = g; return candidate; }
             }
             return null;
         }
@@ -210,7 +220,7 @@ namespace GeneKerman
         {
             foreach (var la in LookAlikes)
                 if (string.Equals(la.missing, partName, StringComparison.OrdinalIgnoreCase)
-                    && Usable(la.lookalike))
+                    && IsUsable(la.lookalike))
                     return la.warning;
             return null;
         }
@@ -351,7 +361,7 @@ namespace GeneKerman
             public void NoteUnresolved(string name)
             {
                 if (!seen.Add(name)) return;
-                if (Usable(name)) return;
+                if (IsUsable(name)) return;
 
                 missing.Add(name);
                 string tip = LookAlikeAdvice(name);

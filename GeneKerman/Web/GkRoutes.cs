@@ -115,6 +115,16 @@ namespace GeneKerman.Web
                     Respond(ctx, queue.RunSync(ContractContext));
                     return;
 
+                case "/gk/contract/requirements":
+                    if (req.HttpMethod != "POST") { MethodNotAllowed(ctx); return; }
+                    HandleContractRequirements(ctx);
+                    return;
+
+                case "/gk/actions/contract-ckan":
+                    if (req.HttpMethod != "POST") { MethodNotAllowed(ctx); return; }
+                    HandleContractCkan(ctx);
+                    return;
+
                 case "/gk/actions/create-contract":
                     if (req.HttpMethod != "POST") { MethodNotAllowed(ctx); return; }
                     HandleCreateContract(ctx);
@@ -737,6 +747,130 @@ namespace GeneKerman.Web
             StartJob(ctx, onDone => ContractCreation.Create(req, onDone));
         }
 
+        // ── Contract pre-flight ─────────────────────────────────────────────
+
+        /// <summary>
+        /// Marks each of a contract's requirements against what is actually installed
+        /// here — the browser UI's half of the sidebar's checklist.
+        ///
+        /// The page sends the constraints it already holds rather than a contract id,
+        /// which is the opposite of the open-submit rule and deliberately so: that
+        /// endpoint *enforces* the terms, so a caller that supplied them could relax its
+        /// own requirements, while this one only reports what this install has. There is
+        /// nothing here to relax — a page that lied about the constraints would only
+        /// mislead itself — and the answer costs no round trip to the server.
+        ///
+        /// Marshalled onto the main thread because it reads PartLoader, the save's
+        /// roster and R&amp;D, none of which may be touched from a listener thread.
+        /// </summary>
+        private void HandleContractRequirements(HttpListenerContext ctx)
+        {
+            var body = ReadJson(ctx);
+            var limits = ContractConstraints.Parse(MiniJSON.GetDict(body, "constraints"));
+            // A rescue carries its requirements on the wreck rather than in the limits:
+            // which mods the stranded ship is built from, and so whether it can spawn in
+            // this save at all. Same list, same page, same warning before accepting.
+            var wreckMods = ContractRequirements.ParseWreckMods(MiniJSON.GetDict(body, "rescue_target"));
+
+            Respond(ctx, queue.RunSync(() =>
+            {
+                var items = new List<object>();
+                foreach (var i in ContractRequirements.Check(limits, wreckMods))
+                {
+                    if (i == null) continue;
+                    items.Add(new Dictionary<string, object>
+                    {
+                        { "kind", i.Kind },
+                        { "label", i.Label },
+                        { "state", i.State.ToString().ToLowerInvariant() },
+                        { "detail", i.Detail },
+                        { "blocking", i.Blocking },
+                    });
+                }
+                return JobResult.Json(MiniJSON.Serialize(
+                    new Dictionary<string, object> { { "items", items } }));
+            }));
+        }
+
+        /// <summary>
+        /// Writes the CKAN modpack for a contract this install cannot fully supply,
+        /// after the page has accepted it anyway.
+        ///
+        /// This one takes an id and re-reads the contract from the server, unlike the
+        /// check above: it writes a file to disk named after what it is given, and the
+        /// mod list it resolves is a dependency list the player will act on. Neither is
+        /// the page's to supply — the same reason OpenSubmitRoutine re-reads the terms.
+        /// </summary>
+        private void HandleContractCkan(HttpListenerContext ctx)
+        {
+            var body = ReadJson(ctx);
+            string contractId = body == null ? null : MiniJSON.GetString(body, "contract_id", "");
+
+            if (string.IsNullOrEmpty(contractId) || !SafeId.IsMatch(contractId))
+            {
+                LocalServer.Respond(ctx, 400, "application/json", "{\"error\":\"bad_contract_id\"}");
+                return;
+            }
+
+            StartJob(ctx, onDone => ContractCkanRoutine(contractId, onDone));
+        }
+
+        private static IEnumerator ContractCkanRoutine(string contractId, Action<bool, string> onDone)
+        {
+            var mod = GeneKermanMod.Instance;
+            if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
+
+            Dictionary<string, object> found = null;
+            yield return FetchContract(contractId, c => found = c);
+
+            if (found == null)
+            {
+                onDone(false, "That contract could not be read back from the server.");
+                yield break;
+            }
+
+            var limits = ContractConstraints.Parse(MiniJSON.GetDict(found, "constraints"));
+            var items = ContractRequirements.Check(limits);
+            if (!ContractRequirements.AnyBlocking(items))
+            {
+                onDone(true, "This install already has everything this contract needs.");
+                yield break;
+            }
+
+            ContractRequirements.WriteCkanForMissing(
+                ContractRequirements.ContextName(found), items,
+                MiniJSON.GetString(found, "modlist", ""));
+
+            onDone(true, "Checked for missing mods, see your notifications.");
+        }
+
+        /// <summary>The contract with this id as the server has it, or null. Shared by
+        /// the two routes that must not take a page's word for a contract's terms.</summary>
+        private static IEnumerator FetchContract(string contractId,
+                                                 Action<Dictionary<string, object>> onFound)
+        {
+            var mod = GeneKermanMod.Instance;
+            if (mod?.Api == null) { onFound(null); yield break; }
+
+            Dictionary<string, object> found = null;
+            yield return mod.Api.GetActiveContracts((ok, data, error) =>
+            {
+                if (!ok || data == null) return;
+                var list = MiniJSON.GetList(data, "contracts");
+                if (list == null) return;
+                foreach (var item in list)
+                {
+                    var c = item as Dictionary<string, object>;
+                    if (c != null && MiniJSON.GetString(c, "contract_id", "") == contractId)
+                    {
+                        found = c;
+                        return;
+                    }
+                }
+            });
+            onFound(found);
+        }
+
         // ── Submission hand-off ─────────────────────────────────────────────
 
         /// <summary>
@@ -783,21 +917,7 @@ namespace GeneKerman.Web
             if (mod?.Api == null) { onDone(false, "Mod not ready."); yield break; }
 
             Dictionary<string, object> found = null;
-            yield return mod.Api.GetActiveContracts((ok, data, error) =>
-            {
-                if (!ok || data == null) return;
-                var list = MiniJSON.GetList(data, "contracts");
-                if (list == null) return;
-                foreach (var item in list)
-                {
-                    var c = item as Dictionary<string, object>;
-                    if (c != null && MiniJSON.GetString(c, "contract_id", "") == contractId)
-                    {
-                        found = c;
-                        return;
-                    }
-                }
-            });
+            yield return FetchContract(contractId, c => found = c);
 
             if (found == null)
             {
@@ -834,7 +954,13 @@ namespace GeneKerman.Web
                 MiniJSON.GetString(found, "modlist", ""),
                 rescueSpec,
                 rescueKerbals,
-                ContractConstraints.Parse(MiniJSON.GetDict(found, "constraints")));
+                ContractConstraints.Parse(MiniJSON.GetDict(found, "constraints")),
+                // Who issued it decides whether a network is handed over or merely
+                // counted: a weekly mission has no wallet and no save to receive
+                // satellites, so nothing moves. Read here because this is the one route
+                // both front ends funnel through, and the one place the contract dict is
+                // in hand.
+                MiniJSON.GetBool(found, "is_bot_issued"));
 
             onDone(true, "The submit window is open in KSP. Switch to the game to finish.");
         }

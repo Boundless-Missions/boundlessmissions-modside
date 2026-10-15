@@ -35,6 +35,8 @@ namespace GeneKerman
         private List<object> missions;
         private string weekKey = "";
         private bool missionsLocked;
+        private string boardKind = "live";
+        private string testRefusal = "";
         private List<object> contracts;
         private List<object> notifications;
         // The Finance tab's blob: balance, lifetime totals, the daily series and a
@@ -205,6 +207,35 @@ namespace GeneKerman
         internal bool MissionsLocked => missionsLocked;
         internal bool MissionsLoading => loadingMissions;
         internal void RequestMissionsRefresh() => RefreshMissions();
+
+        /// <summary>Which board the last refresh came back with ("live" or "test"), and
+        /// why a test board was refused, if it was.</summary>
+        internal string MissionBoardKind => boardKind;
+        internal string MissionTestRefusal => testRefusal;
+
+#if GK_DEBUG_PANEL
+        /// <summary>Dev builds only: ask for the admin-rotated test mission board.
+        ///
+        /// Deliberately not a settings.cfg key. That file is a strict allow list (see
+        /// the mod's CLAUDE.md — "a default that does nothing is worse than no
+        /// default"), and a key that only a dev build reads is exactly that. It is
+        /// session-only for the same reason: a toggle left on cannot outlive the
+        /// process and surprise the next launch.
+        ///
+        /// Compiled out of production entirely, so a shipped DLL cannot ask for the
+        /// test board at all. The server does not rely on that — `WEEKLY_TEST_ACCOUNT_IDS`
+        /// is the gate that actually holds — but the two together mean an ordinary
+        /// player would have to both forge the request and be on the list.</summary>
+        private bool useTestBoard;
+        internal bool TestBoardRequested => useTestBoard;
+        internal void ToggleTestBoard()
+        {
+            useTestBoard = !useTestBoard;
+            RefreshMissions();
+        }
+#else
+        internal bool TestBoardRequested => false;
+#endif
 
         /// <summary>Active + incoming contracts, as the API returned them.</summary>
         internal IList<object> ContractList => contracts;
@@ -663,8 +694,10 @@ namespace GeneKerman
                     missions = MiniJSON.GetList(data, "missions");
                     weekKey = MiniJSON.GetString(data, "week_key");
                     missionsLocked = MiniJSON.GetBool(data, "is_locked");
+                    boardKind = MiniJSON.GetString(data, "board", "live");
+                    testRefusal = MiniJSON.GetString(data, "test_refusal", "");
                 }
-            }));
+            }, TestBoardRequested));
         }
 
         public void RefreshContracts()
@@ -763,7 +796,7 @@ namespace GeneKerman
                     SetStatus($"(No) {err ?? "Failed to select mission."}");
                     onDone?.Invoke(false, err ?? "Failed to select mission.");
                 }
-            });
+            }, TestBoardRequested);
         }
 
         private System.Collections.IEnumerator DoAcceptContract(string contractId, string issuerName = "", Action<bool, string> onDone = null)
@@ -906,8 +939,17 @@ namespace GeneKerman
                 }
                 else
                 {
-                    SetStatus("⚠ Could not spawn. Enter Flight, Space Center, or Tracking Station and try again.");
-                    onDone?.Invoke(false, "Could not spawn. Enter Flight, Space Center, or Tracking Station and try again.");
+                    // Two very different failures share this branch. A null return with no
+                    // recorded refusal is "not now" — the wrong scene, a transient hitch —
+                    // and the scene advice is the fix. A refusal is "not here": the payload
+                    // will be refused identically on every retry, and telling that player
+                    // to change scene sends them round a loop that cannot end.
+                    string why = VesselTransfer.LastImportRefusal;
+                    string msg = string.IsNullOrEmpty(why)
+                        ? "Could not spawn. Enter Flight, Space Center, or Tracking Station and try again."
+                        : "Could not spawn: " + why + ".";
+                    SetStatus("⚠ " + msg);
+                    onDone?.Invoke(false, msg);
                 }
             });
             // Always clear the transient guard so a failed attempt can be retried.
@@ -1292,8 +1334,14 @@ namespace GeneKerman
             // after they recovered it and a dispute made the contract active again.
             // Crew are tagged/stripped by owner on import — your own kerbals come back
             // to their original names; anyone else's keep their owner tag.
+            // `network_delivery` joins the live-vessel sources rather than reusing
+            // `rescue_delivery`: the satellites of a bought relay network spawn in-save
+            // exactly like a rescued craft, but none of the rescue handling below
+            // applies to them — there is no rescue contract to look up and no rescued
+            // crew to settle.
             if ((source == "rescue_delivery" || source == "gift_vessel" ||
-                 source == "submission_restore") && !string.IsNullOrEmpty(vesselNodeUrl))
+                 source == "submission_restore" || source == "network_delivery")
+                && !string.IsNullOrEmpty(vesselNodeUrl))
             {
                 // The poll also runs in the editor now (for blueprint installs), but a
                 // live vessel cannot spawn there — leave the entry queued for a scene
@@ -1425,6 +1473,7 @@ namespace GeneKerman
                         string title = isReturn ? "📪 Vessel Returned"
                                      : source == "gift_vessel" ? "🎁 Vessel Received"
                                      : source == "submission_restore" ? "Craft restored"
+                                     : source == "network_delivery" ? "📡 Relay Network Received"
                                      : "🛟 Rescue Delivered";
                         string body = isReturn
                             ? $"{vesselName} was declined and is back in your save."
@@ -1475,13 +1524,13 @@ namespace GeneKerman
                     GeneKermanMod.Instance.ShowNotification("(No) Delivery was refused",
                         $"{craftName} was not imported: {importRefusal}. Nothing was spawned, and " +
                         "it has been LEFT in your import queue so the sender's copy is not thrown " +
-                        "away — nothing has been lost. Please report this with your KSP.log.");
+                        "away, nothing has been lost. Please report this with your KSP.log.");
                     yield break;   // deliberately no /done: the ack is what drops the snapshot
                 }
                 if (unpackRefused)
                     GeneKermanMod.Instance.ShowNotification("(No) Delivery could not be unpacked",
-                        $"{craftName} could not be unpacked safely — it is past the size limit or " +
-                        "damaged — and has been cleared from your import queue. Nothing was spawned. " +
+                        $"{craftName} could not be unpacked safely, it is past the size limit or " +
+                        "damaged, and has been cleared from your import queue. Nothing was spawned. " +
                         "Please report this with your KSP.log; the sender can try again.");
                 if (!string.IsNullOrEmpty(rescueCid))
                     GKContractScenario.Instance?.MarkVesselImported(rescueCid);

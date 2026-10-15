@@ -47,12 +47,13 @@ namespace GeneKerman.UI.Gui
         /// GeneKermanMod.OpenSubmitWindow, which every front end routes to.</summary>
         internal void Open(string contractId, string mission,
             string missionType, string requiredSituation, string requiredBody, string requiredModlist,
-            RescueTargetSpec rescueTarget, List<string> rescueKerbals, ContractConstraints constraints)
+            RescueTargetSpec rescueTarget, List<string> rescueKerbals, ContractConstraints constraints,
+            bool botIssued = false)
         {
             Window?.Show();
             lastScene = HighLogic.LoadedScene;
             session.Open(contractId, mission, missionType, requiredSituation, requiredBody,
-                         requiredModlist, rescueTarget, rescueKerbals, constraints);
+                         requiredModlist, rescueTarget, rescueKerbals, constraints, botIssued);
             MarkDirty();
         }
 
@@ -193,13 +194,33 @@ namespace GeneKerman.UI.Gui
                        BtnStyle.Secondary, 28);
         }
 
-        // ── Flight mode (active_vessel / rescue) ────────────────────────────
+        // ── Flight mode (active_vessel / constellation / rescue) ────────────
 
         private void BuildFlightMode(El parent)
         {
             var v = session.ActiveVessel;
             if (v == null)
             {
+                // A network submitted from the Tracking Station or the Space Centre has
+                // no active vessel and is not supposed to: the satellites ARE the
+                // submission, and the SOI scan reads them whether they are loaded or
+                // not. Draw the network and its verdict, and nothing that describes a
+                // craft the player is flying, because there isn't one.
+                if (session.IsConstellation)
+                {
+                    if (!session.VesselValid && !string.IsNullOrEmpty(session.ValidationMsg))
+                        BuildProblem(parent, "Network does not match the contract",
+                                     session.ValidationMsg);
+                    else if (session.VesselValid)
+                        UIF.Label(parent, "The network matches the contract.",
+                                  Theme.FontXs, Theme.Primary).Body();
+
+                    BuildConstellationSection(parent);
+                    UIF.Button(parent, "Rescan network", () => session.Revalidate(),
+                               BtnStyle.Ghost, 26);
+                    return;
+                }
+
                 UIF.Notice(parent, "No active vessel detected.", null);
                 UIF.Button(parent, "Refresh data", () => session.CaptureFlightData(), BtnStyle.Secondary, 28);
                 return;
@@ -228,11 +249,109 @@ namespace GeneKerman.UI.Gui
 
             UIF.Button(parent, "Refresh data", () => session.CaptureFlightData(), BtnStyle.Secondary, 28);
 
+            // The network, on a mission that asks for one. Drawn above the extras list
+            // and worded to keep the two apart: everything here stays in this save.
+            BuildConstellationSection(parent);
+
             // Offered on every flight submission, rescue included: a rescuer who towed a
             // stage out or flew a support craft alongside has something to show for it.
             // What a selected craft *does* differs between the two, and the section says
             // so rather than leaving the player to assume it works like a hand-over.
-            BuildNearbySection(parent);
+            //
+            // Except on a constellation, where it is the wrong question twice over. It
+            // picks by PHYSICS RANGE, and a network is spread around a sphere of
+            // influence with almost every member unloaded, so the one thing it can never
+            // list is the satellites the mission is about (the section above says as much:
+            // membership is decided by the SOI scan, loaded or not). And a craft ticked
+            // here LEAVES this save, so the only relays it could ever reach are the one
+            // or two parked within 2.5 km of the player, which the mission then no longer
+            // has. Membership comes from VesselDataCollector.CaptureBodyFleet and rides
+            // in its own `constellation` key as telemetry; nothing about it is a hand-over.
+            if (!session.IsConstellation) BuildNearbySection(parent);
+        }
+
+        // ── The satellite network (constellation missions) ──────────────────
+
+        /// <summary>
+        /// What the whole-SOI scan found, on a mission judged on a network.
+        ///
+        /// A readout on a bot-issued mission: the contract asks whether a network exists
+        /// around the target body, the client counted every vessel there — loaded or not,
+        /// physics range is irrelevant to it — and the answer is a fact about the save
+        /// rather than a choice. Nothing leaves the save, because there is no issuer save
+        /// for it to arrive in.
+        ///
+        /// A picker on a player-issued one, because then the network is being *bought*
+        /// and somebody has to say which satellites go. What is ticked here is judged on
+        /// its own terms, not as a subset of a scan that already passed: four bunched
+        /// satellites can satisfy "2 at 90 degrees" while the two picked out of them sit
+        /// 30 degrees apart. Never pre-ticked — a set that leaves a save is not a
+        /// default.
+        /// </summary>
+        private void BuildConstellationSection(El parent)
+        {
+            if (!session.IsConstellation) return;
+
+            UIF.Label(parent, "Satellite network", Theme.FontSm).Bold();
+
+            var want = session.FleetLimits;
+            if (want != null)
+                UIF.Muted(parent, "Required: " + want.Describe()).Body();
+
+            // Say when a strength floor cannot be judged here, rather than quietly not
+            // applying it. The contract was written against one antenna model and this
+            // install runs another — RealAntennas deletes the field stock rates antennas
+            // by — and there is no conversion between them. Everything else the contract
+            // asks for still holds, which is the point worth making: the network is not
+            // excused, only the strength of its antennas is unverifiable.
+            if (want != null && want.MinRelayPower > 0
+                && want.PowerModel != AntennaModel.Current)
+            {
+                UIF.Muted(parent,
+                    "Antenna strength is not checked on this install: the contract rates "
+                    + "antennas by the " + want.PowerModel + " model and this game uses "
+                    + AntennaModel.Current + ". The satellite count, the spacing and the "
+                    + "relay antennas themselves still apply.").Body();
+            }
+
+            var members = session.FleetMembers;
+            string at = string.IsNullOrEmpty(session.RequiredBody) ? "the target" : session.RequiredBody;
+            UIF.Muted(parent, $"{members.Count} qualifying "
+                              + (members.Count == 1 ? "vessel" : "vessels") + $" at {at}"
+                              + ", the scan covers the whole sphere of influence, not just "
+                              + "what is loaded around you.").Body();
+
+            foreach (var v in session.FleetProblems)
+                BuildProblem(parent, "Network incomplete", v);
+
+            if (members.Count == 0) return;
+
+            bool handover = session.HandoverApplies;
+            if (handover)
+            {
+                UIF.Muted(parent, "Tick the satellites to hand over. They leave this save "
+                                  + "and arrive in the issuer's, and what you tick has to "
+                                  + "meet the requirement on its own.").Body();
+                UIF.Muted(parent, session.SelectedMemberCount + " of " + members.Count
+                                  + " picked.").Body();
+                foreach (var v in session.HandoverProblems)
+                    BuildProblem(parent, "Selection does not meet the contract", v);
+            }
+
+            var listCard = UIF.Card(parent, "Network").Column(Theme.Space1).Pad(Theme.Space2);
+            foreach (var m in members)
+            {
+                var member = m;
+                var row = UIF.Box(listCard, "Sat").Row(Theme.Space2).MinH(26);
+                if (handover)
+                    UIF.Checkbox(row, session.IsMemberSelected(member.vesselId),
+                                 on => session.ToggleMember(member.vesselId));
+                UIF.Label(row, m.vesselName, Theme.FontXs).Ellipsis().E.PrefW(0).Flex(1f);
+                // Mean altitude and phase: the two numbers the check actually reads, so
+                // a player told their network is bunched can see which pair is at fault.
+                UIF.Muted(row, $"{(m.apoapsis + m.periapsis) / 2000.0:N0} km · "
+                               + $"{FleetConstraint.MeanLongitude(m):F0}°").Ellipsis();
+            }
         }
 
         // ── Extra crafts (multi-vessel submission) ──────────────────────────

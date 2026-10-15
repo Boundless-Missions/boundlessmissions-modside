@@ -44,6 +44,7 @@ namespace GeneKerman.UI.Gui
         {
             new Option { Id = "craft_build",   Label = "Craft build",    Desc = "They submit a blueprint from the VAB or SPH." },
             new Option { Id = "active_vessel", Label = "Active mission", Desc = "They fly a craft to the target." },
+            new Option { Id = "constellation", Label = "Relay network",  Desc = "They put relay satellites around a body." },
             new Option { Id = "rescue",        Label = "Rescue",         Desc = "They rescue the kerbals on your current vessel." },
             new Option { Id = "flag_design",   Label = "Flag design",    Desc = "They design a flag, reviewed via Discord." },
         };
@@ -70,6 +71,25 @@ namespace GeneKerman.UI.Gui
         private readonly PlayerPicker picker = new PlayerPicker();
         private readonly DatePicker duePicker = new DatePicker();
         private readonly BodyPicker bodyPicker = new BodyPicker();
+        // Relay-network fields. The bounds match ContractCreateRequest.relay_count, so a
+        // number the form accepts is one the server accepts.
+        private const int MinRelays = 2;
+        private const int MaxRelays = 64;
+        private string relayCountText = "4";
+        private bool relayBodiesSet;
+
+        /// <summary>One installed relay antenna, as the picker offers it.</summary>
+        private struct RelayAntenna
+        {
+            public string Title;
+            public double Power;
+        }
+
+        // The install's relay antennas, weakest first, built once. -1 means "any
+        // relay-capable antenna", which is the default and the old behaviour.
+        private readonly List<RelayAntenna> relayAntennas = new List<RelayAntenna>();
+        private bool relayAntennasSet;
+        private int relayAntennaIndex = -1;
 
         private string type = "craft_build";
         private bool auction;
@@ -227,18 +247,29 @@ namespace GeneKerman.UI.Gui
             // load the wreck, so ContractCreation always sends the issuer's own mod list.
             if (type != "flag_design" && !IsRescue) BuildModlist(body);
             if (IsRescue) BuildRescue(body);
+            if (IsConstellation) BuildRelay(body);
 
             BuildSend(body, busy, balance, currency);
         }
 
         private bool IsRescue => type == "rescue";
+        private bool IsConstellation => type == "constellation";
 
         private void BuildTypes(El parent)
         {
             Caption(parent, "WHAT KIND OF WORK?");
 
+            // Player-to-player relay-network contracts are off unless the deployment
+            // opts in (hidden settings.cfg override, off by default; the server is the
+            // authoritative gate). While off, the option is not offered at all — the
+            // default type is craft_build, so nothing selected is hidden out from under
+            // the issuer. Boundless-Missions relay missions are unaffected; they do not
+            // come from this form.
+            bool relayContracts = GeneKermanMod.Instance?.Api?.PlayerRelayContractsEnabled ?? false;
+
             foreach (var t in Types)
             {
+                if (t.Id == "constellation" && !relayContracts) continue;
                 var option = t;
                 UIF.Choice(parent, t.Label, t.Desc, type == t.Id, () =>
                 {
@@ -615,6 +646,113 @@ namespace GeneKerman.UI.Gui
 
         // ── State ───────────────────────────────────────────────────────────
 
+        /// <summary>The two things a relay network needs stated as numbers: where, and
+        /// how many. Everything else about the requirement follows from the count —
+        /// `fleet_constraints.default_spread` turns N into the even spacing N implies —
+        /// so asking for a spacing as well would only let the issuer contradict himself.
+        ///
+        /// Asked on the form rather than left in the description because the server can
+        /// only read a count out of prose that happens to contain one: "put some comsats
+        /// up" is a perfectly reasonable brief and extracts nothing at all, and the
+        /// contract would then verify against no network.</summary>
+        private void BuildRelay(El parent)
+        {
+            Caption(parent, "WHERE");
+            if (!relayBodiesSet)
+            {
+                // ScanRescueContext despite the name: its Bodies list is simply every
+                // body this install has, with the modded flag already worked out against
+                // ContractCreation's own stock set (which is private, and worth not
+                // duplicating — a second copy is a second thing to forget when a planet
+                // pack convention changes). Built once, behind the flag.
+                bodyPicker.SetBodies(ContractCreation.ScanRescueContext().Bodies, "");
+                relayBodiesSet = true;
+            }
+            bodyPicker.Build(parent);
+
+            Caption(parent, "ANTENNA");
+            if (!relayAntennasSet)
+            {
+                // Every relay-capable antenna this install has, weakest first. Offered
+                // as parts because that is how an issuer thinks about it ("each with an
+                // RA-2"); what travels is the part's POWER, so a contractor on a
+                // different mod set can satisfy it with an equivalent of their own
+                // rather than needing the same part.
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                // Skipped wholesale rather than filtered when this install has no
+                // strength model: RealAntennas deletes antennaPower from every part, so
+                // the field still reads its 500k constructor default and walking the
+                // catalogue would offer every antenna in the game at the same phantom
+                // rating. An empty list is the honest answer, and the note below says why.
+                if (PartLoader.LoadedPartsList != null && AntennaModel.ExpressesPower)
+                {
+                    foreach (var ap in PartLoader.LoadedPartsList)
+                    {
+                        var m = ap?.partPrefab?.FindModuleImplementing<ModuleDataTransmitter>();
+                        if (m == null || !AntennaModel.CountsAsRelay(m)) continue;
+                        if (m.antennaPower <= 0) continue;
+                        string title = ap.title ?? ap.name;
+                        if (!seen.Add(title)) continue;
+                        relayAntennas.Add(new RelayAntenna { Title = title, Power = m.antennaPower });
+                    }
+                }
+                relayAntennas.Sort((x, y) => x.Power.CompareTo(y.Power));
+                relayAntennasSet = true;
+            }
+
+            string antennaLabel = relayAntennaIndex >= 0 && relayAntennaIndex < relayAntennas.Count
+                ? relayAntennas[relayAntennaIndex].Title + "  ("
+                  + FleetConstraint.FormatAntennaPower(relayAntennas[relayAntennaIndex].Power) + ")"
+                : "Any relay antenna";
+            UIF.Button(parent, antennaLabel, () =>
+            {
+                // Cycles rather than opening a list: an install has a handful of relay
+                // antennas, and "any" has to stay one press away because it is the
+                // default a network usually wants.
+                relayAntennaIndex = relayAntennas.Count == 0
+                    ? -1 : (relayAntennaIndex + 1 >= relayAntennas.Count ? -1 : relayAntennaIndex + 1);
+                markDirty?.Invoke();
+            }, BtnStyle.Secondary, 28);
+            if (relayAntennas.Count == 0 && !AntennaModel.ExpressesPower)
+            {
+                // RealAntennas replaces the stock transmitter module and deletes the
+                // rating field stock antennas are graded by, so there is no number here
+                // to put in a contract. Said plainly, because an empty picker otherwise
+                // reads as "this install has no relay antennas" when the truth is that
+                // its antennas are rated on a scale this contract cannot carry.
+                UIF.Muted(parent, AntennaModel.Current + " rates antennas on its own "
+                    + "scale, so a strength figure cannot be set here. The contract will "
+                    + "still require a relay antenna on every satellite.").Body();
+            }
+            else
+            {
+                UIF.Muted(parent, relayAntennaIndex >= 0
+                    ? "Each satellite needs a relay antenna at least this strong. Not this "
+                      + "exact part: the strength travels, so another install can meet it "
+                      + "with an equivalent. A contractor running a different antenna mod "
+                      + "is told the figure does not apply there rather than failed by it."
+                    : "Any relay-capable antenna counts.").Body();
+            }
+
+            Caption(parent, "HOW MANY RELAYS");
+            UIF.TextField(parent, relayCountText, "4").OnChanged(t => relayCountText = t);
+
+            int n = ParseInt(relayCountText, 0);
+            if (n < MinRelays || n > MaxRelays)
+            {
+                UIF.Muted(parent, "Between " + MinRelays + " and " + MaxRelays + ".").Body();
+            }
+            else
+            {
+                // The same arithmetic the server will do, shown before sending so the
+                // issuer sees the spacing their count implies rather than discovering it
+                // when the contractor is refused.
+                UIF.Muted(parent, n + " relay satellites, evenly spread: neighbours at "
+                                  + "least " + Mathf.RoundToInt(360f / n * 0.5f)
+                                  + "\u00B0 apart, each with a relay-capable antenna.").Body();
+            }
+        }
+
         private ContractCreation.Request BuildRequest()
         {
             bool isAuction = auction && Auctionable(type);
@@ -636,6 +774,14 @@ namespace GeneKerman.UI.Gui
                               ? ContractCreation.ModlistNone : modlistMode,
                 DurationHours = ParseInt(duration, 24),
             };
+
+            if (IsConstellation)
+            {
+                req.RelayCount = ParseInt(relayCountText, 0);
+                req.TargetBody = bodyPicker.Selected ?? "";
+                req.MinRelayPower = (relayAntennaIndex >= 0 && relayAntennaIndex < relayAntennas.Count)
+                    ? relayAntennas[relayAntennaIndex].Power : 0.0;
+            }
 
             if (!IsRescue) return req;
 

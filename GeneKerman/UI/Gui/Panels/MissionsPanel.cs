@@ -55,6 +55,20 @@ namespace GeneKerman.UI.Gui
                 return;
             }
 
+#if GK_DEBUG_PANEL
+            // Dev builds only: swap between the live board and the admin-rotated test
+            // board. Drawn before the empty check, so a rotation that produced nothing
+            // can still be switched back out of. The server decides whether the request
+            // is honoured (WEEKLY_TEST_ACCOUNT_IDS); this only asks.
+            var devRow = UIF.Box(col, "DevBoard").Row(Theme.Space2).H(26);
+            UIF.Label(devRow, "Board", Theme.FontXs, Theme.MutedForeground);
+            UIF.Grow(devRow);
+            UIF.Button(devRow,
+                       main.TestBoardRequested ? "Test (dev)" : "Live",
+                       () => { main.ToggleTestBoard(); MarkDirty(); },
+                       main.TestBoardRequested ? BtnStyle.Destructive : BtnStyle.Secondary, 24);
+#endif
+
             if (missions == null || missions.Count == 0)
             {
                 // `!requested`: no fetch has happened yet, so this is the frame
@@ -69,8 +83,24 @@ namespace GeneKerman.UI.Gui
             if (!string.IsNullOrEmpty(lastWeek))
                 UIF.Label(meta, "Week " + lastWeek, Theme.FontXs, Theme.MutedForeground);
             UIF.Grow(meta);
+#if GK_DEBUG_PANEL
+            // A test mission still mints a real contract, so say which board this is
+            // on every frame rather than trusting whoever toggled it to remember.
+            // Gated: production can never be on the test board (it never asks), so
+            // this renders nothing there and the literal need not ship.
+            if (main.MissionBoardKind == "test")
+                UIF.Badge(meta, "TEST BOARD", Theme.Status("danger"));
+#endif
             if (main.MissionsLocked)
                 UIF.Badge(meta, "Selection locked", Theme.Status("warning"));
+
+#if GK_DEBUG_PANEL
+            // Why the test board was asked for and not given. Only ever set when a
+            // client asked, so this is silent for everybody else — and only a dev
+            // build can ask.
+            if (!string.IsNullOrEmpty(main.MissionTestRefusal))
+                UIF.Notice(col, "Test board: " + main.MissionTestRefusal, null);
+#endif
 
             DrawStatus(col);
 
@@ -94,7 +124,14 @@ namespace GeneKerman.UI.Gui
 
             var tags = UIF.Box(card, "Tags").Row(Theme.Space1).H(22);
             UIF.Badge(tags, band + " " + difficulty + "/10", bandColor);
-            UIF.Label(tags, "#" + MiniJSON.GetInt(m, "id"), Theme.FontXs, Theme.MutedForeground);
+            // "n" is the mission's number on the board (1..20); "id" is the claim key
+            // the bot wants back on select, and since boards became install-specific
+            // that id is a hash of the mission text rather than its position. Show the
+            // number when the bot sent one, and fall back to the id for a board stored
+            // before the two were split, where the id WAS the number.
+            int boardNo = MiniJSON.GetInt(m, "n");
+            if (boardNo <= 0) boardNo = MiniJSON.GetInt(m, "id");
+            UIF.Label(tags, "#" + boardNo, Theme.FontXs, Theme.MutedForeground);
             UIF.Grow(tags);
 
             UIF.Label(card, MiniJSON.GetString(m, "desc_en"), Theme.FontSm).Body();

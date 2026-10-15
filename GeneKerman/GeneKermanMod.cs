@@ -2157,10 +2157,10 @@ namespace GeneKerman
         public void OpenSubmitWindow(string contractId, string mission,
             string missionType = "active_vessel", string requiredSituation = "", string requiredBody = "", string requiredModlist = "",
             RescueTargetSpec rescueTarget = null, List<string> rescueKerbals = null,
-            ContractConstraints constraints = null)
+            ContractConstraints constraints = null, bool botIssued = false)
         {
             submitPanel?.Open(contractId, mission, missionType, requiredSituation, requiredBody,
-                requiredModlist, rescueTarget, rescueKerbals, constraints);
+                requiredModlist, rescueTarget, rescueKerbals, constraints, botIssued);
         }
 
         /// <summary>
@@ -2613,9 +2613,9 @@ namespace GeneKerman
             switch (status)
             {
                 case ClearToSaveStatus.NOT_IN_ATMOSPHERE:
-                    return "it's flying in atmosphere — land it or leave the air first.";
+                    return "it's flying in atmosphere, land it or leave the air first.";
                 case ClearToSaveStatus.NOT_UNDER_ACCELERATION:
-                    return "it's under acceleration — let it coast first.";
+                    return "it's under acceleration, let it coast first.";
                 case ClearToSaveStatus.NOT_WHILE_MOVING_OVER_SURFACE:
                     // Deliberately does not promise that stopping will help. A craft on
                     // wheels reports this state *permanently*: measured on a stock
@@ -2625,18 +2625,18 @@ namespace GeneKerman
                     // condition and sent the player to wait out something that never
                     // ends. A launchpad craft clears immediately, so naming the landing
                     // gear is the actionable half.
-                    return "it's moving over the surface — bring it to a stop. A craft "
+                    return "it's moving over the surface, bring it to a stop. A craft "
                          + "resting on wheels can report this no matter how still it "
                          + "looks; if it will not settle, hand it over from the launchpad "
                          + "or from orbit instead.";
                 case ClearToSaveStatus.NOT_WHILE_ABOUT_TO_CRASH:
                     return "it's about to crash.";
                 case ClearToSaveStatus.NOT_WHILE_ON_A_LADDER:
-                    return "someone is on a ladder — get them aboard or onto the ground first.";
+                    return "someone is on a ladder, get them aboard or onto the ground first.";
                 case ClearToSaveStatus.NOT_WHILE_THROTTLED_UP:
-                    return "the throttle is up — cut it first.";
+                    return "the throttle is up, cut it first.";
                 case ClearToSaveStatus.ORBIT_EVENT_IMMINENT:
-                    return "an orbit change is imminent — wait until it's through.";
+                    return "an orbit change is imminent, wait until it's through.";
                 default:
                     return "KSP won't let this flight be saved as it stands.";
             }
@@ -2690,7 +2690,7 @@ namespace GeneKerman
                 // happens and sometimes does not, with no explanation, reads as a bug.
                 RaiseLocalNotification("Submitted",
                     "Your submission is in. " + NotClearReason(status) +
-                    " Leave flight when you're ready — nothing is waiting on it.");
+                    " Leave flight when you're ready, nothing is waiting on it.");
                 yield break;
             }
 
@@ -2933,7 +2933,7 @@ namespace GeneKerman
                 $"{stranded.Count} kerbal(s) borrowed from other players are stuck here with no " +
                 $"craft and no active contract: {NameList(stranded, 6)}. They take up astronaut " +
                 "complex slots and quietly block those names from ever being offered to you as " +
-                "applicants. Press Release stranded crew to let them go — they come back if " +
+                "applicants. Press Release stranded crew to let them go, they come back if " +
                 "their craft is ever imported again.",
                 null, LocalNotifActions.ReleaseOrphanCrew);
         }

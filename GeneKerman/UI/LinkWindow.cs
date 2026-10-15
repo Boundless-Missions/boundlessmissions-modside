@@ -17,9 +17,18 @@ namespace GeneKerman.UI
         private string statusMessage = "";
         private bool isLinking;
 
-        // Discord login approval: set once /auth/link returns "approval_required".
-        // The user presses a Log-in button in their Discord DM; we poll until then.
+        // Login approval: set once /auth/link returns "approval_required". The user
+        // presses a Log-in button somewhere else; we poll until then.
         private bool awaitingApproval;
+        // WHERE that button is: "discord" (the DM the bot just sent) or "panel" (the
+        // website account page that minted the code, which is the only route an
+        // account with no Discord ever takes). The server says so in `approve_via`,
+        // because both routes answer with the same status and the same challenge_id
+        // and nothing here can tell them apart. Empty is an older server that never
+        // sent the field — then both surfaces are named rather than one guessed at,
+        // since guessing Discord is what sent website players hunting for a DM that
+        // was never coming.
+        private string approveVia = "";
         // Set when the server answers `totp_required`: this account has an
         // authenticator, so there is nothing to wait for — a code is typed here.
         private bool awaitingTotp;
@@ -171,18 +180,17 @@ namespace GeneKerman.UI
             }
             else
             {
-                // Push approval: the user confirms in their own Discord DM. Nothing
-                // to type here — we just wait for their button press.
-                GUILayout.Label(
-                    "Check your Discord DMs and press \"✅ Log in\"\nto approve this sign-in.\n\nWaiting for approval…",
-                    labelStyle
-                );
+                // Push approval: the user confirms on the surface that did not
+                // consume the code. Nothing to type here — we just wait for their
+                // button press.
+                GUILayout.Label(ApprovalInstructions(), labelStyle);
                 GUILayout.Space(15);
 
                 if (GUILayout.Button("← Cancel", GUI.skin.label))
                 {
                     awaitingApproval = false;
                     approvalChallengeId = "";
+                    approveVia = "";
                     statusMessage = "";
                 }
             }
@@ -314,10 +322,13 @@ namespace GeneKerman.UI
                     }
                     else if (ok && MiniJSON.GetString(data, "status") == "approval_required")
                     {
-                        // Server DM'd a Log-in button — wait for the user to press it.
+                        // A Log-in button is waiting somewhere — in the Discord DM the
+                        // server just sent, or on the account page for a panel-minted
+                        // code. `approve_via` says which; wait for the press either way.
                         approvalChallengeId = MiniJSON.GetString(data, "challenge_id");
+                        approveVia = MiniJSON.GetString(data, "approve_via");
                         awaitingApproval = true;
-                        statusMessage = "(Ok) Approve the login in your Discord DMs.";
+                        statusMessage = "(Ok) " + ApprovalStatusLine();
                         StartApprovalPoll();
                     }
                     else if (ok)
@@ -331,6 +342,41 @@ namespace GeneKerman.UI
                     }
                 })
             );
+        }
+
+        /// <summary>
+        /// What the waiting screen says while an approval is outstanding. Three
+        /// answers, not two: a code minted on the website is approved on the website
+        /// (and an account with no Discord has no other route), a code from
+        /// /b linkcode is approved in the DM the bot sent, and an older server that
+        /// sends no `approve_via` gets both named — which is longer, but never sends
+        /// anyone to a surface that has nothing on it.
+        /// </summary>
+        private string ApprovalInstructions()
+        {
+            // The button names are the ones actually drawn on each surface — the
+            // account page's KSP card says "Yes, that's me", the DM says "Log in" —
+            // because an instruction that names a button nobody can find is only
+            // slightly better than one that names the wrong surface.
+            if (approveVia == "panel")
+                return "Open boundlessmissions.com/account and press\n" +
+                       "\"Yes, that's me\" to approve this sign-in.\n\nWaiting for approval…";
+            if (approveVia == "discord")
+                return "Check your Discord DMs and press \"✅ Log in\"\n" +
+                       "to approve this sign-in.\n\nWaiting for approval…";
+            return "Approve this sign-in where you got the code:\n" +
+                   "• boundlessmissions.com/account (\"Yes, that's me\"), or\n" +
+                   "• your Discord DMs (\"✅ Log in\").\n\nWaiting for approval…";
+        }
+
+        /// The same distinction, one line long, for the status strip.
+        private string ApprovalStatusLine()
+        {
+            if (approveVia == "panel")
+                return "Approve the login on your account page.";
+            if (approveVia == "discord")
+                return "Approve the login in your Discord DMs.";
+            return "Approve the login where you got the code.";
         }
 
         private void StartApprovalPoll()

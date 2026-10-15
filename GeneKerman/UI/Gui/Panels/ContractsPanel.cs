@@ -118,7 +118,12 @@ namespace GeneKerman.UI.Gui
 
         /// <summary>Two-click confirms, held by contract id so they cannot leak between rows.</summary>
         private string confirmActionId;
-        private string rescueAcceptConfirmId;
+
+        /// <summary>Contract whose accept warnings have been read and waved through.
+        /// One id for every reason a pending contract is worth a second press — a
+        /// modded rescue target, a requirement this install has not got — because they
+        /// are shown together and a player who has read both should press once.</summary>
+        private string acceptConfirmId;
 
         /// <summary>
         /// Contract whose more-time window is up, or null. The date, the calendar and
@@ -834,10 +839,17 @@ namespace GeneKerman.UI.Gui
                           enforcing ? Theme.Primary : Theme.Status("warning"));
             }
 
+            // Ellipsis and flexible, in that order, or a long counterparty name runs off
+            // the edge of the card: the badges before it are fixed-width, this label was
+            // not, and "Boundless Missions Support" is cut mid-word by the card's own
+            // clip with nothing to say it was cut. `Grow` below still holds the row's
+            // shape when the name is short — it is the label that has to yield, since it
+            // is the only part of this row that has no natural bound.
             UIF.Label(top, isOutgoing
                         ? "to " + MiniJSON.GetString(c, "contractor_name")
                         : "from " + MiniJSON.GetString(c, "issuer_name"),
-                      Theme.FontXs, Theme.MutedForeground);
+                      Theme.FontXs, Theme.MutedForeground)
+               .Ellipsis().E.Flex(1f, 1f);
             UIF.Grow(top);
 
             string mission = MiniJSON.GetString(c, "mission");
@@ -896,7 +908,7 @@ namespace GeneKerman.UI.Gui
             openId = cid;
             ClearStatus();
             confirmActionId = null;
-            rescueAcceptConfirmId = null;
+            acceptConfirmId = null;
             // moreTimeWindowId is deliberately not reset here: it tracks a window that
             // outlives the selection (and names its own contract), so clearing it on a
             // click elsewhere in the inbox would leave the card offering to open a form
@@ -1082,12 +1094,19 @@ namespace GeneKerman.UI.Gui
             var limits = ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints"));
             bool inEditor = HighLogic.LoadedSceneIsEditor && status == "active";
 
-            if (limits.IsEmpty && !inEditor) return;
+            // The checklist is driven by the requirements, not by the limits. A rescue
+            // usually has no part limits at all and still has everything to say: its
+            // wreck is built from mods this save may not have, and that is exactly the
+            // contract where finding out late costs the most.
+            var reqs = RequirementsFor(c);
+
+            if (limits.IsEmpty && reqs.Count == 0 && !inEditor) return;
 
             UIF.Divider(card);
 
             if (!limits.IsEmpty)
                 Section(card, "Mission limits", limits.Describe());
+            BuildRequirementChecklist(card, reqs);
 
             if (!inEditor) return;
 
@@ -1116,6 +1135,82 @@ namespace GeneKerman.UI.Gui
                 UIF.Muted(card, "Another contract's part filter is active; turning this on replaces it.")
                    .Body();
         }
+
+        /// <summary>
+        /// Every requirement this contract makes, marked green/amber/red against what
+        /// is actually installed here.
+        ///
+        /// Drawn as a checklist rather than folded into the "Mission limits" line
+        /// because the two answer different questions: that line is the *terms*, this
+        /// is whether this game can meet them. Only requirements appear — a forbidden
+        /// rule is satisfied by not having the thing, so an install can never fail one.
+        ///
+        /// A drawn swatch and a word, never colour alone: the TMP font is borrowed from
+        /// KSP and carries no tick or cross (see FinancePanel.Money), and a row whose
+        /// only signal is green-vs-red is unreadable to a player who cannot separate
+        /// them.
+        /// </summary>
+        private static void BuildRequirementChecklist(El card, List<ContractRequirements.Item> reqs)
+        {
+            if (reqs == null || reqs.Count == 0) return;
+
+            var box = UIF.Box(card, "Requirements").Column(Theme.Space2);
+            UIF.Label(box, "IN YOUR INSTALL", Theme.FontXs, Theme.MutedForeground);
+
+            foreach (var r in reqs)
+            {
+                if (r == null) continue;
+                Color color = RequirementColor(r.State);
+
+                var item = UIF.Box(box, "Req").Column(1);
+                var head = UIF.Box(item, "ReqHead").Row(Theme.Space2).MinH(20);
+                UIF.Box(head, "Sw").Size(8f, 8f).Bg(color, 2);
+                UIF.Label(head, r.Label, Theme.FontSm).Ellipsis().E.PrefW(0).Flex(1f);
+                UIF.Badge(head, RequirementWord(r.State), color);
+
+                if (!string.IsNullOrEmpty(r.Detail))
+                    UIF.Muted(item, r.Detail).Body();
+            }
+        }
+
+        private static Color RequirementColor(ContractRequirements.Availability state)
+        {
+            switch (state)
+            {
+                case ContractRequirements.Availability.Present: return Theme.Status("success");
+                case ContractRequirements.Availability.Locked:  return Theme.Status("warning");
+                case ContractRequirements.Availability.Missing: return Theme.Status("danger");
+                default:                                        return Theme.MutedForeground;
+            }
+        }
+
+        /// <summary>The word beside the swatch. "Unknown" is its own answer and must not
+        /// read as either of the other two — the part database was not ready to ask, and
+        /// a green row would be a promise nothing checked.</summary>
+        private static string RequirementWord(ContractRequirements.Availability state)
+        {
+            switch (state)
+            {
+                case ContractRequirements.Availability.Present: return "installed";
+                case ContractRequirements.Availability.Locked:  return "not unlocked";
+                case ContractRequirements.Availability.Missing: return "missing";
+                default:                                        return "unknown";
+            }
+        }
+
+        /// <summary>This contract's requirements against this install. Recomputed on
+        /// every rebuild rather than cached per contract: the catalogue scan behind it
+        /// is what costs, and ContractRequirements already keeps that.
+        ///
+        /// Two sources, one list. A craft-build contract's limits say what the player
+        /// must build; a rescue's wreck says what has to be able to *spawn* in their
+        /// save. They are the same question — can this install do the job — so they
+        /// share one checklist, one accept warning and one modpack, rather than the
+        /// player meeting the same idea twice in two shapes.</summary>
+        private static List<ContractRequirements.Item> RequirementsFor(Dictionary<string, object> c)
+            => ContractRequirements.Check(
+                ContractConstraints.Parse(MiniJSON.GetDict(c, "constraints")),
+                ContractRequirements.ParseWreckMods(MiniJSON.GetDict(c, "rescue_target")));
 
         /// <summary>The contract the editor's part filter is gating for, or "".</summary>
         private static string EnforcedId()
@@ -1155,7 +1250,7 @@ namespace GeneKerman.UI.Gui
             // on it has no way to know they are looking at less than was sent.
             if (preview.Refused > 0)
                 UIF.Muted(card, $"{preview.Refused} more image(s) were submitted but could not " +
-                                "be opened on this machine — this is not what was submitted.",
+                                "be opened on this machine, this is not what was submitted.",
                           Theme.FontXs).Body();
 
             // One flat list across both kinds, so the viewer's arrows step through
@@ -1424,29 +1519,60 @@ namespace GeneKerman.UI.Gui
                         bool isRescue = mType == "rescue";
                         bool moddedTarget = MiniJSON.GetBool(c, "is_modded_target");
 
-                        // A rescue aimed at a modded body needs that planet pack
-                        // installed; accepting blind strands the contract.
-                        if (isRescue && moddedTarget && rescueAcceptConfirmId != cid)
+                        // Everything about this contract this install cannot supply. The
+                        // check is worth doing here and not only at submit time: the
+                        // terms are written on the issuer's install, so a required part,
+                        // propellant or profession can be something this game has never
+                        // had — and finding that out when a finished craft is refused
+                        // costs the whole build.
+                        var reqs = RequirementsFor(c);
+                        bool reqBlocked = ContractRequirements.AnyBlocking(reqs);
+                        bool warned = (isRescue && moddedTarget) || reqBlocked;
+
+                        if (warned && acceptConfirmId != cid)
                         {
-                            var rt = MiniJSON.GetDict(c, "rescue_target");
-                            string rbody = rt != null ? MiniJSON.GetString(rt, "body", "this planet") : "this planet";
-                            UIF.Label(bar, "Targets " + rbody + " (modded). You need its planet pack installed.",
-                                      Theme.FontXs, Theme.Status("warning")).Body();
-                            UIF.Button(bar, "Accept anyway", () => { rescueAcceptConfirmId = cid; MarkDirty(); },
+                            // A rescue aimed at a modded body needs that planet pack
+                            // installed; accepting blind strands the contract.
+                            if (isRescue && moddedTarget)
+                            {
+                                var rt = MiniJSON.GetDict(c, "rescue_target");
+                                string rbody = rt != null ? MiniJSON.GetString(rt, "body", "this planet") : "this planet";
+                                UIF.Label(bar, "Targets " + rbody + " (modded). You need its planet pack installed.",
+                                          Theme.FontXs, Theme.Status("warning")).Body();
+                            }
+                            if (reqBlocked)
+                                UIF.Label(bar, ContractRequirements.Summary(reqs) +
+                                          " Accepting anyway writes a CKAN installer for what can be named.",
+                                          Theme.FontXs, Theme.Status("warning")).Body();
+
+                            UIF.Button(bar, "Accept anyway", () => { acceptConfirmId = cid; MarkDirty(); },
                                        BtnStyle.Primary, 28).Interactable(!Busy);
                         }
                         else
                         {
+                            // The modpack is written on the way *out* of a successful
+                            // accept, not on the button: a contract the server refuses
+                            // leaves no job to install mods for, and a .ckan for one
+                            // would be litter the player has to work out the meaning of.
+                            string modlist = MiniJSON.GetString(c, "modlist", "");
+                            string label = ContractRequirements.ContextName(c);
                             UIF.Button(bar, "Accept", () =>
                             {
-                                rescueAcceptConfirmId = null;
-                                main.RequestAcceptContract(cid, MiniJSON.GetString(c, "issuer_name", ""), Done());
+                                acceptConfirmId = null;
+                                var done = Done();
+                                main.RequestAcceptContract(cid, MiniJSON.GetString(c, "issuer_name", ""),
+                                    (ok, msg) =>
+                                    {
+                                        if (ok && reqBlocked)
+                                            ContractRequirements.WriteCkanForMissing(label, reqs, modlist);
+                                        done(ok, msg);
+                                    });
                             }, BtnStyle.Primary, 28).Interactable(!Busy);
                         }
 
                         UIF.Button(bar, "Decline", () =>
                         {
-                            rescueAcceptConfirmId = null;
+                            acceptConfirmId = null;
                             main.RequestCancelContract(cid, Done());
                         }, BtnStyle.Ghost, 28).Interactable(!Busy);
                     }

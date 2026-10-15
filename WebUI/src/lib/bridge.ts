@@ -290,6 +290,11 @@ export interface ContractSummary {
   required_situation?: string | null;
   required_body?: string | null;
   constraints?: Record<string, unknown> | null;
+  /** Rescue contracts only: where the stranded crew are, and — in `wreck_mods` —
+   *  which mods the stranded vessel is built from. Passed to the in-game
+   *  requirements check so a rescue can be marked against the running install the
+   *  same way a craft-build contract's part limits are. */
+  rescue_target?: Record<string, unknown> | null;
   flag_preview_url?: string | null;
   rescue_kerbals: string[];
   pending_request?: PendingRequest | null;
@@ -313,6 +318,32 @@ export interface PendingRequest {
 
 export interface ContractListResponse {
   contracts: ContractSummary[];
+}
+
+/**
+ * How one of a contract's requirements stands in the running install, answered by
+ * `/gk/contract/requirements` (ContractRequirements.cs).
+ *
+ * `unknown` is its own answer and must never be drawn as either of the other two: it
+ * means the part database was not ready to ask, and a green row there would be a
+ * promise nothing checked — the same distinction the website's craft compatibility
+ * draws with `known`.
+ */
+export type RequirementState = "present" | "locked" | "missing" | "unknown";
+
+export interface RequirementItem {
+  /** "part" | "propellant" | "engine" | "category" | "crew" */
+  kind: string;
+  label: string;
+  state: RequirementState;
+  /** A sentence explaining a non-present state, or null. */
+  detail?: string | null;
+  /** Missing or locked — this install cannot meet the requirement as it stands. */
+  blocking: boolean;
+}
+
+export interface RequirementsResponse {
+  items: RequirementItem[];
 }
 
 export interface Corp {

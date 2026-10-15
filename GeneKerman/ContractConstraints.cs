@@ -24,6 +24,22 @@ namespace GeneKerman
         // substring matching for mentions the bot couldn't pin down.
         public List<string> ForbiddenPartNames = new List<string>();
         public List<string> RequiredPartNames = new List<string>();
+
+        /// <summary>`internal name -> display title`, as the CONTRACT AUTHOR's install
+        /// named them, sent by the bot with the constraints. The only way to render a
+        /// required part this install does not have: `PartLoader.getPartInfoByName`
+        /// returns null for it, so without this the requirement shows as a raw
+        /// `sspx-inflatable-hab-25-2` (or, before the author's catalog was consulted at
+        /// all, as the bare word they typed). Display only — matching stays on the
+        /// internal name, because a title is localized.</summary>
+        public Dictionary<string, string> PartTitles = new Dictionary<string, string>();
+
+        /// <summary>`internal name -> GameData folder`, as the contract author's install
+        /// reported it. The only source for this on a machine that does not have the
+        /// part: `partUrl` is a field on `AvailablePart`, and there is no AvailablePart
+        /// for a part you have not installed. Without it a missing part could name no
+        /// mod, and the modpack fell back to the contract's entire mod list.</summary>
+        public Dictionary<string, string> PartMods = new Dictionary<string, string>();
         public List<string> ForbiddenPartsUnresolved = new List<string>();
         public List<string> RequiredPartsUnresolved = new List<string>();
         public List<string> ForbiddenPropellants = new List<string>();
@@ -106,6 +122,12 @@ namespace GeneKerman
         // the bot (polar/equatorial/keostationary/…). A flight state, not a part
         // choice, so it's gated at submit time only — see OrbitConstraint.cs.
         public OrbitConstraint Orbit = new OrbitConstraint();
+        // Constellation ("relay network") requirement parsed from the mission text by
+        // the bot. Not a state of the craft being flown at all — it is a count over
+        // every vessel in the target body's SOI — so it is gated at submit time only,
+        // and only for a contract whose mission_type is "constellation". See
+        // FleetConstraint.cs.
+        public FleetConstraint Fleet = new FleetConstraint();
 
         public bool IsEmpty =>
             ForbiddenParts.Count == 0 && RequiredParts.Count == 0 &&
@@ -114,7 +136,8 @@ namespace GeneKerman
             ForbiddenPartCategories.Count == 0 && RequiredPartCategories.Count == 0 &&
             MaxParts <= 0 && MinParts <= 0 && MaxDeltaV <= 0 && MinDeltaV <= 0 &&
             MaxCrew < 0 && MinCrew <= 0 && CrewTraits.Count == 0 &&
-            (Orbit == null || Orbit.IsEmpty);
+            (Orbit == null || Orbit.IsEmpty) &&
+            (Fleet == null || Fleet.IsEmpty);
 
         public bool HasForbidRules =>
             ForbiddenParts.Count > 0 || ForbiddenPartNames.Count > 0 ||
@@ -129,6 +152,8 @@ namespace GeneKerman
             c.RequiredParts = StrList(dict, "required_parts");
             c.ForbiddenPartNames = StrList(dict, "forbidden_part_names");
             c.RequiredPartNames = StrList(dict, "required_part_names");
+            c.PartTitles = StrMap(dict, "part_titles");
+            c.PartMods = StrMap(dict, "part_mods");
             // When the bot ran resolution, prefer its split; otherwise treat every
             // loose mention as unresolved (title-substring) — same as before.
             c.ForbiddenPartsUnresolved = dict.ContainsKey("forbidden_parts_unresolved")
@@ -149,6 +174,7 @@ namespace GeneKerman
             c.MinCrew = dict.ContainsKey("min_crew") ? MiniJSON.GetInt(dict, "min_crew", -1) : -1;
             c.CrewTraits = ParseCrewTraits(MiniJSON.GetDict(dict, "crew_traits"));
             c.Orbit = OrbitConstraint.Parse(MiniJSON.GetDict(dict, "orbit"));
+            c.Fleet = FleetConstraint.Parse(MiniJSON.GetDict(dict, "fleet"));
             return c;
         }
 
@@ -325,6 +351,12 @@ namespace GeneKerman
             return violations;
         }
 
+        /// <summary>Whether any mod installed here defines a profession. Public
+        /// because the contract pre-flight asks the same question one step earlier —
+        /// before the job is accepted rather than when a submission is refused — and
+        /// "which install is this" has one answer, not two.</summary>
+        public static bool TraitDefinedHere(string trait) => TraitExistsHere(trait);
+
         private static bool TraitExistsHere(string trait)
         {
             try
@@ -406,13 +438,13 @@ namespace GeneKerman
             }
             Add("No", Concat(ForbiddenParts, ForbiddenEngineCategories, ForbiddenPropellants, ForbiddenPartCategories));
             Add("Must use", Concat(RequiredParts, RequiredEngineCategories, RequiredPropellants, RequiredPartCategories));
-            if (MaxParts > 0) bits.Add($"≤{MaxParts} parts");
-            if (MinParts > 0) bits.Add($"≥{MinParts} parts");
-            if (MaxDeltaV > 0) bits.Add($"≤{MaxDeltaV:F0} m/s Δv");
-            if (MinDeltaV > 0) bits.Add($"≥{MinDeltaV:F0} m/s Δv");
+            if (MaxParts > 0) bits.Add($"max {MaxParts} parts");
+            if (MinParts > 0) bits.Add($"min {MinParts} parts");
+            if (MaxDeltaV > 0) bits.Add($"max {MaxDeltaV:F0} m/s Δv");
+            if (MinDeltaV > 0) bits.Add($"min {MinDeltaV:F0} m/s Δv");
             if (MaxCrew == 0) bits.Add("uncrewed");
-            else if (MaxCrew > 0) bits.Add($"≤{MaxCrew} crew");
-            if (MinCrew > 0) bits.Add($"≥{MinCrew} crew");
+            else if (MaxCrew > 0) bits.Add($"max {MaxCrew} crew");
+            if (MinCrew > 0) bits.Add($"min {MinCrew} crew");
             foreach (var kvp in CrewTraits)
             {
                 CrewTraitRule r = kvp.Value;
@@ -420,11 +452,12 @@ namespace GeneKerman
                 if (r.Max == 0) phrase = $"no {kvp.Key}";
                 else if (r.Min > 0 && r.Max > 0 && r.Min == r.Max) phrase = $"exactly {r.Min}× {kvp.Key}";
                 else if (r.Min > 0 && r.Max > 0) phrase = $"{r.Min}-{r.Max}× {kvp.Key}";
-                else if (r.Max > 0) phrase = $"≤{r.Max}× {kvp.Key}";
+                else if (r.Max > 0) phrase = $"max {r.Max}× {kvp.Key}";
                 else if (r.Min > 0) phrase = $"{r.Min}× {kvp.Key}";
                 if (phrase != null) bits.Add(phrase + MissingTraitSuffix(kvp.Key, r));
             }
             if (Orbit != null && !Orbit.IsEmpty) bits.Add(Orbit.Describe());
+            if (Fleet != null && !Fleet.IsEmpty) bits.Add(Fleet.Describe());
             return string.Join(" | ", bits.ToArray());
         }
 
@@ -466,6 +499,24 @@ namespace GeneKerman
                 if (!string.IsNullOrEmpty(v)) outList.Add(v.Trim());
             }
             return outList;
+        }
+
+        /// <summary>A `{string: string}` object from the constraints payload, or empty.
+        /// Tolerant like StrList: a malformed entry is skipped, never thrown, because
+        /// this is display sugar and a contract must stay readable without it.</summary>
+        private static Dictionary<string, string> StrMap(Dictionary<string, object> dict, string key)
+        {
+            var outMap = new Dictionary<string, string>();
+            if (dict == null || !dict.ContainsKey(key)) return outMap;
+            var inner = dict[key] as Dictionary<string, object>;
+            if (inner == null) return outMap;
+            foreach (var kv in inner)
+            {
+                if (string.IsNullOrEmpty(kv.Key) || kv.Value == null) continue;
+                string v = kv.Value.ToString();
+                if (!string.IsNullOrEmpty(v)) outMap[kv.Key] = v.Trim();
+            }
+            return outMap;
         }
     }
 }

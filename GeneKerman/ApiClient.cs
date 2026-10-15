@@ -57,6 +57,18 @@ namespace GeneKerman
         // fully functional fallback — single-monitor and Steam Deck players are better
         // served by it, and it is the only UI available if the bridge cannot start.
         private bool webUiEnabled;
+        // Whether the contract form offers "Relay network" (a player-to-player relay,
+        // i.e. constellation, contract). Off by default and deliberately NOT a shipped
+        // settings.cfg key nor one this mod ever writes back — a hidden override an
+        // operator hand-adds (`enablePlayerRelayContracts = true`) when they want it,
+        // read only if present. The server is the real gate (PLAYER_RELAY_CONTRACTS);
+        // this just keeps the option out of the form when the deployment doesn't offer
+        // it. Boundless-Missions relay missions (the weekly board) are unaffected — they
+        // are not issued through this form. See PLAYER-RELAY-CONTRACTS.md at the
+        // workspace root. NB: an in-game settings save rewrites settings.cfg from the
+        // keys below only, so a hand-added override is dropped on the next save; re-add
+        // it with KSP closed, or rely on the server flag.
+        private bool playerRelayContractsEnabled;
         // Emergency freeze for rescue crew (see RescueImmunityGuardian). On by default:
         // without it a stranded crew starves in whatever time the rescuer takes, and a
         // wreck built for another life-support mod is unrescuable. Off leaves the crew
@@ -153,6 +165,8 @@ namespace GeneKerman
         public bool DataGatheringEnabled => dataGatheringEnabled;
         /// <summary>Whether the UI opens in a browser (true) or as classic in-game windows (false).</summary>
         public bool WebUiEnabled => webUiEnabled;
+        // See the field above: off by default, hidden override, server is authoritative.
+        public bool PlayerRelayContractsEnabled => playerRelayContractsEnabled;
         /// <summary>Whether stranded rescue crew are held in emergency freeze until reached.</summary>
         public bool EmergencyFreezeEnabled => emergencyFreezeEnabled;
         /// <summary>Days of local life support stowed aboard a rescue wreck per kerbal (0 = off).</summary>
@@ -283,6 +297,10 @@ namespace GeneKerman
                         // Absent means classic: an existing install must never be moved
                         // to a different UI by a mod update.
                         bool.TryParse(gk.GetValue("enableWebUi") ?? "false", out webUiEnabled);
+                        // Hidden override, absent by design (default false). Not written
+                        // back in SaveSettings and not in the shipped settings.cfg — see
+                        // the field declaration and PLAYER-RELAY-CONTRACTS.md.
+                        bool.TryParse(gk.GetValue("enablePlayerRelayContracts") ?? "false", out playerRelayContractsEnabled);
                         bool.TryParse(gk.GetValue("enableEmergencyFreeze") ?? "true", out emergencyFreezeEnabled);
                         // Guarded rather than TryParse'd straight in: a hand-edited
                         // negative would size a ration kit backwards.
@@ -1609,9 +1627,23 @@ namespace GeneKerman
             });
         }
 
-        public IEnumerator GetWeeklyMissions(ApiCallback<Dictionary<string, object>> callback)
+        /// <summary>This week's mission board. <paramref name="testBoard"/> asks for the
+        /// admin-rotated test board instead; the server serves the live one with a
+        /// `test_refusal` when the caller is not allowed it, so this never fails just
+        /// because nobody is testing right now.</summary>
+        public IEnumerator GetWeeklyMissions(ApiCallback<Dictionary<string, object>> callback,
+                                             bool testBoard = false)
         {
-            yield return Get("/api/v1/missions/weekly", (ok, resp, status) =>
+            string path = "/api/v1/missions/weekly";
+#if GK_DEBUG_PANEL
+            // Gated so the production DLL does not even carry the query string. It
+            // could not reach this branch anyway — `TestBoardRequested` is an #else
+            // stub returning false there — but a shipped build has no business
+            // containing the literal, and this lets the string be a marker in
+            // tools/assert_production_clean.sh.
+            if (testBoard) path += "?board=test&dev=1";
+#endif
+            yield return Get(path, (ok, resp, status) =>
             {
                 if (ok && !string.IsNullOrEmpty(resp))
                     callback(true, MiniJSON.DeserializeDict(resp), null);
@@ -1620,9 +1652,16 @@ namespace GeneKerman
             });
         }
 
-        public IEnumerator SelectMission(int missionId, ApiCallback<Dictionary<string, object>> callback)
+        public IEnumerator SelectMission(int missionId, ApiCallback<Dictionary<string, object>> callback,
+                                         bool testBoard = false)
         {
             var body = new Dictionary<string, object> { { "mission_id", missionId } };
+#if GK_DEBUG_PANEL
+            // The board has to travel with the id: a test id means nothing against the
+            // live board, and the server keys the claim on whichever board it resolves.
+            // Gated for the same reason as the query string above.
+            if (testBoard) body["board"] = "test";
+#endif
             yield return Post("/api/v1/missions/select", MiniJSON.Serialize(body), (ok, resp, status) =>
             {
                 if (ok && !string.IsNullOrEmpty(resp))
@@ -1770,7 +1809,8 @@ namespace GeneKerman
 
         public IEnumerator CreateContract(string contractorId, string mission,
             int payment, int fine, string dueDate, string modlist,
-            ApiCallback<Dictionary<string, object>> callback, string contractType = "auto")
+            ApiCallback<Dictionary<string, object>> callback, string contractType = "auto",
+            int relayCount = 0, string targetBody = null, double minRelayPower = 0.0)
         {
             var body = new Dictionary<string, object>
             {
@@ -1781,6 +1821,23 @@ namespace GeneKerman
                 { "due_date", dueDate },
                 { "contract_type", string.IsNullOrEmpty(contractType) ? "auto" : contractType },
             };
+            // A relay network states its terms as numbers rather than in its prose: the
+            // server stores these instead of trying to read a count back out of whatever
+            // the issuer wrote. Sent only when there is one, so every other contract type
+            // posts exactly the body it always did.
+            if (relayCount > 0) body.Add("relay_count", relayCount);
+            if (!string.IsNullOrEmpty(targetBody)) body.Add("body", targetBody);
+            if (minRelayPower > 0)
+            {
+                body.Add("min_relay_power", minRelayPower);
+                // Which model that number means, read off this install rather than asked
+                // of the issuer. A stock rating and a RealAntennas dBm figure are not the
+                // same quantity and do not convert, so the figure is only comparable
+                // where the model matches; recording it lets a contractor on the other
+                // model be told that instead of being judged against a number that
+                // cannot mean anything there.
+                body.Add("antenna_model", AntennaModel.Current);
+            }
             if (!string.IsNullOrEmpty(modlist))
                 body.Add("modlist", modlist);
 
@@ -1864,7 +1921,14 @@ namespace GeneKerman
             // older call site compiles unchanged: the server treats both as absent and
             // the rescue is created exactly as it was before these existed. Never let
             // a failed render stop a rescue — pass null and send the contract.
-            byte[] blueprintPng = null, string vesselDataJson = null)
+            byte[] blueprintPng = null, string vesselDataJson = null,
+            // Which mods the wreck's parts come from, and which parts each supplies.
+            // The node uploaded below already carries the mod list in its GKMODS block,
+            // but only the rescuer's *spawn* path reads that — by which point they have
+            // accepted. This is the same answer sent where the contract can show it
+            // before they agree to fly. Optional: an older client sends nothing and the
+            // rescue behaves exactly as it did.
+            string wreckModsJson = null)
         {
             if (TransmissionBlocked) { callback(false, null, "Data sharing is off."); yield break; }
             string url = serverUrl + "/api/v1/contracts/create_rescue";
@@ -1921,6 +1985,8 @@ namespace GeneKerman
                 form.Add(new MultipartFormDataSection("ls_endurance_days", lsEnduranceDays.ToString(inv)));
             if (lsCrewCapacity > 0)
                 form.Add(new MultipartFormDataSection("ls_crew_capacity", lsCrewCapacity.ToString(inv)));
+            if (!string.IsNullOrEmpty(wreckModsJson))
+                form.Add(new MultipartFormDataSection("wreck_mods", wreckModsJson));
 
             // The wreck's telemetry, from which the server draws the orbit diagram. Sent
             // as JSON rather than as a rendered picture because the drawing is the

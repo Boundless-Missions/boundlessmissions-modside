@@ -8,6 +8,9 @@ import {
   BridgeError,
   type ContractListResponse,
   type ContractSummary,
+  type RequirementItem,
+  type RequirementState,
+  type RequirementsResponse,
   type SubmissionPreview,
   api,
   imageUrl,
@@ -239,6 +242,7 @@ function Detail({
   const [preview, setPreview] = useState<SubmissionPreview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [zoom, setZoom] = useState<string | null>(null);
+  const requirements = useRequirements(contract);
 
   // Only submitted-or-later contracts have anything to preview, so don't spend a
   // round trip (which goes through KSP's main thread) on the ones that cannot.
@@ -321,6 +325,13 @@ function Detail({
               </div>
             </>
           )}
+
+          {requirements.length > 0 && (
+            <>
+              <Separator />
+              <Requirements items={requirements} />
+            </>
+          )}
         </CardContent>
       </Card>
 
@@ -375,11 +386,124 @@ function Detail({
 
       {contract.status === "completed" && contract.is_outgoing && <InstallCraft contract={contract} />}
 
-      <Actions contract={contract} onActed={onActed} />
+      <Actions contract={contract} onActed={onActed} requirements={requirements} />
 
       {zoom && <Lightbox url={zoom} onClose={() => setZoom(null)} />}
     </div>
   );
+}
+
+/**
+ * Every requirement this contract makes, marked against what is installed in the
+ * running game.
+ *
+ * The check runs in KSP (ContractRequirements.cs) because only KSP knows what is
+ * loaded; this sends the constraints the server already gave us rather than a contract
+ * id, which is the opposite of the open-submit rule and deliberately so — that endpoint
+ * *enforces* the terms, so a caller supplying them could relax its own requirements,
+ * while this one only reports what the install has and has nothing to relax.
+ *
+ * A failure is silence, not an error: this is advice offered beside the contract, and a
+ * red box where a checklist would be is worse than no checklist.
+ */
+function useRequirements(contract: ContractSummary): RequirementItem[] {
+  const [items, setItems] = useState<RequirementItem[]>([]);
+
+  // Keyed on the *content* of both inputs, not the objects: the list is re-fetched on
+  // a poll and hands back fresh objects every time, so an identity dependency would put
+  // a job on KSP's main thread on every refresh to re-answer an unchanged question.
+  //
+  // A rescue is the case that needs the second half. It usually carries no constraints
+  // at all and still has everything to say — its wreck is built from mods this save may
+  // not have — so keying on the constraints alone would skip exactly the contract where
+  // finding out late costs the most.
+  const key = JSON.stringify({
+    c: contract.constraints ?? null,
+    r: contract.rescue_target ?? null,
+  });
+  const hasInputs = Boolean(contract.constraints || contract.rescue_target);
+
+  useEffect(() => {
+    setItems([]);
+    if (!hasInputs) return;
+
+    const { c, r } = JSON.parse(key) as {
+      c: Record<string, unknown> | null;
+      r: Record<string, unknown> | null;
+    };
+
+    let live = true;
+    api
+      .post<RequirementsResponse>("/gk/contract/requirements", {
+        constraints: c,
+        rescue_target: r,
+      })
+      .then((r) => {
+        if (live) setItems(r?.items ?? []);
+      })
+      .catch(() => {
+        if (live) setItems([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [contract.contract_id, key, hasInputs]);
+
+  return items;
+}
+
+const REQUIREMENT_STYLE: Record<RequirementState, { dot: string; text: string; word: string }> = {
+  present: { dot: "bg-emerald-500", text: "text-emerald-400", word: "installed" },
+  locked: { dot: "bg-amber-500", text: "text-amber-400", word: "not unlocked" },
+  missing: { dot: "bg-red-500", text: "text-red-400", word: "missing" },
+  unknown: { dot: "bg-muted-foreground", text: "text-muted-foreground", word: "unknown" },
+};
+
+/**
+ * The requirement checklist. A coloured dot AND the word, never colour alone — the
+ * sidebar's version says the same thing for the same reason (UI/Gui/Panels/
+ * ContractsPanel.cs), and a row whose only signal is green-vs-red is unreadable to a
+ * player who cannot separate them.
+ */
+function Requirements({ items }: { items: RequirementItem[] }) {
+  return (
+    <div>
+      <Label>In your install</Label>
+      <ul className="mt-2 space-y-2">
+        {items.map((r, i) => {
+          const style = REQUIREMENT_STYLE[r.state] ?? REQUIREMENT_STYLE.unknown;
+          return (
+            <li key={`${r.kind}:${r.label}:${i}`} className="text-sm">
+              <div className="flex items-center gap-2">
+                <span className={cn("size-2 shrink-0 rounded-full", style.dot)} />
+                <span className="min-w-0 flex-1 truncate">{r.label}</span>
+                <Badge variant="outline" className={cn("shrink-0", style.text)}>
+                  {style.word}
+                </Badge>
+              </div>
+              {r.detail && (
+                <p className="ml-4 mt-0.5 text-xs text-muted-foreground">{r.detail}</p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * One sentence naming what this install cannot supply, or null. Word for word the
+ * sidebar's (ContractRequirements.Summary): "cannot supply" rather than "does not
+ * have", because a blocking row is either missing or locked and the two have different
+ * fixes — which the checklist above already says, row by row.
+ */
+function requirementSummary(items: RequirementItem[]): string | null {
+  const bad = items.filter((r) => r.blocking).map((r) => r.label);
+  if (bad.length === 0) return null;
+  const list =
+    bad.length > 4 ? `${bad.slice(0, 4).join(", ")} and ${bad.length - 4} more` : bad.join(", ");
+  return `This contract requires ${list}, which this install cannot supply.`;
 }
 
 /**
@@ -391,13 +515,16 @@ function Detail({
 function Actions({
   contract: c,
   onActed,
+  requirements,
 }: {
   contract: ContractSummary;
   onActed: () => void;
+  requirements: RequirementItem[];
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [acceptWarned, setAcceptWarned] = useState(false);
   const [newDate, setNewDate] = useState("");
   const [pickingDate, setPickingDate] = useState(false);
   const [handedOff, setHandedOff] = useState<string | null>(null);
@@ -490,6 +617,42 @@ function Actions({
     }
   }
 
+  /**
+   * Accept, and — when this install cannot supply everything the contract asks for —
+   * ask KSP to write a CKAN modpack for what can be named.
+   *
+   * Its own function rather than `act("accept", …)` because of what follows the accept.
+   * The modpack is written on the way *out* of a successful accept: a contract the
+   * server refuses leaves no job to install mods for. And its failure is swallowed —
+   * the contract is accepted either way, the game reports the outcome as a
+   * notification, and a modpack error surfacing here would read as a failed accept.
+   */
+  async function acceptContract(writeModpack: boolean) {
+    setBusy("accept");
+    setError(null);
+    try {
+      const r = await api.post<{ success?: boolean; message?: string }>(
+        `/api/v1/contracts/${id}/accept`
+      );
+      if (r && r.success === false) {
+        setError(r.message || "The server refused that action.");
+        setBusy(null);
+        return;
+      }
+      if (writeModpack) {
+        try {
+          await runJob("/gk/actions/contract-ckan", { contract_id: c.contract_id });
+        } catch {
+          /* reported in game; the contract is accepted regardless */
+        }
+      }
+      onActed();
+    } catch (e) {
+      setError(e instanceof BridgeError ? e.message : "That action failed.");
+      setBusy(null);
+    }
+  }
+
   /** Two-click confirm for anything that costs money or forfeits work. */
   function danger(key: string, label: string, confirmLabel: string, run: () => void) {
     const armed = confirming === key;
@@ -512,17 +675,32 @@ function Actions({
   let extra: React.ReactNode = null;
 
   if (c.status === "pending") {
+    const shortfall = requirementSummary(requirements);
     buttons = c.is_outgoing ? (
       danger("cancel", "Withdraw offer", "Confirm withdraw", () => act("cancel", "cancel"))
     ) : (
       <>
-        <Button size="sm" disabled={busy !== null} onClick={() => act("accept", "accept")}>
+        <Button
+          size="sm"
+          disabled={busy !== null}
+          onClick={() =>
+            shortfall && !acceptWarned ? setAcceptWarned(true) : acceptContract(shortfall !== null)
+          }
+        >
           {busy === "accept" && <Loader2 className="size-4 animate-spin" />}
-          Accept contract
+          {shortfall && !acceptWarned ? "Accept anyway" : "Accept contract"}
         </Button>
         {danger("decline", "Decline", "Confirm decline", () => act("decline", "cancel"))}
       </>
     );
+    // The consequence, above the button that carries it — the same two-press shape the
+    // sidebar uses for a rescue aimed at a body whose planet pack is missing.
+    if (shortfall && !acceptWarned)
+      extra = (
+        <p className="text-xs text-amber-400">
+          {shortfall} Accepting anyway writes a CKAN installer for what can be named.
+        </p>
+      );
   } else if (c.status === "active" && !c.is_outgoing) {
     buttons = (
       <>

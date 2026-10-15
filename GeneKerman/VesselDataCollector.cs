@@ -4,6 +4,8 @@
  * Collects data from:
  *   - FlightGlobals.ActiveVessel (current vessel in flight)
  *   - FlightGlobals.VesselsLoaded (all vessels in physics range)
+ *   - FlightGlobals.Vessels (EVERY vessel in the save, loaded or not — the whole-SOI
+ *     scan a constellation mission is judged on; see CaptureBodyFleet)
  *   - .craft files from Ships/ or save Ships/ directories
  *   - .loadmeta files alongside craft files
  */
@@ -37,6 +39,25 @@ namespace GeneKerman
             public double period;       // orbital period (s)
             public double bodyRadius;   // main body equatorial radius (m)
             public double rotationPeriod; // main body sidereal rotation period (s)
+            // Orientation of the orbit in its plane, degrees. Only a constellation
+            // check reads these — they answer "where around the body is this one",
+            // which apoapsis and inclination cannot. LAN + argPe + meanAnomaly is the
+            // phase angle you would draw on the map view, and unlike true anomaly it
+            // advances uniformly, so members captured at one instant compare directly.
+            // Summing is left to the two verifiers so they cannot derive it apart.
+            public double lan;          // longitude of the ascending node (deg)
+            public double argPe;        // argument of periapsis (deg)
+            public double meanAnomaly;  // mean anomaly at this instant (deg)
+            // Whether this craft can relay for others. Read from the part prefab
+            // rather than from a live PartModule, because a constellation is mostly
+            // unloaded and an unloaded part has no modules instantiated.
+            public bool hasRelay;
+            /// <summary>Strongest relay antenna's power, 0 when the craft cannot relay.
+            /// Lets a contract ask for relays of a given strength without naming a part.</summary>
+            public double relayPower;
+            // The save's own id for this vessel. Sent so the server can see the same
+            // craft submitted twice under two names — one satellite cannot be three.
+            public string vesselId = "";
             // Craft metadata
             public int partCount;
             public float totalMass;
@@ -72,6 +93,12 @@ namespace GeneKerman
                     { "total_cost", (double)totalCost },
                     { "crew_count", crewCount },
                     { "crew_traits", CrewTraitsForJson() },
+                    { "lan", lan },
+                    { "arg_pe", argPe },
+                    { "mean_anomaly", meanAnomaly },
+                    { "has_relay", hasRelay },
+                    { "relay_power", relayPower },
+                    { "vessel_id", vesselId },
                 };
             }
 
@@ -131,7 +158,11 @@ namespace GeneKerman
                 snap.apoapsis = vessel.orbit.ApA;   // altitude above surface
                 snap.periapsis = vessel.orbit.PeA;  // altitude above surface
                 snap.period = vessel.orbit.period;
+                FillOrbitAngles(snap, vessel.orbit);
             }
+            snap.vesselId = vessel.id.ToString();
+            snap.relayPower = BestRelayPower(vessel);
+            snap.hasRelay = snap.relayPower > 0.0;
             if (vessel.mainBody != null)
             {
                 snap.bodyRadius = vessel.mainBody.Radius;
@@ -228,6 +259,271 @@ namespace GeneKerman
                    vessel.vesselType != VesselType.SpaceObject &&
                    vessel.vesselType != VesselType.Unknown &&
                    vessel.vesselType != VesselType.Flag;
+        }
+
+        // ── Whole-SOI scan (constellation missions) ─────────────────────────
+
+        /// <summary>
+        /// Every vessel in <paramref name="body"/>'s sphere of influence that counts
+        /// toward the network <paramref name="want"/> describes, loaded or not.
+        ///
+        /// Physics range is not the bound here, and that is the whole point. KSP only
+        /// *loads* craft within ~2.5 km, so a relay network spread around the Mun is
+        /// almost entirely unloaded — but <c>FlightGlobals.Vessels</c> lists every
+        /// vessel in the save regardless, unloaded orbits are kept live on rails, and
+        /// part lists survive as <c>protoPartSnapshots</c>. So a whole SOI can be read
+        /// without loading anything, without touching PhysicsRangeManager, and without
+        /// the frame cost that loading would bring: this walks an array that is already
+        /// in memory.
+        ///
+        /// Filtered here rather than server-side-only so the player sees the count they
+        /// will actually be graded on while they are still flying. The server re-runs
+        /// the identical test on what arrives (fleet_constraints.is_member) — this is a
+        /// pre-check, not the authority.
+        /// </summary>
+        public static List<VesselSnapshot> CaptureBodyFleet(CelestialBody body, FleetConstraint want)
+        {
+            var members = new List<VesselSnapshot>();
+            if (body == null || FlightGlobals.Vessels == null) return members;
+
+            foreach (var v in FlightGlobals.Vessels)
+            {
+                if (v == null || v.mainBody != body) continue;
+                if (!IsTransferable(v)) continue;      // debris, flags, asteroids
+                if (v.vesselType == VesselType.EVA) continue;
+
+                VesselSnapshot snap;
+                try { snap = v.loaded ? CaptureVessel(v) : CaptureUnloadedVessel(v); }
+                catch (Exception ex)
+                {
+                    // One unreadable vessel must not cost the player the whole scan;
+                    // a save can hold a wreck no part of this code can make sense of.
+                    Debug.LogWarning($"[GeneKerman] Fleet scan skipped '{v.vesselName}': {ex.Message}");
+                    continue;
+                }
+
+                if (want != null && !want.IsMember(snap)) continue;
+                members.Add(snap);
+                if (members.Count >= FleetConstraint.MaxMembers) break;
+            }
+
+            return members;
+        }
+
+        /// <summary>
+        /// A snapshot of a vessel that is not loaded — read from its ProtoVessel.
+        ///
+        /// Everything a constellation is judged on survives unloading: the orbit is on
+        /// rails and still exact, the part list is <c>protoPartSnapshots</c>, and the
+        /// crew are on the proto. What does NOT survive is anything that needs live
+        /// <c>Part</c> objects — <see cref="GetVesselCost"/> walks IPartCostModifiers
+        /// and TweakScale, none of which exist here — so cost is left at zero rather
+        /// than guessed from prefab prices. Nothing in a network check reads it.
+        /// </summary>
+        public static VesselSnapshot CaptureUnloadedVessel(Vessel vessel)
+        {
+            var pv = vessel.protoVessel;
+            var snap = new VesselSnapshot
+            {
+                vesselName = vessel.vesselName,
+                vesselType = vessel.vesselType.ToString(),
+                situation = vessel.situation.ToString(),
+                body = vessel.mainBody?.bodyName ?? "Unknown",
+                latitude = vessel.latitude,
+                longitude = vessel.longitude,
+                altitude = vessel.altitude,
+                vesselId = vessel.id.ToString(),
+            };
+
+            if (pv != null)
+            {
+                var parts = pv.protoPartSnapshots;
+                snap.partCount = parts?.Count ?? 0;
+
+                float mass = 0f;
+                if (parts != null)
+                    foreach (var pps in parts)
+                    {
+                        if (pps == null) continue;
+                        try { mass += pps.mass + pps.moduleMass; } catch { /* older proto */ }
+                    }
+                snap.totalMass = mass;
+
+                try
+                {
+                    var crew = pv.GetVesselCrew();
+                    snap.crewCount = crew?.Count ?? 0;
+                    snap.crewTraits = ContractConstraints.CountCrewTraits(crew);
+                }
+                catch { /* a proto whose crew can't be resolved counts as uncrewed */ }
+            }
+
+            if (vessel.orbit != null)
+            {
+                snap.sma = vessel.orbit.semiMajorAxis;
+                snap.eccentricity = vessel.orbit.eccentricity;
+                snap.inclination = vessel.orbit.inclination;
+                snap.apoapsis = vessel.orbit.ApA;
+                snap.periapsis = vessel.orbit.PeA;
+                snap.period = vessel.orbit.period;
+                FillOrbitAngles(snap, vessel.orbit);
+            }
+            if (vessel.mainBody != null)
+            {
+                snap.bodyRadius = vessel.mainBody.Radius;
+                snap.rotationPeriod = vessel.mainBody.rotationPeriod;
+            }
+
+            snap.relayPower = BestRelayPower(vessel);
+            snap.hasRelay = snap.relayPower > 0.0;
+            return snap;
+        }
+
+        /// <summary>
+        /// The three angles that say where around the body a craft is, in degrees.
+        ///
+        /// Mean anomaly is PROPAGATED to the current instant from the orbit's own epoch
+        /// rather than read off <c>orbit.meanAnomaly</c>, because that field holds
+        /// whatever it was when the orbit was last stepped — and an unloaded vessel is
+        /// not stepped every frame. Comparing one member's fresh phase against another's
+        /// stale one is exactly how a real, evenly spread network would read as bunched,
+        /// which is the failure this method exists to avoid.
+        ///
+        /// M(t) = M0 + n·(t - epoch), n = 2π/T. Exact for the closed orbits a network
+        /// member is required to be on, and it needs only fields KSP keeps on the orbit
+        /// itself. Planetarium's clock is the right one to ask here: we are in the
+        /// flight scene at submit time, not in an OnLoad where it lags behind the save.
+        /// </summary>
+        private static void FillOrbitAngles(VesselSnapshot snap, Orbit orbit)
+        {
+            const double Rad2Deg = 180.0 / Math.PI;
+            snap.lan = orbit.LAN;
+            snap.argPe = orbit.argumentOfPeriapsis;
+
+            double ma = orbit.meanAnomaly;
+            try
+            {
+                if (orbit.period > 0)
+                {
+                    double n = 2.0 * Math.PI / orbit.period;
+                    ma = orbit.meanAnomalyAtEpoch
+                         + n * (Planetarium.GetUniversalTime() - orbit.epoch);
+                }
+            }
+            catch { /* fall back to whatever the orbit last cached */ }
+
+            if (double.IsNaN(ma) || double.IsInfinity(ma)) ma = 0.0;
+            // KSP keeps mean anomaly in radians while LAN and argPe are degrees.
+            snap.meanAnomaly = ((ma * Rad2Deg) % 360.0 + 360.0) % 360.0;
+        }
+
+        /// <summary>
+        /// Whether a craft can relay for others — a <c>ModuleDataTransmitter</c> whose
+        /// antennaType is RELAY.
+        ///
+        /// Read from the part PREFAB, not from a live module, because a network is
+        /// mostly unloaded and an unloaded part has no modules instantiated at all.
+        /// antennaType is a config value, identical on prefab and instance, so the
+        /// prefab is not an approximation here — it is the same number, available for
+        /// craft the loaded path could never see.
+        ///
+        /// Returns false rather than throwing on anything unrecognisable: a part this
+        /// install cannot resolve is one whose antenna we cannot vouch for, and a
+        /// network check that fails closed refuses a submission, which is the right
+        /// direction for a check the player can fix by looking at their own craft.
+        /// </summary>
+        public static bool HasRelayAntenna(Vessel vessel)
+        {
+            double ignored;
+            return WalkRelayAntennas(vessel, out ignored);
+        }
+
+        /// <summary>The power of this craft's strongest relay antenna, or 0 when it has
+        /// none. Reported alongside the boolean so a contract can ask for relays of a
+        /// given strength ("four relays, each at least an RA-2") without naming a part.
+        ///
+        /// A number rather than a part name on purpose, and for the reason the rest of
+        /// this check is geometric: a name is answerable only by the one mod that ships
+        /// it, while antenna power is a figure every install has for every antenna,
+        /// including the ones RealAntennas rewrites. The issuer picks a part they own,
+        /// the form sends what it is worth, and the contractor satisfies it with
+        /// whatever their own install can field.
+        ///
+        /// The strongest single antenna, not the combined total: KSP's own combining
+        /// rule is a config-weighted average that mods change, and "each with an RA-2"
+        /// is a statement about one antenna, not about a stack of them.
+        ///
+        /// Shares the walk with <see cref="HasRelayAntenna"/> rather than repeating it,
+        /// so the two can never disagree about what counts as a relay.</summary>
+        public static double BestRelayPower(Vessel vessel)
+        {
+            // -1, not 0: "this install cannot express antenna strength" is a different
+            // statement from "this craft has no relay antenna", and a strength floor
+            // must skip the first while still failing the second. RealAntennas deletes
+            // antennaPower from every part, so there is no number here to compare and
+            // pretending there is a 0 would disqualify every satellite on an RO install.
+            if (!AntennaModel.ExpressesPower) return -1.0;
+            double best;
+            return WalkRelayAntennas(vessel, out best) ? best : 0.0;
+        }
+
+        /// <summary>One walk over a craft's relay antennas: whether it has any, and the
+        /// strongest one's power. Shared so the flag and the number can never disagree
+        /// about what counts as a relay.</summary>
+        private static bool WalkRelayAntennas(Vessel vessel, out double best)
+        {
+            best = 0.0;
+            if (vessel == null) return false;
+            bool found = false;
+            try
+            {
+                if (vessel.loaded && vessel.parts != null)
+                {
+                    foreach (var part in vessel.parts)
+                    {
+                        if (part?.Modules == null) continue;
+                        // Every module rather than the first transmitter found: which
+                        // module answers depends on the antenna mod, and on RealAntennas
+                        // the one that counts is not a stock transmitter at all.
+                        foreach (PartModule pm in part.Modules)
+                        {
+                            if (!AntennaModel.CountsAsRelay(pm)) continue;
+                            found = true;
+                            var mdt = pm as ModuleDataTransmitter;
+                            if (mdt != null && mdt.antennaPower > best) best = mdt.antennaPower;
+                        }
+                    }
+                    return found;
+                }
+
+                var parts = vessel.protoVessel?.protoPartSnapshots;
+                if (parts == null) return false;
+                foreach (var pps in parts)
+                {
+                    if (pps == null) continue;
+                    var info = pps.partInfo ?? PartLoader.getPartInfoByName(pps.partName);
+                    // Save files write '.' in a part name as '_'; partName is normally
+                    // already clean, but a hand-edited or third-party save need not be.
+                    if (info == null && !string.IsNullOrEmpty(pps.partName))
+                        info = PartLoader.getPartInfoByName(pps.partName.Replace('_', '.'));
+                    var prefab = info?.partPrefab;
+                    if (prefab?.Modules == null) continue;
+                    foreach (PartModule pm in prefab.Modules)
+                    {
+                        if (!AntennaModel.CountsAsRelay(pm)) continue;
+                        found = true;
+                        var mdt = pm as ModuleDataTransmitter;
+                        if (mdt != null && mdt.antennaPower > best) best = mdt.antennaPower;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[GeneKerman] Relay check failed for '{vessel.vesselName}': {ex.Message}");
+                best = 0.0;
+                return false;
+            }
+            return found;
         }
 
         // ── Craft File Reading ──────────────────────────────────────────────

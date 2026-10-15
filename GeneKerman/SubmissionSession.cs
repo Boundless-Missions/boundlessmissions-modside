@@ -13,6 +13,11 @@
  *   - "craft_build": Must submit from VAB/SPH. Sends: craft file + render/screenshot.
  *   - "active_vessel": Must submit from Flight. Sends: craft + loadmeta + telemetry
  *     + screenshot, and the vessel's situation and body must match.
+ *   - "constellation": active_vessel, plus a scan of every vessel in the target
+ *     body's sphere of influence — counted and measured against the network the
+ *     mission text describes. The scan is NOT bounded by physics range (see
+ *     VesselDataCollector.CaptureBodyFleet); nothing is loaded and nothing is
+ *     transferred, so unlike the extras list below it is evidence only.
  *   - "rescue": active_vessel, plus the stranded crew (and sometimes the wreck).
  *     Extras in range are handed over like any other submission's, provided this save
  *     can tell the stranded wreck apart from the craft the rescuer brought (see
@@ -68,6 +73,57 @@ namespace GeneKerman
         public string RequiredSituation { get; private set; } = "";
         public string RequiredBody { get; private set; } = "";
         public bool IsRescue => MissionType == "rescue";
+        public bool IsConstellation => MissionType == "constellation";
+
+        /// <summary>Issued by Boundless Missions rather than by a player.</summary>
+        public bool IsBotIssued { get; private set; }
+
+        /// <summary>Whether this submission hands the network over, rather than only
+        /// being counted.
+        ///
+        /// A bot-issued network is verified and left alone: there is no issuer save for
+        /// satellites to arrive in, and taking a player's working relay constellation as
+        /// payment for a weekly mission would be a strange thing to do to them. A
+        /// player-issued one is a purchase — the buyer gets the network they paid for,
+        /// which is the same thing every other contract type means by a hand-over.</summary>
+        public bool HandoverApplies => IsConstellation && !IsBotIssued;
+
+        // Which members the player has chosen to hand over, by `vesselId`. Empty until
+        // they tick something: the set that leaves a save is never a default.
+        private readonly HashSet<string> selectedMembers = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>Problems with the SELECTED set, not the whole scan. Empty when no
+        /// hand-over applies.</summary>
+        public List<string> HandoverProblems { get; private set; } = new List<string>();
+
+        public bool IsMemberSelected(string vesselId)
+            => !string.IsNullOrEmpty(vesselId) && selectedMembers.Contains(vesselId);
+
+        public int SelectedMemberCount => selectedMembers.Count;
+
+        /// <summary>Tick or untick one member, then re-check what that set is worth.</summary>
+        public void ToggleMember(string vesselId)
+        {
+            if (string.IsNullOrEmpty(vesselId)) return;
+            if (!selectedMembers.Remove(vesselId)) selectedMembers.Add(vesselId);
+            Revalidate();
+        }
+
+        /// <summary>Every vessel in the target body's SOI that counts toward the
+        /// network, rescanned on each validation. Empty for every other mission
+        /// type. Evidence only — nothing here is handed over.</summary>
+        public List<VesselDataCollector.VesselSnapshot> FleetMembers { get; private set; }
+            = new List<VesselDataCollector.VesselSnapshot>();
+
+        /// <summary>Why the scanned network doesn't satisfy the contract yet, as
+        /// player-facing sentences. Empty when it does (or when there is no network
+        /// requirement).</summary>
+        public List<string> FleetProblems { get; private set; } = new List<string>();
+
+        /// <summary>The contract's network requirement, or null when it sets none.</summary>
+        public FleetConstraint FleetLimits =>
+            (partLimits != null && partLimits.Fleet != null && !partLimits.Fleet.IsEmpty)
+                ? partLimits.Fleet : null;
 
         private RescueTargetSpec rescueTarget;
         private List<string> rescueKerbals;
@@ -162,9 +218,11 @@ namespace GeneKerman
         public void Open(string contractId, string mission,
             string type = "active_vessel", string situation = "", string body = "", string modlist = "",
             RescueTargetSpec rescueTargetSpec = null, List<string> rescueKerbalNames = null,
-            ContractConstraints constraints = null)
+            ContractConstraints constraints = null, bool botIssued = false)
         {
             ContractId = contractId;
+            IsBotIssued = botIssued;
+            selectedMembers.Clear();
             ContractMission = mission;
             MissionType = type ?? "active_vessel";
             RequiredSituation = situation ?? "";
@@ -265,6 +323,32 @@ namespace GeneKerman
                     ValidationMsg = "This is a craft build mission.\nGo to the VAB or SPH to submit.";
                 }
             }
+            else if (IsConstellation)
+            {
+                // A network is judged on the SOI scan, and that scan reads
+                // `FlightGlobals.Vessels` — every vessel in the save, loaded or not,
+                // with unloaded orbits kept on rails. So it is fully describable from
+                // any scene that has a universe, and there is no reason to make the
+                // player fly out to one satellite to press a button on the other N-1.
+                // The server agrees: `_bot_mission_evidence_problem` judges a
+                // constellation on the fleet and asks for no active vessel.
+                if (HighLogic.LoadedSceneIsFlight)
+                {
+                    SceneValid = true;
+                    GeneKermanMod.Instance.RunCoroutine(PreparePhysicsThenCapture());
+                }
+                else if (HighLogic.LoadedScene == GameScenes.TRACKSTATION
+                         || HighLogic.LoadedScene == GameScenes.SPACECENTER)
+                {
+                    SceneValid = true;
+                    ValidateNetworkOnly();
+                }
+                else
+                {
+                    ValidationMsg = "This is a satellite-network mission.\nSubmit from "
+                                  + "the Tracking Station, the Space Centre, or flight.";
+                }
+            }
             else // active_vessel / rescue
             {
                 if (HighLogic.LoadedSceneIsFlight)
@@ -276,7 +360,9 @@ namespace GeneKerman
                 }
                 else
                 {
-                    ValidationMsg = "This is an active vessel mission.\nLaunch your craft and fly to the target to submit.";
+                    ValidationMsg = IsConstellation
+                        ? "This is a satellite-network mission.\nFly to the target body, your whole network there is checked, not just this craft."
+                        : "This is an active vessel mission.\nLaunch your craft and fly to the target to submit.";
                 }
             }
 
@@ -286,6 +372,119 @@ namespace GeneKerman
         private void Touch() => Changed?.Invoke();
 
         // ── Validation ──────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Rescan the target body's sphere of influence and re-check the contract's
+        /// network requirement against it. A no-op for every mission type that has
+        /// none, so it is safe to call from the shared validation path.
+        ///
+        /// The body scanned is the contract's <see cref="RequiredBody"/>, not whatever
+        /// the player is orbiting: the mission names where the network has to be, and
+        /// the server counts against that same name. Falling back to the active
+        /// vessel's body when the contract names none keeps a user-issued network
+        /// contract (which may name no body at all) checkable rather than unsubmittable.
+        /// </summary>
+        private void CaptureConstellation()
+        {
+            FleetMembers = new List<VesselDataCollector.VesselSnapshot>();
+            FleetProblems = new List<string>();
+
+            if (!IsConstellation) return;
+            // A constellation mission scans even when the contract carries no fleet
+            // requirement — an empty constraint is a pure "is this orbiting" filter,
+            // and the scan still has to be sent. Otherwise a server that classified
+            // the mission but failed to attach the requirement would leave the client
+            // sending no network at all, and the evidence gate would blame the mod.
+            var want = FleetLimits ?? new FleetConstraint();
+
+            CelestialBody body = null;
+            if (!string.IsNullOrEmpty(RequiredBody))
+            {
+                foreach (var b in FlightGlobals.Bodies)
+                    if (b != null && string.Equals(b.bodyName, RequiredBody,
+                                                   StringComparison.OrdinalIgnoreCase))
+                    { body = b; break; }
+            }
+            if (body == null) body = FlightGlobals.ActiveVessel?.mainBody;
+            if (body == null) return;
+
+            FleetMembers = VesselDataCollector.CaptureBodyFleet(body, want);
+            FleetProblems = want.Check(FleetMembers, body.bodyName);
+
+            // Drop ticks for members the scan no longer finds. A satellite can be
+            // decoupled, deorbited or renamed between one rescan and the next, and a
+            // stale id would otherwise sit in the set claiming to be part of a
+            // hand-over that cannot include it.
+            if (selectedMembers.Count > 0)
+            {
+                var present = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var m in FleetMembers)
+                    if (!string.IsNullOrEmpty(m.vesselId)) present.Add(m.vesselId);
+                selectedMembers.RemoveWhere(id => !present.Contains(id));
+            }
+
+            // The selected set is judged on its own terms, not as a subset of a set that
+            // already passed. That is the whole point: a network of four bunched
+            // satellites can satisfy "2 at 90 degrees" while the two the player picked
+            // out of it sit 30 degrees apart, and handing those over would deliver
+            // something the contract never asked for.
+            HandoverProblems = new List<string>();
+            if (HandoverApplies)
+            {
+                var chosen = SelectedMembers();
+                HandoverProblems = chosen.Count == 0
+                    ? new List<string> { "Pick the satellites to hand over." }
+                    : want.Check(chosen, body.bodyName);
+            }
+        }
+
+        /// <summary>The live vessels behind the ticked members, in scan order.
+        ///
+        /// Resolved by `vesselId` against `FlightGlobals.Vessels`, which lists every
+        /// vessel in the save whether or not it is loaded — the same property the whole
+        /// scan rests on. A member the save no longer has is skipped rather than
+        /// substituted; the export's own out-parameter is what ends up recorded as handed
+        /// over, so a gap here can only ever under-claim.</summary>
+        private List<Vessel> SelectedMemberVessels()
+        {
+            var outList = new List<Vessel>();
+            if (FlightGlobals.Vessels == null) return outList;
+            foreach (var m in SelectedMembers())
+            {
+                if (m == null || string.IsNullOrEmpty(m.vesselId)) continue;
+                foreach (var v in FlightGlobals.Vessels)
+                {
+                    if (v == null) continue;
+                    if (v.id.ToString() == m.vesselId) { outList.Add(v); break; }
+                }
+            }
+            return outList;
+        }
+
+        /// <summary>The scanned members the player has ticked, in scan order.</summary>
+        public List<VesselDataCollector.VesselSnapshot> SelectedMembers()
+        {
+            var outList = new List<VesselDataCollector.VesselSnapshot>();
+            foreach (var m in FleetMembers)
+                if (m != null && IsMemberSelected(m.vesselId)) outList.Add(m);
+            return outList;
+        }
+
+        /// <summary>Validate a constellation from a scene with no active vessel.
+        ///
+        /// The fleet is the whole subject here, so `FleetProblems` is the whole answer:
+        /// there is no craft to compare a body or a situation against, and there should
+        /// not be — `CaptureConstellation` scans the contract's own RequiredBody, and a
+        /// qualifying member is orbiting by definition of qualifying.</summary>
+        private void ValidateNetworkOnly()
+        {
+            ActiveVessel = null;
+            CaptureConstellation();
+            VesselValid = FleetProblems.Count == 0;
+            ValidationMsg = VesselValid
+                ? ""
+                : string.Join("\n", FleetProblems.ToArray());
+        }
 
         private void ValidateVesselState()
         {
@@ -298,6 +497,19 @@ namespace GeneKerman
 
             VesselValid = true;
             var issues = new List<string>();
+
+            // The SOI scan lives here rather than beside BuildNearbyEntries because it
+            // is not a capture of the scene the player is in — it reads the whole save,
+            // costs no frames, and has to be fresh every time the button is re-derived
+            // (a satellite launched a minute ago must count without reopening the
+            // window). Every caller of this method has just re-read the active vessel,
+            // so this is the one point where "what the button knows" is rebuilt.
+            CaptureConstellation();
+            foreach (var v in FleetProblems)
+            {
+                VesselValid = false;
+                issues.Add(v);
+            }
 
             // Check body requirement
             if (!string.IsNullOrEmpty(RequiredBody))
@@ -517,7 +729,7 @@ namespace GeneKerman
             double dv = CraftDeltaV.TotalVacuum();
             if (dv < 0)
             {
-                issues.Add($"Δv unreadable. This rescue needs ≥{rescueTarget.minDv:F0} m/s left. " +
+                issues.Add($"Δv unreadable. This rescue needs at least {rescueTarget.minDv:F0} m/s left. " +
                            "Turn on the stock Δv readout to check it here; the server checks it either way.");
                 return;
             }
@@ -527,7 +739,7 @@ namespace GeneKerman
             if (dv >= rescueTarget.minDv * 0.995) return;
 
             VesselValid = false;
-            issues.Add($"Not enough Δv left: {dv:F0} m/s, need ≥{rescueTarget.minDv:F0} m/s " +
+            issues.Add($"Not enough Δv left: {dv:F0} m/s, need at least {rescueTarget.minDv:F0} m/s " +
                        "so the crew can get home from here.");
         }
 
@@ -1017,6 +1229,15 @@ namespace GeneKerman
                 return !string.IsNullOrEmpty(EditorCraftPath) && VesselValid;
 
             // active_vessel: need vessel data AND matching state
+            // A network submitted from the Tracking Station or the Space Centre has no
+            // active vessel by design: the satellites are the submission. `VesselValid`
+            // there is the fleet verdict from ValidateNetworkOnly, so it is the whole
+            // gate. In flight it still carries the fleet verdict too (ValidateVesselState
+            // folds FleetProblems in), so this stays correct in both scenes.
+            // The hand-over is a second requirement, not a restatement of the first: the
+            // network can match the contract while the satellites picked out of it do not.
+            if (HandoverApplies && HandoverProblems.Count > 0) return false;
+            if (IsConstellation) return VesselValid;
             return ActiveVessel != null && VesselValid;
         }
 
@@ -1090,6 +1311,25 @@ namespace GeneKerman
                         {
                             Fail($"\"{e.Vessel.vesselName}\" can't be sent with this submission.\n"
                                  + extraRefusal);
+                            yield break;
+                        }
+                    }
+                }
+
+                // And for every satellite ticked on a network being bought. A relay is a
+                // live vessel leaving this save exactly as a ticked extra is, so it is the
+                // same 2026-08-30 duplicate reached through a third door: a satellite
+                // already handed to one buyer, still waiting on its deferred removal,
+                // must not be sold to a second.
+                if (HandoverApplies)
+                {
+                    foreach (var v in SelectedMemberVessels())
+                    {
+                        string memberRefusal = GeneKermanMod.Instance?.PendingRemovalRefusal(v);
+                        if (memberRefusal != null)
+                        {
+                            Fail($"\"{v.vesselName}\" can't be handed over with this network.\n"
+                                 + memberRefusal);
                             yield break;
                         }
                     }
@@ -1181,8 +1421,13 @@ namespace GeneKerman
                 var submission = new Dictionary<string, object>
                 {
                     { "contract_id", ContractId },
-                    { "active_vessel", ActiveVessel.ToDict() },
                 };
+                // Absent on a network submitted from the Tracking Station: there is no
+                // active vessel, and the server's gate no longer asks for one on a
+                // constellation. Every other mission type still has one by the time it
+                // reaches here, because its scene check demands flight.
+                if (ActiveVessel != null)
+                    submission["active_vessel"] = ActiveVessel.ToDict();
 
                 // Extra crafts the player toggled on. Offered on a rescue too — a
                 // rescuer who towed a stage out or flew a support craft alongside has
@@ -1205,6 +1450,43 @@ namespace GeneKerman
                         sentList.Add(d);
                     }
                     submission["sent_vessels"] = sentList;
+                }
+
+                // On a bought network the satellites ARE the sent vessels, so they go in
+                // the key that already means exactly that. This is the one case where a
+                // constellation member is not "telemetry and nothing else": it is leaving
+                // the save, and the server needs its orbit to check that what is being
+                // handed over meets the requirement on its own — not merely that the
+                // scan it was picked from did.
+                if (HandoverApplies)
+                {
+                    var handedList = new List<object>();
+                    foreach (var m in SelectedMembers())
+                    {
+                        var d = m.ToDict();
+                        d["sent"] = true;
+                        handedList.Add(d);
+                    }
+                    if (handedList.Count > 0) submission["sent_vessels"] = handedList;
+                }
+
+                // The network this mission is judged on. Rescanned at pack time rather
+                // than reused from validation: the two are seconds apart, but those are
+                // seconds in which a satellite can be decoupled, and the payload has to
+                // describe the save as it is when it is sent, not as the button saw it.
+                //
+                // Deliberately its own key rather than more `sent_vessels`. Those two
+                // lists mean opposite things: an entry in sent_vessels is a live craft
+                // LEAVING this save, and every one of them costs a render upload. A
+                // constellation member is telemetry and nothing else — it stays put, it
+                // is never rendered, and it is capped where a network is plausibly
+                // capped rather than where an image budget is.
+                if (IsConstellation)
+                {
+                    CaptureConstellation();
+                    var fleetList = new List<object>();
+                    foreach (var m in FleetMembers) fleetList.Add(m.ToDict());
+                    submission["constellation"] = fleetList;
                 }
 
                 vesselDataJson = MiniJSON.Serialize(submission);
@@ -1296,7 +1578,28 @@ namespace GeneKerman
                 // handed over. A "vessel" recovery therefore needs the wreck to arrive
                 // docked, grabbed or towed as one vessel — ticking it as an extra does
                 // not satisfy it, which is the semantics that check has always had.
-                if (selectedExtras.Count > 0 && ExtrasAreHandedOver)
+                if (HandoverApplies)
+                {
+                    // A bought network is exported as a fleet of the ticked satellites and
+                    // nothing else. Its primary is the first of them rather than the
+                    // active vessel — there may not be one, since this can be submitted
+                    // from the Tracking Station, and the craft the player happens to be
+                    // flying is not part of what was bought either way.
+                    //
+                    // `handedOverPids` is read back out of the export, never rebuilt from
+                    // the ticks: a satellite whose node export failed was not delivered,
+                    // and recording it anyway would delete it here for a hand-over the
+                    // recipient never received.
+                    var chosen = SelectedMemberVessels();
+                    if (chosen.Count > 0)
+                    {
+                        Vessel primary = chosen[0];
+                        var rest = chosen.GetRange(1, chosen.Count - 1);
+                        vesselNodeData = VesselTransfer.ExportFleet(
+                            primary, rest, true, out handedOverPids);
+                    }
+                }
+                else if (selectedExtras.Count > 0 && ExtrasAreHandedOver)
                 {
                     vesselNodeData = VesselTransfer.ExportFleet(
                         FlightGlobals.ActiveVessel, selectedExtras, true, out handedOverPids);
@@ -1313,6 +1616,18 @@ namespace GeneKerman
                 // export that produced nothing hands nothing over, and a craft recorded
                 // as handed over is a craft deleted from this save on approval.
                 if (string.IsNullOrEmpty(vesselNodeData)) handedOverPids = null;
+
+                // On a bought network the export IS the delivery, so an empty one must
+                // refuse rather than submit. Everywhere else an unreadable craft is a
+                // poorer submission the issuer can still judge; here it is a purchase
+                // with nothing in the box, and letting it through would approve a
+                // payment for satellites that never left this save.
+                if (HandoverApplies && string.IsNullOrEmpty(vesselNodeData))
+                {
+                    Fail("The satellites could not be packaged for hand-over. "
+                         + "Nothing was submitted. Check KSP.log and try again.");
+                    yield break;
+                }
             }
 
             // Read every captured render (active + selected extras).
@@ -1377,7 +1692,18 @@ namespace GeneKerman
             // not fail a whole submission — so a list rebuilt from the ticks would name
             // a craft the issuer never receives, and approval would delete it here: a
             // ship destroyed at one end and never created at the other.
-            List<string> submittedPids = IsRescue ? handedOverPids : null;
+            // Recorded for a bought network too, not only a rescue. The record is
+            // `contractId -> pids` and the removal it drives
+            // (GeneKermanMod.MaybeHandleRescueRemoval -> PeekRescueSubmissions) queues
+            // EVERY pid the contract recorded — which is why it, and not the per-vessel
+            // gift echo, is the right mechanism for a handover of several satellites:
+            // that echo carries a single `vessel_pid` and could only ever remove one of
+            // them, leaving the rest behind as copies.
+            //
+            // Nothing is removed at submit. The server sends the removal notice only
+            // after it has queued the network for the issuer, so the satellites leave
+            // this save when the buyer actually has them and not before.
+            List<string> submittedPids = (IsRescue || HandoverApplies) ? handedOverPids : null;
 
             // Carry the craft's custom mission flags so the receiving player sees
             // them instead of a missing decal (the live vessel node embeds its own).
@@ -1417,7 +1743,21 @@ namespace GeneKerman
 
             // Life-support flag of the submitted craft (which LS mod, per-kerbal
             // endurance, crew capacity) — shown on the contract's review embed.
-            LifeSupportInfo ls = LifeSupportScan.Scan(new List<Part>(GetSubmissionParts()));
+            // `GetSubmissionParts()` is null when there is no craft to read: it returns
+            // `FlightGlobals.ActiveVessel?.parts`, and a network submitted from the
+            // Tracking Station or the Space Centre has no active vessel by design. The
+            // other two callers already allow for that — `PartsFingerprint` returns 0 and
+            // `CheckCraft` returns no violations — and this one did not, so
+            // `new List<Part>(null)` threw ArgumentNullException from inside the submit
+            // coroutine. Unity logs the exception and stops the coroutine, which left the
+            // button reading "Submitting…" for ever, sent no request, and put nothing in
+            // the bot's log to explain it.
+            //
+            // An empty list is the right answer rather than a skip: a submission with no
+            // craft genuinely has no life support to report, and the scan says so.
+            var submissionParts = GetSubmissionParts();
+            LifeSupportInfo ls = LifeSupportScan.Scan(
+                submissionParts != null ? new List<Part>(submissionParts) : new List<Part>());
 
             yield return GeneKermanMod.Instance.Api.SubmitContract(
                 ContractId, craftData, craftName, loadmeta, vesselDataJson,

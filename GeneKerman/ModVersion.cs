@@ -19,7 +19,7 @@ namespace GeneKerman
     public static class ModVersion
     {
         /// <summary>Human-readable version label. Bump this when you ship a build.</summary>
-        public const string Current = "1.0.0";
+        public const string Current = "1.1.0";
 
         private static string _hash;
 

@@ -21,7 +21,7 @@ namespace GeneKerman
     public class NotificationSocket
     {
         private readonly ApiClient api;
-        private WebSocket ws;
+        private volatile WebSocket ws;
 
         private readonly ConcurrentQueue<Dictionary<string, object>> incoming =
             new ConcurrentQueue<Dictionary<string, object>>();
@@ -292,7 +292,8 @@ namespace GeneKerman
             {
                 CloseSocket();
 
-                ws = new WebSocket(url);
+                var sock = new WebSocket(url);
+                ws = sock;
                 // TLS validation. websocket-sharp's default callback accepts ANY
                 // certificate, so leaving it unset is the same as trusting a MITM. We
                 // set it explicitly:
@@ -323,19 +324,24 @@ namespace GeneKerman
                     // validation ever ran, which is why the socket never once connected
                     // in production and every client silently lived on HTTP polling.
                     // Reproduced and fixed outside KSP with this same DLL (2026-08-20).
-                    ws.SslConfiguration.EnabledSslProtocols =
+                    sock.SslConfiguration.EnabledSslProtocols =
                         System.Security.Authentication.SslProtocols.Tls12;
 
                     if (IsLocalDevHost(HostOf(url)))
-                        ws.SslConfiguration.ServerCertificateValidationCallback =
+                        sock.SslConfiguration.ServerCertificateValidationCallback =
                             (s, c, ch, e) => true;
                     else
-                        ws.SslConfiguration.ServerCertificateValidationCallback =
+                        sock.SslConfiguration.ServerCertificateValidationCallback =
                             ValidatePublicServerCertificate;
                 }
 
-                ws.OnOpen += (s, e) =>
+                // Every handler first checks it still belongs to the current socket:
+                // CloseSocket() closes off the main thread, so a replaced socket's
+                // events can land after its successor exists, and must not mark that
+                // one connected, closed, or due a retry.
+                sock.OnOpen += (s, e) =>
                 {
+                    if (ws != sock) return;
                     connected = true;
                     connecting = false;
                     justConnected = true;
@@ -347,8 +353,9 @@ namespace GeneKerman
                     retryDelay = 2f;
                     Debug.Log("[GeneKerman] Notification socket connected.");
                 };
-                ws.OnMessage += (s, e) =>
+                sock.OnMessage += (s, e) =>
                 {
+                    if (ws != sock) return;
                     if (!e.IsText || string.IsNullOrEmpty(e.Data)) return;
                     try
                     {
@@ -393,18 +400,19 @@ namespace GeneKerman
                         Debug.LogWarning("[GeneKerman] Bad notification frame: " + ex.Message);
                     }
                 };
-                ws.OnError += (s, e) =>
+                sock.OnError += (s, e) =>
                 {
                     Debug.LogWarning("[GeneKerman] Notification socket error: " + e.Message);
                 };
-                ws.OnClose += (s, e) =>
+                sock.OnClose += (s, e) =>
                 {
+                    if (ws != sock) return;
                     connected = false;
                     connecting = false;
                     pendingRetry = true; // Tick() schedules the backoff on the main thread
                 };
 
-                ws.ConnectAsync();
+                sock.ConnectAsync();
             }
             catch (Exception ex)
             {
@@ -476,9 +484,21 @@ namespace GeneKerman
 
         private void CloseSocket()
         {
-            if (ws == null) return;
-            try { ws.Close(); } catch { /* ignore */ }
+            var sock = ws;
+            if (sock == null) return;
+            // Detached first, so the handlers above see it is no longer ours; then
+            // closed on its own thread. websocket-sharp's Close is synchronous — it
+            // sends the close frame and waits up to its WaitTime for the reply, under
+            // the lock a stalled write holds — and every caller of this is on the main
+            // thread. Nothing here relied on the synchronous OnClose: callers that want
+            // a reconnect schedule it themselves, and Disconnect() wants none.
             ws = null;
+            try
+            {
+                new System.Threading.Thread(() => { try { sock.Close(); } catch { /* ignore */ } })
+                { IsBackground = true, Name = "GeneKerman notification close" }.Start();
+            }
+            catch { /* ignore */ }
             connected = false;
             sendDead = false;
         }

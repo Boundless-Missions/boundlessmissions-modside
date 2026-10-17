@@ -82,7 +82,18 @@ namespace GeneKerman
         /// </summary>
         public const string KeyOrigin = "http://127.0.0.1:5022/api/v1/mp/jwks";
 #else
-        public const string KeyOrigin = "https://boundlessmissions.com/api/v1/mp/jwks";
+        /// <summary>
+        /// Production origin: the **account service** (the bot's API host, the
+        /// same one `ApiClient.OfficialServerUrl` names and game servers fetch
+        /// player-token keys from), which publishes each registered game
+        /// server's RS256 transition key under its `server_id`.
+        ///
+        /// Was `https://boundlessmissions.com/...` through 1.1.0 — the website,
+        /// which has no such route and answers 404, so no sanctioned transition
+        /// ever verified in production and multiplayer bubble forms, dissolves
+        /// and clock relabels were judged as teleports.
+        /// </summary>
+        public const string KeyOrigin = "https://mainserver.boundlessmissions.com/api/v1/mp/jwks";
 #endif
 
         /// <summary>How long a token may live. Seconds, so a captured one cannot be banked.</summary>
